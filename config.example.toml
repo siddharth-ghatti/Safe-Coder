@@ -1,0 +1,33 @@
+# Example configuration file for Safe Coder
+# Copy this to ~/.config/safe-coder/config.toml and fill in your values
+
+[llm]
+# Provider: "anthropic" or "openai"
+provider = "anthropic"
+
+# Your API key (or set via environment variable ANTHROPIC_API_KEY)
+api_key = "your-api-key-here"
+
+# Model to use
+# For Anthropic: "claude-sonnet-4-20250514", "claude-opus-4-20250514", etc.
+# For OpenAI: "gpt-4-turbo-preview", "gpt-4", etc.
+model = "claude-sonnet-4-20250514"
+
+# Maximum tokens per response
+max_tokens = 8192
+
+[vm]
+# Path to Firecracker binary
+firecracker_bin = "/usr/local/bin/firecracker"
+
+# Path to Linux kernel image for VMs
+kernel_image = "/var/lib/safe-coder/vmlinux"
+
+# Path to root filesystem image for VMs
+rootfs_image = "/var/lib/safe-coder/rootfs.ext4"
+
+# Number of vCPUs per VM
+vcpu_count = 2
+
+# Memory size in MiB per VM
+mem_size_mib = 512

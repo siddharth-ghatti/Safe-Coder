@@ -1,0 +1,126 @@
+
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    🔥 Safe Coder | /path/to/test-project                      ║
+╠════════════════════════════════════════════════╦══════════════════════════════╣
+║ 💬 Conversation                                ║ 🔥 VM Status                 ║
+║ ──────────────────────────────────────         ║ 🟢 Status: Running           ║
+║                                                ║ ⏱️  Uptime: 5m 23s           ║
+║ ℹ️  [14:32:01] System: 🔥 Safe Coder          ║ 💾 Memory: 512 MB            ║
+║    initialized                                 ║ ⚙️  vCPUs: 2                 ║
+║    Project: /Users/user/my-project             ║                              ║
+║    Type your request to begin...              ║──────────────────────────────║
+║                                                ║ 🔧 Recent Tools              ║
+║ ℹ️  [14:32:01] System: Demo mode - no VM      ║ ✓ write_file                 ║
+║    required. Type 'exit' to quit.             ║ ✓ bash                       ║
+║                                                ║ ✓ read_file                  ║
+║ 👤 [14:32:15] You: Create a hello.rs file     ║ ✓ edit_file                  ║
+║                                                ║ ⏳ demo_tool                  ║
+║ 🤖 [14:32:16] Assistant: I'll create a        ║                              ║
+║    simple Hello World program in Rust for     ║                              ║
+║    you.                                        ║                              ║
+║                                                ║                              ║
+║ 🔧 [14:32:16] Tool: write_file                ║                              ║
+║                                                ║                              ║
+║ 👤 [14:32:45] You: Now compile and run it     ║                              ║
+║                                                ║                              ║
+║ ⠹ Thinking...                                 ║                              ║
+║                                                ║                              ║
+║                                                ║                              ║
+║                                                ║                              ║
+║                                                ║                              ║
+╠════════════════════════════════════════════════╩══════════════════════════════╣
+║ ❯ What would you like me to do?█                                              ║
+╠═══════════════════════════════════════════════════════════════════════════════╣
+║ ^C Exit │ ↑↓ Scroll │ Tab Switch Panel │ Status: Processing request...       ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
+
+
+COLOR SCHEME (Catppuccin-inspired):
+════════════════════════════════════
+
+🔵 Primary Blue (#8AB4F8)    - Highlights, prompts, active borders
+🟣 Secondary Purple (#B48EAD) - Tools, accents
+🟢 Success Green (#A6E3A1)   - Assistant messages, success indicators
+🔴 Error Red (#F38BA8)       - Errors, warnings
+🟡 Warning Yellow (#F9E2AF)  - System messages, processing
+⚫ Dark Background (#1E1E2E) - Comfortable dark background
+⚪ Text (#CDD6F4)            - Main text color
+⚫ Borders (#585B70)         - Subtle panel borders
+
+
+ANIMATED ELEMENTS:
+═══════════════════
+
+Spinner Animation (10 frames, cycles while thinking):
+⠋ → ⠙ → ⠹ → ⠸ → ⠼ → ⠴ → ⠦ → ⠧ → ⠇ → ⠏ → repeat
+
+Cursor: █ (blinking block)
+
+VM Uptime: Updates every second
+  0-59s:    "23s"
+  1-59m:    "5m 23s"
+  1-23h:    "2h 15m"
+
+
+KEYBOARD SHORTCUTS:
+═══════════════════
+
+NAVIGATION:
+  ↑ / ↓           - Scroll up/down through conversation
+  Page Up/Down    - Fast scroll by full page
+  Tab             - Cycle focus between panels
+
+INPUT:
+  Type            - Enter message
+  Enter           - Send message
+  Backspace       - Delete character
+
+CONTROL:
+  Ctrl+C          - Exit application
+  exit/quit       - Alternative exit
+
+
+PANEL FOCUS INDICATORS:
+═══════════════════════
+
+When a panel is focused (using Tab):
+  Focused:   ╔══ Bright blue border (#8AB4F8)
+  Unfocused: ╔══ Dim gray border (#585B70)
+
+
+MESSAGE TYPES:
+══════════════
+
+👤 User        - Your messages (blue text)
+🤖 Assistant   - AI responses (green text)
+ℹ️  System      - Status updates (yellow text)
+❌ Error       - Error messages (red text)
+🔧 Tool        - Tool executions (purple text)
+
+
+REAL-TIME UPDATES:
+══════════════════
+
+✓ VM uptime counter (every 1 second)
+✓ Spinner animation (every 100ms)
+✓ Message appearance (instant)
+✓ Tool status changes (instant)
+✓ Panel redraws (as needed, efficient)
+
+
+TO SEE THE ACTUAL TUI:
+═══════════════════════
+
+Open your terminal and run:
+
+  cd /Users/siddharthghatti/Desktop/safe-coder
+  ./target/release/safe-coder chat --demo --path test-project
+
+Then you'll see the live, interactive interface with:
+  ✓ Real colors (not just ASCII art)
+  ✓ Animated spinner
+  ✓ Live VM uptime
+  ✓ Interactive typing
+  ✓ Keyboard navigation
+  ✓ Panel focus highlighting
+
