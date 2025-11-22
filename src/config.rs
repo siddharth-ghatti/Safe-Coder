@@ -5,11 +5,19 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub llm: LlmConfig,
-    pub vm: VmConfig,
     #[serde(default)]
-    pub isolation: IsolationConfig,
-    #[serde(default)]
-    pub docker: DockerConfig,
+    pub git: GitConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitConfig {
+    /// Enable automatic git commits after tool execution
+    #[serde(default = "default_true")]
+    pub auto_commit: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,43 +39,6 @@ pub enum LlmProvider {
     Ollama,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VmConfig {
-    pub firecracker_bin: PathBuf,
-    pub kernel_image: PathBuf,
-    pub rootfs_image: PathBuf,
-    pub vcpu_count: u8,
-    pub mem_size_mib: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IsolationConfig {
-    /// Backend to use: "auto", "firecracker", or "docker"
-    /// - auto: Firecracker on Linux, Docker on other platforms (default)
-    /// - firecracker: Force Firecracker (requires Linux)
-    /// - docker: Force Docker (works on all platforms)
-    pub backend: IsolationBackend,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum IsolationBackend {
-    Auto,
-    Firecracker,
-    Docker,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DockerConfig {
-    /// Docker image to use for isolation
-    pub image: String,
-    /// CPU limit (number of CPUs)
-    pub cpus: f32,
-    /// Memory limit in MB
-    pub memory_mb: usize,
-    /// Whether to pull the image if not present
-    pub auto_pull: bool,
-}
 
 impl Config {
     pub fn load() -> Result<Self> {
@@ -113,34 +84,15 @@ impl Default for Config {
                 max_tokens: 8192,
                 base_url: None,
             },
-            vm: VmConfig {
-                firecracker_bin: PathBuf::from("/usr/local/bin/firecracker"),
-                kernel_image: PathBuf::from("/var/lib/safe-coder/vmlinux"),
-                rootfs_image: PathBuf::from("/var/lib/safe-coder/rootfs.ext4"),
-                vcpu_count: 2,
-                mem_size_mib: 512,
-            },
-            isolation: IsolationConfig::default(),
-            docker: DockerConfig::default(),
+            git: GitConfig::default(),
         }
     }
 }
 
-impl Default for IsolationConfig {
+impl Default for GitConfig {
     fn default() -> Self {
         Self {
-            backend: IsolationBackend::Auto,
-        }
-    }
-}
-
-impl Default for DockerConfig {
-    fn default() -> Self {
-        Self {
-            image: "ubuntu:22.04".to_string(),
-            cpus: 2.0,
-            memory_mb: 512,
-            auto_pull: true,
+            auto_commit: true, // Enabled by default
         }
     }
 }

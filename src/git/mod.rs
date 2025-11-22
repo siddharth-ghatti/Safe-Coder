@@ -11,12 +11,12 @@ impl GitManager {
         Self { repo_path }
     }
 
-    /// Initialize git repo in the VM if not already present
+    /// Initialize git repo if not already present
     pub async fn init_if_needed(&self) -> Result<()> {
         let git_dir = self.repo_path.join(".git");
 
         if !git_dir.exists() {
-            tracing::info!("Initializing git repository in VM");
+            tracing::info!("Initializing git repository for Safe Coder");
 
             // Initialize repo
             Command::new("git")
@@ -28,13 +28,13 @@ impl GitManager {
 
             // Configure git
             Command::new("git")
-                .args(["config", "user.name", "Safe Coder VM"])
+                .args(["config", "user.name", "Safe Coder"])
                 .current_dir(&self.repo_path)
                 .output()
                 .await?;
 
             Command::new("git")
-                .args(["config", "user.email", "vm@safe-coder.dev"])
+                .args(["config", "user.email", "ai@safe-coder.dev"])
                 .current_dir(&self.repo_path)
                 .output()
                 .await?;
@@ -47,14 +47,14 @@ impl GitManager {
                 .await?;
 
             Command::new("git")
-                .args(["commit", "-m", "Initial snapshot - Safe Coder VM"])
+                .args(["commit", "-m", "Initial snapshot - Safe Coder session start"])
                 .current_dir(&self.repo_path)
                 .output()
                 .await?;
 
             tracing::info!("Git repository initialized with initial snapshot");
         } else {
-            tracing::info!("Git repository already exists in VM");
+            tracing::info!("Git repository already exists");
         }
 
         Ok(())

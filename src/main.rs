@@ -1,11 +1,15 @@
+mod approval;
+mod checkpoint;
+mod commands;
 mod config;
+mod custom_commands;
 mod git;
-mod isolation;
 mod llm;
+mod memory;
+mod persistence;
 mod session;
 mod tools;
 mod tui;
-mod vm;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -13,6 +17,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+use commands::{CommandParser, CommandResult};
 use config::Config;
 use session::Session;
 
@@ -89,7 +94,7 @@ async fn main() -> Result<()> {
 async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()> {
     let canonical_path = project_path.canonicalize()?;
 
-    // Demo mode - no VM or API required
+    // Demo mode - no API required
     if demo && use_tui {
         let mut tui_runner = tui::TuiRunner::new(canonical_path.display().to_string());
         tui_runner.run_demo().await?;
@@ -99,8 +104,8 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()
     let config = Config::load()?;
     let mut session = Session::new(config, canonical_path.clone()).await?;
 
-    // Start isolation environment
-    session.start(canonical_path.clone()).await?;
+    // Initialize session (git tracking, etc.)
+    session.start().await?;
 
     if use_tui {
         // Use TUI mode
@@ -110,9 +115,9 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()
     }
 
     // Classic CLI mode
-    println!("🔥 Safe Coder - AI Coding Assistant with Firecracker VM Isolation");
+    println!("🤖 Safe Coder - AI Coding Assistant with Git Safety");
     println!("Project: {}", canonical_path.display());
-    println!("Type 'exit' or 'quit' to end the session\n");
+    println!("Type '/help' for commands or 'exit' to quit\n");
 
     // Interactive loop
     loop {
@@ -128,19 +133,52 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()
             continue;
         }
 
-        if input == "exit" || input == "quit" {
-            println!("\nStopping VM and cleaning up...");
-            session.stop().await?;
-            println!("Goodbye!");
-            break;
-        }
+        // Parse command
+        let parsed_cmd = CommandParser::parse(input);
 
-        match session.send_message(input.to_string()).await {
-            Ok(response) => {
-                if !response.is_empty() {
-                    println!("\n{}", response);
+        // Execute command
+        match commands::execute_command(parsed_cmd, &mut session).await {
+            Ok(CommandResult::Exit) => {
+                println!("\nEnding session...");
+                session.stop().await?;
+                println!("✨ Session ended. All changes tracked in git. Goodbye!");
+                break;
+            },
+            Ok(CommandResult::Clear) => {
+                // Clear screen
+                print!("\x1B[2J\x1B[1;1H");
+                continue;
+            },
+            Ok(CommandResult::Message(msg)) => {
+                println!("\n{}", msg);
+                continue;
+            },
+            Ok(CommandResult::ModifiedInput(modified_input)) => {
+                // Send the modified input to the AI
+                match session.send_message(modified_input).await {
+                    Ok(response) => {
+                        if !response.is_empty() {
+                            println!("\n{}", response);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                    }
                 }
-            }
+            },
+            Ok(CommandResult::Continue) => {
+                // Continue normally - send to AI
+                match session.send_message(input.to_string()).await {
+                    Ok(response) => {
+                        if !response.is_empty() {
+                            println!("\n{}", response);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}", e);
+                    }
+                }
+            },
             Err(e) => {
                 eprintln!("Error: {}", e);
             }
