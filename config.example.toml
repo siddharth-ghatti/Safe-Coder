@@ -2,24 +2,60 @@
 # Copy this file to ~/.config/safe-coder/config.toml and customize
 
 [llm]
-# LLM provider: "anthropic", "openai", or "ollama"
+# LLM provider: "anthropic", "openai", "ollama", or "github-copilot"
 provider = "anthropic"
 
 # API key (not needed for ollama)
-# You can also set via environment variable: ANTHROPIC_API_KEY or OPENAI_API_KEY
+# You can set via environment variables:
+# - ANTHROPIC_API_KEY for Anthropic/Claude
+# - OPENAI_API_KEY for OpenAI
+# - GITHUB_COPILOT_TOKEN for GitHub Copilot
 api_key = "your-api-key-here"
 
 # Model to use
 # Anthropic: "claude-sonnet-4-20250514", "claude-opus-4-20250514"
-# OpenAI: "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"
-# Ollama: "codellama", "deepseek-coder", etc.
+# OpenAI: "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo", "gpt-4o"
+# GitHub Copilot: "gpt-4", "gpt-3.5-turbo"
+# Ollama: "codellama", "deepseek-coder", "qwen2.5-coder", etc.
 model = "claude-sonnet-4-20250514"
 
 # Maximum tokens per request
 max_tokens = 8192
 
-# Base URL (optional, for Ollama or custom endpoints)
+# Base URL (optional)
+# - For Ollama: "http://localhost:11434"
+# - For OpenAI-compatible endpoints (Azure, custom servers, etc.): "https://your-endpoint/v1"
+# - For OpenAI: defaults to "https://api.openai.com/v1"
+# - Not used for Anthropic or GitHub Copilot
 # base_url = "http://localhost:11434"
+
+# Example configurations for each provider:
+
+# --- Anthropic (Claude) ---
+# provider = "anthropic"
+# api_key = "sk-ant-..."  # or set ANTHROPIC_API_KEY
+# model = "claude-sonnet-4-20250514"
+
+# --- OpenAI ---
+# provider = "openai"
+# api_key = "sk-..."  # or set OPENAI_API_KEY
+# model = "gpt-4o"
+
+# --- OpenAI-compatible endpoint (e.g., Azure OpenAI) ---
+# provider = "openai"
+# api_key = "your-azure-key"
+# model = "gpt-4"
+# base_url = "https://your-resource.openai.azure.com/openai/deployments/your-deployment"
+
+# --- GitHub Copilot ---
+# provider = "github-copilot"
+# api_key = "ghu_..."  # GitHub Copilot token
+# model = "gpt-4"
+
+# --- Ollama (local) ---
+# provider = "ollama"
+# model = "qwen2.5-coder"
+# base_url = "http://localhost:11434"  # optional, this is the default
 
 [git]
 # Enable automatic git commits after each tool execution

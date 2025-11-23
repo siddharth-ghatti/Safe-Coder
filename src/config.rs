@@ -37,6 +37,8 @@ pub enum LlmProvider {
     Anthropic,
     OpenAI,
     Ollama,
+    #[serde(rename = "github-copilot")]
+    GitHubCopilot,
 }
 
 
@@ -72,15 +74,59 @@ impl Config {
             .context("Could not determine config directory")?;
         Ok(config_dir.join("safe-coder").join("config.toml"))
     }
+
+    pub fn token_path(provider: &LlmProvider) -> Result<PathBuf> {
+        let config_dir = dirs::config_dir()
+            .context("Could not determine config directory")?;
+        let token_file = match provider {
+            LlmProvider::Anthropic => "anthropic_token.json",
+            LlmProvider::GitHubCopilot => "github_copilot_token.json",
+            _ => return Err(anyhow::anyhow!("Provider does not support device flow auth")),
+        };
+        Ok(config_dir.join("safe-coder").join(token_file))
+    }
+
+    /// Get the effective API key/token for the current provider
+    /// Checks for stored tokens first, then falls back to configured API key
+    pub fn get_auth_token(&self) -> Result<String> {
+        // First check if there's a stored token for this provider
+        if let Ok(token_path) = Self::token_path(&self.llm.provider) {
+            if token_path.exists() {
+                use crate::auth::StoredToken;
+                if let Ok(stored_token) = StoredToken::load(&token_path) {
+                    if !stored_token.is_expired() {
+                        return Ok(stored_token.access_token);
+                    }
+                }
+            }
+        }
+
+        // Fall back to configured API key
+        self.llm.api_key
+            .clone()
+            .context("No API key or valid token found")
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
+        // Try to detect provider from environment variables
+        let (provider, api_key, model) = if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+            (LlmProvider::Anthropic, Some(key), "claude-sonnet-4-20250514".to_string())
+        } else if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+            (LlmProvider::OpenAI, Some(key), "gpt-4o".to_string())
+        } else if let Ok(key) = std::env::var("GITHUB_COPILOT_TOKEN") {
+            (LlmProvider::GitHubCopilot, Some(key), "gpt-4".to_string())
+        } else {
+            // Default to Anthropic even without key
+            (LlmProvider::Anthropic, None, "claude-sonnet-4-20250514".to_string())
+        };
+
         Self {
             llm: LlmConfig {
-                provider: LlmProvider::Anthropic,
-                api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-                model: "claude-sonnet-4-20250514".to_string(),
+                provider,
+                api_key,
+                model,
                 max_tokens: 8192,
                 base_url: None,
             },

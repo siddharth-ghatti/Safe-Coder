@@ -7,6 +7,7 @@ use crate::config::{LlmConfig, LlmProvider};
 pub mod anthropic;
 pub mod openai;
 pub mod ollama;
+pub mod copilot;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -45,32 +46,48 @@ pub trait LlmClient: Send + Sync {
     ) -> Result<Message>;
 }
 
-pub fn create_client(config: &LlmConfig) -> Result<Box<dyn LlmClient>> {
-    match config.provider {
+pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
+    match config.llm.provider {
         LlmProvider::Anthropic => {
-            let api_key = config.api_key.as_ref()
-                .context("Anthropic API key not set")?;
+            let api_key = config.get_auth_token()
+                .context("Anthropic API key not set. Use 'safe-coder login anthropic' or set ANTHROPIC_API_KEY")?;
             Ok(Box::new(anthropic::AnthropicClient::new(
-                api_key.clone(),
-                config.model.clone(),
-                config.max_tokens,
+                api_key,
+                config.llm.model.clone(),
+                config.llm.max_tokens,
             )))
         }
         LlmProvider::OpenAI => {
-            let api_key = config.api_key.as_ref()
-                .context("OpenAI API key not set")?;
+            let api_key = config.get_auth_token()
+                .context("OpenAI API key not set. Set OPENAI_API_KEY or configure API key")?;
             Ok(Box::new(openai::OpenAiClient::new(
-                api_key.clone(),
-                config.model.clone(),
-                config.max_tokens,
+                api_key,
+                config.llm.model.clone(),
+                config.llm.max_tokens,
+                config.llm.base_url.clone(),
             )))
         }
         LlmProvider::Ollama => {
             tracing::info!("🦙 Using Ollama (local LLM)");
             Ok(Box::new(ollama::OllamaClient::new(
-                config.base_url.clone(),
-                config.model.clone(),
-                config.max_tokens,
+                config.llm.base_url.clone(),
+                config.llm.model.clone(),
+                config.llm.max_tokens,
+            )))
+        }
+        LlmProvider::GitHubCopilot => {
+            // For GitHub Copilot, we need to exchange the GitHub token for a Copilot token
+            let github_token = config.get_auth_token()
+                .context("GitHub Copilot token not set. Use 'safe-coder login github-copilot' or set GITHUB_COPILOT_TOKEN")?;
+
+            // Get the Copilot-specific token
+            let copilot_token = copilot::get_copilot_token(&github_token).await
+                .context("Failed to get GitHub Copilot token. Make sure you have an active Copilot subscription")?;
+
+            Ok(Box::new(copilot::CopilotClient::new(
+                copilot_token,
+                config.llm.model.clone(),
+                config.llm.max_tokens,
             )))
         }
     }

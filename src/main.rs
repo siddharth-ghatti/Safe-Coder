@@ -1,4 +1,5 @@
 mod approval;
+mod auth;
 mod checkpoint;
 mod commands;
 mod config;
@@ -55,6 +56,11 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Login to a provider using device flow authentication
+    Login {
+        /// Provider to login to (anthropic or github-copilot)
+        provider: String,
+    },
     /// Initialize a new project
     Init {
         /// Path to initialize (default: current directory)
@@ -82,6 +88,9 @@ async fn main() -> Result<()> {
         }
         Commands::Config { show, api_key, model } => {
             handle_config(show, api_key, model)?;
+        }
+        Commands::Login { provider } => {
+            handle_login(&provider).await?;
         }
         Commands::Init { path } => {
             init_project(path)?;
@@ -221,13 +230,53 @@ fn handle_config(show: bool, api_key: Option<String>, model: Option<String>) -> 
     Ok(())
 }
 
+async fn handle_login(provider: &str) -> Result<()> {
+    use auth::{run_device_flow, DeviceFlowAuth};
+    use config::{Config, LlmProvider};
+
+    let llm_provider = match provider.to_lowercase().as_str() {
+        "anthropic" | "claude" => LlmProvider::Anthropic,
+        "github-copilot" | "copilot" => LlmProvider::GitHubCopilot,
+        _ => {
+            anyhow::bail!(
+                "Unknown provider '{}'. Supported: anthropic, github-copilot",
+                provider
+            );
+        }
+    };
+
+    let token = match llm_provider {
+        LlmProvider::GitHubCopilot => {
+            let auth = auth::github_copilot::GitHubCopilotAuth::new();
+            run_device_flow(&auth, "GitHub Copilot").await?
+        }
+        LlmProvider::Anthropic => {
+            let auth = auth::anthropic::AnthropicAuth::new();
+            run_device_flow(&auth, "Anthropic (Claude)").await?
+        }
+        _ => {
+            anyhow::bail!("Provider does not support device flow authentication");
+        }
+    };
+
+    // Save the token
+    let token_path = Config::token_path(&llm_provider)?;
+    token.save(&token_path)?;
+
+    println!("✅ Token saved to: {:?}", token_path);
+    println!("\nYou can now use safe-coder with your {} subscription!", provider);
+
+    Ok(())
+}
+
 fn init_project(path: PathBuf) -> Result<()> {
     std::fs::create_dir_all(&path)?;
 
     println!("✓ Initialized safe-coder project at: {}", path.display());
     println!("\nNext steps:");
     println!("  1. Configure your API key: safe-coder config --api-key YOUR_API_KEY");
-    println!("  2. Start coding: safe-coder chat --path {}", path.display());
+    println!("  2. Or login with device flow: safe-coder login github-copilot");
+    println!("  3. Start coding: safe-coder chat --path {}", path.display());
 
     Ok(())
 }
