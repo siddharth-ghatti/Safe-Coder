@@ -36,7 +36,7 @@ pub struct Session {
 
 impl Session {
     pub async fn new(config: Config, project_path: PathBuf) -> Result<Self> {
-        let llm_client = create_client(&config.llm)?;
+        let llm_client = create_client(&config).await?;
         let tool_registry = ToolRegistry::new();
 
         // Initialize git for safety
@@ -311,7 +311,7 @@ impl Session {
     /// Switch to a different model
     pub async fn switch_model(&mut self, model: &str) -> Result<()> {
         self.config.llm.model = model.to_string();
-        self.llm_client = create_client(&self.config.llm)?;
+        self.llm_client = create_client(&self.config).await?;
         Ok(())
     }
 

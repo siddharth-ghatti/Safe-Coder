@@ -4,94 +4,122 @@ use serde::{Deserialize, Serialize};
 
 use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
 
-pub struct OpenAiClient {
+// Helper function to get Copilot token from GitHub token
+pub async fn get_copilot_token(github_token: &str) -> Result<String> {
+    let client = reqwest::Client::new();
+
+    // GitHub Copilot token endpoint
+    let response = client
+        .get("https://api.github.com/copilot_internal/v2/token")
+        .header("Authorization", format!("token {}", github_token))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .context("Failed to get Copilot token")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await?;
+        anyhow::bail!("Failed to get Copilot token ({}): {}", status, text);
+    }
+
+    #[derive(Deserialize)]
+    struct CopilotTokenResponse {
+        token: String,
+    }
+
+    let copilot_response: CopilotTokenResponse = response
+        .json()
+        .await
+        .context("Failed to parse Copilot token response")?;
+
+    Ok(copilot_response.token)
+}
+
+pub struct CopilotClient {
     api_key: String,
     model: String,
     max_tokens: usize,
-    base_url: String,
     client: reqwest::Client,
 }
 
 #[derive(Debug, Serialize)]
-struct OpenAiRequest {
+struct CopilotRequest {
     model: String,
-    messages: Vec<OpenAiMessage>,
+    messages: Vec<CopilotMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<OpenAiTool>,
+    tools: Vec<CopilotTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct OpenAiMessage {
+struct CopilotMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<OpenAiToolCall>>,
+    tool_calls: Option<Vec<CopilotToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct OpenAiToolCall {
+struct CopilotToolCall {
     id: String,
     #[serde(rename = "type")]
     call_type: String,
-    function: OpenAiFunction,
+    function: CopilotFunction,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct OpenAiFunction {
+struct CopilotFunction {
     name: String,
     arguments: String,
 }
 
 #[derive(Debug, Serialize)]
-struct OpenAiTool {
+struct CopilotTool {
     #[serde(rename = "type")]
     tool_type: String,
-    function: OpenAiToolFunction,
+    function: CopilotToolFunction,
 }
 
 #[derive(Debug, Serialize)]
-struct OpenAiToolFunction {
+struct CopilotToolFunction {
     name: String,
     description: String,
     parameters: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiResponse {
-    choices: Vec<OpenAiChoice>,
+struct CopilotResponse {
+    choices: Vec<CopilotChoice>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiChoice {
-    message: OpenAiResponseMessage,
+struct CopilotChoice {
+    message: CopilotResponseMessage,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiResponseMessage {
+struct CopilotResponseMessage {
     content: Option<String>,
     #[serde(default)]
-    tool_calls: Vec<OpenAiToolCall>,
+    tool_calls: Vec<CopilotToolCall>,
 }
 
-impl OpenAiClient {
-    pub fn new(api_key: String, model: String, max_tokens: usize, base_url: Option<String>) -> Self {
+impl CopilotClient {
+    pub fn new(api_key: String, model: String, max_tokens: usize) -> Self {
         Self {
             api_key,
             model,
             max_tokens,
-            base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             client: reqwest::Client::new(),
         }
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
+    fn convert_messages(&self, messages: &[Message]) -> Vec<CopilotMessage> {
         messages
             .iter()
             .flat_map(|msg| {
@@ -101,36 +129,33 @@ impl OpenAiClient {
                 };
 
                 msg.content.iter().map(move |block| match block {
-                    ContentBlock::Text { text } => OpenAiMessage {
+                    ContentBlock::Text { text } => CopilotMessage {
                         role: role.to_string(),
                         content: Some(text.clone()),
                         tool_calls: None,
                         tool_call_id: None,
-                        name: None,
                     },
-                    ContentBlock::ToolUse { id, name, input } => OpenAiMessage {
+                    ContentBlock::ToolUse { id, name, input } => CopilotMessage {
                         role: "assistant".to_string(),
                         content: None,
-                        tool_calls: Some(vec![OpenAiToolCall {
+                        tool_calls: Some(vec![CopilotToolCall {
                             id: id.clone(),
                             call_type: "function".to_string(),
-                            function: OpenAiFunction {
+                            function: CopilotFunction {
                                 name: name.clone(),
                                 arguments: serde_json::to_string(input).unwrap_or_default(),
                             },
                         }]),
                         tool_call_id: None,
-                        name: None,
                     },
                     ContentBlock::ToolResult {
                         tool_use_id,
                         content,
-                    } => OpenAiMessage {
+                    } => CopilotMessage {
                         role: "tool".to_string(),
                         content: Some(content.clone()),
                         tool_calls: None,
                         tool_call_id: Some(tool_use_id.clone()),
-                        name: None,
                     },
                 })
             })
@@ -139,19 +164,19 @@ impl OpenAiClient {
 }
 
 #[async_trait]
-impl LlmClient for OpenAiClient {
+impl LlmClient for CopilotClient {
     async fn send_message(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Message> {
-        let openai_messages = self.convert_messages(messages);
+        let copilot_messages = self.convert_messages(messages);
 
-        let openai_tools: Vec<OpenAiTool> = tools
+        let copilot_tools: Vec<CopilotTool> = tools
             .iter()
-            .map(|tool| OpenAiTool {
+            .map(|tool| CopilotTool {
                 tool_type: "function".to_string(),
-                function: OpenAiToolFunction {
+                function: CopilotToolFunction {
                     name: tool.name.clone(),
                     description: tool.description.clone(),
                     parameters: tool.input_schema.clone(),
@@ -159,40 +184,41 @@ impl LlmClient for OpenAiClient {
             })
             .collect();
 
-        let request = OpenAiRequest {
+        let request = CopilotRequest {
             model: self.model.clone(),
-            messages: openai_messages,
-            tools: openai_tools,
+            messages: copilot_messages,
+            tools: copilot_tools,
             max_tokens: Some(self.max_tokens),
         };
 
-        let url = format!("{}/chat/completions", self.base_url);
+        // GitHub Copilot uses the same endpoint structure as OpenAI
+        let url = "https://api.githubcopilot.com/chat/completions";
 
         let response = self
             .client
-            .post(&url)
+            .post(url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&request)
             .send()
             .await
-            .context("Failed to send request to OpenAI")?;
+            .context("Failed to send request to GitHub Copilot")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await?;
-            anyhow::bail!("OpenAI API error ({}): {}", status, error_text);
+            anyhow::bail!("GitHub Copilot API error ({}): {}", status, error_text);
         }
 
-        let openai_response: OpenAiResponse = response
+        let copilot_response: CopilotResponse = response
             .json()
             .await
-            .context("Failed to parse OpenAI response")?;
+            .context("Failed to parse GitHub Copilot response")?;
 
-        let choice = openai_response
+        let choice = copilot_response
             .choices
             .first()
-            .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
+            .ok_or_else(|| anyhow::anyhow!("No response from GitHub Copilot"))?;
 
         let mut content_blocks = Vec::new();
 
