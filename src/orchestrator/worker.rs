@@ -184,24 +184,35 @@ impl Worker {
         let stderr = child.stderr.take()
             .context("Failed to capture stderr")?;
         
-        // Read output
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
+        // Read stdout and stderr concurrently to avoid deadlock
+        let stdout_reader = BufReader::new(stdout);
+        let stderr_reader = BufReader::new(stderr);
         
-        let mut output = String::new();
-        let mut errors = String::new();
+        // Spawn tasks to read both streams concurrently
+        let stdout_task = tokio::spawn(async move {
+            let mut output = String::new();
+            let mut lines = stdout_reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                output.push_str(&line);
+                output.push('\n');
+            }
+            output
+        });
         
-        // Collect stdout
-        while let Some(line) = stdout_reader.next_line().await? {
-            output.push_str(&line);
-            output.push('\n');
-        }
+        let stderr_task = tokio::spawn(async move {
+            let mut errors = String::new();
+            let mut lines = stderr_reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                errors.push_str(&line);
+                errors.push('\n');
+            }
+            errors
+        });
         
-        // Collect stderr
-        while let Some(line) = stderr_reader.next_line().await? {
-            errors.push_str(&line);
-            errors.push('\n');
-        }
+        // Wait for both streams to complete
+        let (stdout_result, stderr_result) = tokio::join!(stdout_task, stderr_task);
+        let output = stdout_result.unwrap_or_default();
+        let errors = stderr_result.unwrap_or_default();
         
         // Wait for process to complete
         let status = child.wait().await

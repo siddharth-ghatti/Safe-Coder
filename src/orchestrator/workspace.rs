@@ -112,12 +112,15 @@ impl WorkspaceManager {
         }
         
         // Create worktree
+        let worktree_path_str = worktree_path.to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid UTF-8 in worktree path"))?;
+        
         let create_worktree = Command::new("git")
             .current_dir(&self.project_path)
             .args([
                 "worktree",
                 "add",
-                worktree_path.to_str().unwrap(),
+                worktree_path_str,
                 branch_name,
             ])
             .output()
@@ -268,11 +271,13 @@ impl WorkspaceManager {
         if self.use_worktrees {
             // Remove worktree
             if let Some(worktree_path) = self.workspaces.remove(task_id) {
-                let _ = Command::new("git")
-                    .current_dir(&self.project_path)
-                    .args(["worktree", "remove", worktree_path.to_str().unwrap(), "--force"])
-                    .output()
-                    .await;
+                if let Some(path_str) = worktree_path.to_str() {
+                    let _ = Command::new("git")
+                        .current_dir(&self.project_path)
+                        .args(["worktree", "remove", path_str, "--force"])
+                        .output()
+                        .await;
+                }
             }
         }
         
