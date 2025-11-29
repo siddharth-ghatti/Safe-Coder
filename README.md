@@ -112,6 +112,30 @@ safe-coder chat
 safe-coder chat --tui false
 ```
 
+## TUI Orchestration
+
+Within the TUI chat mode, you can spin off background tasks using the `/orchestrate` (or `/orch`) command:
+
+```
+/orchestrate Refactor the auth module and add comprehensive tests
+/orch Fix the typo in README.md
+```
+
+The TUI will:
+- Display orchestration progress in the chat panel
+- Show worker status in the "WORKERS" panel (right side)
+- Track background tasks in the "BACKGROUND TASKS" panel
+- Update status in real-time as workers complete
+
+### TUI Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `^C` | Exit the application |
+| `/orch <task>` | Orchestrate a task in background |
+| `↑↓` | Scroll through messages |
+| `Tab` | Switch between panels |
+
 ## Orchestrator Commands
 
 When in interactive orchestrate mode:

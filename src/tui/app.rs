@@ -1,4 +1,4 @@
-use super::messages::{ChatMessage, ToolExecution};
+use super::messages::{ChatMessage, ToolExecution, BackgroundTask, BackgroundTaskStatus};
 use super::spinner::Spinner;
 use chrono::Local;
 
@@ -13,9 +13,11 @@ pub struct App {
     pub project_path: String,
     pub messages: Vec<ChatMessage>,
     pub tool_executions: Vec<ToolExecution>,
+    pub background_tasks: Vec<BackgroundTask>,
     pub input: String,
     pub status: String,
     pub is_thinking: bool,
+    pub is_orchestrating: bool,
     pub processing_message: String,
     pub animation_frame: usize,
     pub spinner: Spinner,
@@ -40,9 +42,11 @@ impl App {
             project_path: project_path.clone(),
             messages: Vec::new(),
             tool_executions: Vec::new(),
+            background_tasks: Vec::new(),
             input: String::new(),
             status: "Ready".to_string(),
             is_thinking: false,
+            is_orchestrating: false,
             processing_message: String::new(),
             animation_frame: 0,
             spinner: Spinner::new(),
@@ -59,7 +63,7 @@ impl App {
         };
 
         app.messages.push(ChatMessage::system(format!(
-            "🔥 Safe Coder initialized\nProject: {}\nType your request to begin...",
+            "🔥 Safe Coder initialized\nProject: {}\nType your request or use /orchestrate <task> to delegate to AI agents...",
             project_path
         )));
 
@@ -197,5 +201,62 @@ impl App {
             FocusPanel::Tools => FocusPanel::Status,
             FocusPanel::Status => FocusPanel::Chat,
         };
+    }
+
+    // Background task management methods
+    pub fn add_background_task(&mut self, task: BackgroundTask) {
+        self.background_tasks.push(task);
+        self.is_orchestrating = true;
+    }
+
+    pub fn update_task_status(&mut self, task_id: &str, status: BackgroundTaskStatus) {
+        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+            task.status = status;
+        }
+        // Check if any tasks are still running
+        self.is_orchestrating = self.background_tasks.iter()
+            .any(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending));
+    }
+
+    pub fn complete_task(&mut self, task_id: &str, output: String) {
+        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+            task.complete(output);
+        }
+        self.check_orchestration_complete();
+    }
+
+    pub fn fail_task(&mut self, task_id: &str, error: String) {
+        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+            task.fail(error);
+        }
+        self.check_orchestration_complete();
+    }
+
+    fn check_orchestration_complete(&mut self) {
+        self.is_orchestrating = self.background_tasks.iter()
+            .any(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending));
+    }
+
+    pub fn add_orchestration_message(&mut self, content: &str) {
+        self.messages.push(ChatMessage::orchestration(content.to_string()));
+        self.scroll_to_bottom();
+    }
+
+    pub fn get_active_tasks_count(&self) -> usize {
+        self.background_tasks.iter()
+            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending))
+            .count()
+    }
+
+    pub fn get_completed_tasks_count(&self) -> usize {
+        self.background_tasks.iter()
+            .filter(|t| matches!(t.status, BackgroundTaskStatus::Completed))
+            .count()
+    }
+
+    pub fn get_failed_tasks_count(&self) -> usize {
+        self.background_tasks.iter()
+            .filter(|t| matches!(t.status, BackgroundTaskStatus::Failed(_)))
+            .count()
     }
 }
