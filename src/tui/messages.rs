@@ -14,6 +14,53 @@ pub enum MessageType {
     System,
     Error,
     Tool,
+    Orchestration,
+}
+
+/// Represents a background worker task in the TUI
+#[derive(Debug, Clone)]
+pub struct BackgroundTask {
+    pub task_id: String,
+    pub description: String,
+    pub worker_kind: String,
+    pub status: BackgroundTaskStatus,
+    pub output: Option<String>,
+    pub started_at: DateTime<Local>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundTaskStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed(String),
+}
+
+impl BackgroundTask {
+    pub fn new(task_id: String, description: String, worker_kind: String) -> Self {
+        Self {
+            task_id,
+            description,
+            worker_kind,
+            status: BackgroundTaskStatus::Pending,
+            output: None,
+            started_at: Local::now(),
+        }
+    }
+
+    pub fn set_running(&mut self) {
+        self.status = BackgroundTaskStatus::Running;
+    }
+
+    pub fn complete(&mut self, output: String) {
+        self.status = BackgroundTaskStatus::Completed;
+        self.output = Some(output);
+    }
+
+    pub fn fail(&mut self, error: String) {
+        self.status = BackgroundTaskStatus::Failed(error.clone());
+        self.output = Some(error);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +115,14 @@ impl ChatMessage {
     pub fn tool(content: String) -> Self {
         Self {
             message_type: MessageType::Tool,
+            content,
+            timestamp: Local::now(),
+        }
+    }
+
+    pub fn orchestration(content: String) -> Self {
+        Self {
+            message_type: MessageType::Orchestration,
             content,
             timestamp: Local::now(),
         }

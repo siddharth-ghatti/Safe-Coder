@@ -9,8 +9,10 @@ use ratatui::{
     Terminal,
 };
 use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 mod app;
 mod ui;
@@ -19,8 +21,9 @@ mod spinner;
 mod banner;
 
 pub use app::App;
-pub use messages::{ChatMessage, MessageType, ToolExecution};
+pub use messages::{ChatMessage, MessageType, ToolExecution, BackgroundTask, BackgroundTaskStatus};
 
+use crate::orchestrator::{Orchestrator, OrchestratorConfig, WorkerKind};
 use crate::session::Session;
 
 pub struct TuiRunner {
@@ -101,6 +104,13 @@ impl TuiRunner {
         rx: &mut mpsc::UnboundedReceiver<String>,
         tx: &mpsc::UnboundedSender<String>,
     ) -> Result<()> {
+        // Create orchestrator for background task handling
+        let project_path = PathBuf::from(&self.app.project_path);
+        let orchestrator_config = OrchestratorConfig::default();
+        
+        // Channel for orchestration updates
+        let (orch_tx, mut orch_rx) = mpsc::unbounded_channel::<OrchestrationUpdate>();
+        
         loop {
             terminal.draw(|f| ui::draw(f, &mut self.app))?;
 
@@ -126,28 +136,62 @@ impl TuiRunner {
                                     break;
                                 }
 
-                                // Add user message
-                                self.app.add_user_message(&input);
-                                self.app.set_thinking(true);
-
-                                // Send to LLM
-                                let tx_clone = tx.clone();
-                                let input_clone = input.clone();
-                                tokio::spawn(async move {
-                                    let _ = tx_clone.send(input_clone);
-                                });
-
-                                // Process message
-                                match session.send_message(input).await {
-                                    Ok(response) => {
-                                        self.app.set_thinking(false);
-                                        if !response.is_empty() {
-                                            self.app.add_assistant_message(&response);
-                                        }
+                                // Check if this is an orchestrate command
+                                if input.starts_with("/orchestrate ") || input.starts_with("/orch ") {
+                                    let task_text = input
+                                        .strip_prefix("/orchestrate ")
+                                        .or_else(|| input.strip_prefix("/orch "))
+                                        .unwrap_or("")
+                                        .trim();
+                                    
+                                    if !task_text.is_empty() {
+                                        self.app.add_user_message(&input);
+                                        self.app.add_orchestration_message(&format!(
+                                            "🎯 Orchestrating: {}", task_text
+                                        ));
+                                        self.app.set_status("Spawning workers...");
+                                        
+                                        // Spawn orchestration in background
+                                        let project_path_clone = project_path.clone();
+                                        let config_clone = orchestrator_config.clone();
+                                        let task_text_owned = task_text.to_string();
+                                        let orch_tx_clone = orch_tx.clone();
+                                        
+                                        tokio::spawn(async move {
+                                            run_orchestration_background(
+                                                project_path_clone,
+                                                config_clone,
+                                                task_text_owned,
+                                                orch_tx_clone,
+                                            ).await;
+                                        });
+                                    } else {
+                                        self.app.add_error_message("Usage: /orchestrate <task description>");
                                     }
-                                    Err(e) => {
-                                        self.app.set_thinking(false);
-                                        self.app.add_error_message(&format!("Error: {}", e));
+                                } else {
+                                    // Regular message - send to LLM
+                                    self.app.add_user_message(&input);
+                                    self.app.set_thinking(true);
+
+                                    // Send to LLM
+                                    let tx_clone = tx.clone();
+                                    let input_clone = input.clone();
+                                    tokio::spawn(async move {
+                                        let _ = tx_clone.send(input_clone);
+                                    });
+
+                                    // Process message
+                                    match session.send_message(input).await {
+                                        Ok(response) => {
+                                            self.app.set_thinking(false);
+                                            if !response.is_empty() {
+                                                self.app.add_assistant_message(&response);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            self.app.set_thinking(false);
+                                            self.app.add_error_message(&format!("Error: {}", e));
+                                        }
                                     }
                                 }
                             }
@@ -175,6 +219,53 @@ impl TuiRunner {
             // Check for async messages
             while let Ok(msg) = rx.try_recv() {
                 self.app.set_status(&format!("Processing: {}", msg));
+            }
+            
+            // Check for orchestration updates
+            while let Ok(update) = orch_rx.try_recv() {
+                match update {
+                    OrchestrationUpdate::TaskStarted { task_id, description, worker_kind } => {
+                        let task = BackgroundTask::new(task_id.clone(), description.clone(), worker_kind);
+                        self.app.add_background_task(task);
+                        self.app.add_orchestration_message(&format!(
+                            "▶ Task started: {} ({})", description, task_id
+                        ));
+                        self.app.set_status(&format!("Running {} tasks...", self.app.get_active_tasks_count()));
+                    }
+                    OrchestrationUpdate::TaskRunning { task_id } => {
+                        self.app.update_task_status(&task_id, BackgroundTaskStatus::Running);
+                    }
+                    OrchestrationUpdate::TaskCompleted { task_id, output } => {
+                        self.app.complete_task(&task_id, output.clone());
+                        self.app.add_orchestration_message(&format!(
+                            "✓ Task completed: {}", task_id
+                        ));
+                        if self.app.get_active_tasks_count() == 0 {
+                            self.app.set_status("All tasks completed");
+                        }
+                    }
+                    OrchestrationUpdate::TaskFailed { task_id, error } => {
+                        self.app.fail_task(&task_id, error.clone());
+                        self.app.add_error_message(&format!(
+                            "✗ Task failed ({}): {}", task_id, error
+                        ));
+                    }
+                    OrchestrationUpdate::PlanCreated { summary, task_count } => {
+                        self.app.add_orchestration_message(&format!(
+                            "📋 Plan created: {} tasks\n{}", task_count, summary
+                        ));
+                    }
+                    OrchestrationUpdate::AllComplete { summary } => {
+                        self.app.add_orchestration_message(&format!(
+                            "🎉 Orchestration complete!\n{}", summary
+                        ));
+                        self.app.set_status("Ready");
+                    }
+                    OrchestrationUpdate::Error { message } => {
+                        self.app.add_error_message(&format!("Orchestration error: {}", message));
+                        self.app.set_status("Ready");
+                    }
+                }
             }
 
             self.app.tick();
@@ -263,4 +354,101 @@ impl TuiRunner {
 
         Ok(())
     }
+}
+
+/// Updates from background orchestration tasks
+#[derive(Debug, Clone)]
+enum OrchestrationUpdate {
+    PlanCreated { summary: String, task_count: usize },
+    TaskStarted { task_id: String, description: String, worker_kind: String },
+    TaskRunning { task_id: String },
+    TaskCompleted { task_id: String, output: String },
+    TaskFailed { task_id: String, error: String },
+    AllComplete { summary: String },
+    Error { message: String },
+}
+
+/// Run orchestration in background and send updates via channel
+async fn run_orchestration_background(
+    project_path: PathBuf,
+    config: OrchestratorConfig,
+    task_text: String,
+    tx: mpsc::UnboundedSender<OrchestrationUpdate>,
+) {
+    // Create orchestrator
+    let orchestrator_result = Orchestrator::new(project_path, config).await;
+    
+    let mut orchestrator = match orchestrator_result {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = tx.send(OrchestrationUpdate::Error { 
+                message: format!("Failed to create orchestrator: {}", e) 
+            });
+            return;
+        }
+    };
+    
+    // Process the request
+    // NOTE: The orchestrator currently processes tasks synchronously, so we receive
+    // all results at once. Future improvement: refactor orchestrator to emit progress
+    // events during execution for real-time UI updates.
+    match orchestrator.process_request(&task_text).await {
+        Ok(response) => {
+            // Send plan created update
+            let _ = tx.send(OrchestrationUpdate::PlanCreated { 
+                summary: response.plan.summary.clone(),
+                task_count: response.plan.tasks.len(),
+            });
+            
+            // Send task updates for each result
+            for (i, task) in response.plan.tasks.iter().enumerate() {
+                let result = &response.task_results[i];
+                let worker_kind = format!("{:?}", result.worker_kind);
+                
+                // Send started notification
+                let _ = tx.send(OrchestrationUpdate::TaskStarted {
+                    task_id: task.id.clone(),
+                    description: task.description.clone(),
+                    worker_kind,
+                });
+                
+                // Mark as running (even though it completed - for UI consistency)
+                let _ = tx.send(OrchestrationUpdate::TaskRunning {
+                    task_id: task.id.clone(),
+                });
+                
+                // Small delay to allow UI to update
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                
+                // Send result
+                match &result.result {
+                    Ok(output) => {
+                        let _ = tx.send(OrchestrationUpdate::TaskCompleted {
+                            task_id: task.id.clone(),
+                            output: output.clone(),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = tx.send(OrchestrationUpdate::TaskFailed {
+                            task_id: task.id.clone(),
+                            error: error.clone(),
+                        });
+                    }
+                }
+            }
+            
+            // Send completion
+            let _ = tx.send(OrchestrationUpdate::AllComplete { 
+                summary: response.summary 
+            });
+        }
+        Err(e) => {
+            let _ = tx.send(OrchestrationUpdate::Error { 
+                message: e.to_string() 
+            });
+        }
+    }
+    
+    // Cleanup
+    let _ = orchestrator.cleanup().await;
 }

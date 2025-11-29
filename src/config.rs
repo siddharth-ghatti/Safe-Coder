@@ -7,6 +7,8 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub git: GitConfig,
+    #[serde(default)]
+    pub orchestrator: OrchestratorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,6 +31,54 @@ pub struct LlmConfig {
     /// Base URL for API (optional, for Ollama or custom endpoints)
     #[serde(default)]
     pub base_url: Option<String>,
+}
+
+/// Configuration for the CLI orchestrator
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorConfig {
+    /// Path to Claude Code CLI executable
+    #[serde(default = "default_claude_cli")]
+    pub claude_cli_path: String,
+    /// Path to Gemini CLI executable
+    #[serde(default = "default_gemini_cli")]
+    pub gemini_cli_path: String,
+    /// Maximum number of concurrent workers
+    #[serde(default = "default_max_workers")]
+    pub max_workers: usize,
+    /// Default worker to use: "claude" or "gemini"
+    #[serde(default = "default_worker")]
+    pub default_worker: String,
+    /// Use git worktrees for task isolation
+    #[serde(default = "default_true")]
+    pub use_worktrees: bool,
+}
+
+fn default_claude_cli() -> String {
+    "claude".to_string()
+}
+
+fn default_gemini_cli() -> String {
+    "gemini".to_string()
+}
+
+fn default_max_workers() -> usize {
+    3
+}
+
+fn default_worker() -> String {
+    "claude".to_string()
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            claude_cli_path: default_claude_cli(),
+            gemini_cli_path: default_gemini_cli(),
+            max_workers: default_max_workers(),
+            default_worker: default_worker(),
+            use_worktrees: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +181,7 @@ impl Default for Config {
                 base_url: None,
             },
             git: GitConfig::default(),
+            orchestrator: OrchestratorConfig::default(),
         }
     }
 }

@@ -1,19 +1,26 @@
 # Safe Coder
 
-An AI-powered coding assistant CLI built in Rust with **Firecracker microVM isolation**. Each coding session runs in an isolated Firecracker VM, providing strong security boundaries while the AI agent makes edits to your code.
+An **AI coding orchestrator** that delegates tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces. Safe Coder handles high-level planning and task decomposition, then coordinates multiple AI agents to execute the work in parallel.
 
 ## Features
 
+### 🎯 **Orchestrator Mode (New!)**
+- **Multi-Agent Delegation**: Orchestrate Claude Code, Gemini CLI, and other AI agents
+- **Task Planning**: Automatically break down complex requests into manageable tasks
+- **Workspace Isolation**: Each task runs in its own git worktree/branch
+- **Parallel Execution**: Run multiple AI agents concurrently
+- **Automatic Merging**: Merge completed work back to main branch
+
 ### 🔒 **Security First**
-- **Strict VM Isolation**: Agent operates ONLY in isolated sandbox, zero access to host filesystem
-- **Git Change Tracking**: Every modification automatically tracked with git in the VM
-- **Safe Sync Back**: Changes reviewed and synced to host only on exit
-- **Rollback Support**: Undo any changes made within the VM session
+- **Git Worktree Isolation**: Each agent operates in its own git worktree
+- **Git Change Tracking**: Every modification automatically tracked with git
+- **Safe Merge Back**: Changes reviewed and merged only on completion
+- **Rollback Support**: Undo any changes made by agents
 
 ### 🎨 **Beautiful Interface**
 - **Cyberpunk TUI**: Modern neon-themed terminal UI with pulsing borders and animations
-- **Multi-Panel Layout**: Conversation, VM status, and tool execution panels
-- **Real-time Updates**: Live VM monitoring (status, uptime, memory, CPU)
+- **Multi-Panel Layout**: Conversation, status, and tool execution panels
+- **Real-time Updates**: Live monitoring of agent status
 - **Dynamic Processing**: Animated braille spinners and status messages
 
 ### 🤖 **AI-Powered Coding**
@@ -21,124 +28,48 @@ An AI-powered coding assistant CLI built in Rust with **Firecracker microVM isol
 - **Privacy Option**: Run 100% locally with Ollama - no API costs, complete privacy
 - **Full Tool Suite**: Read, write, edit files, and execute bash commands
 - **Contextual Awareness**: Agent understands your codebase and makes intelligent changes
-- **Auto-Commit**: Every tool execution is tracked in git with descriptive messages
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│          Safe Coder CLI                 │
-│  ┌───────────┐      ┌──────────────┐   │
-│  │    LLM    │◄────►│  Tool Engine │   │
-│  │  Client   │      │ Read/Write/  │   │
-│  │ (Claude/  │      │ Edit/Bash    │   │
-│  │  OpenAI)  │      └──────┬───────┘   │
-│  └───────────┘             │           │
-│                            │           │
-│  ┌─────────────────────────▼─────────┐ │
-│  │     Firecracker VM Manager        │ │
-│  │  - Manages VM lifecycle           │ │
-│  │  - File synchronization           │ │
-│  │  - Command execution in VM        │ │
-│  └───────────────────────────────────┘ │
-└─────────────────────────────────────────┘
-                  │
-                  ▼
-        ┌──────────────────┐
-        │  Firecracker VM  │
-        │   (per project)  │
-        │  - Isolated env  │
-        │  - Project files │
-        └──────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                    Safe Coder Orchestrator                       │
+│                                                                  │
+│  ┌──────────────┐    ┌──────────────────────────────────────┐   │
+│  │   Planner    │───►│         Task Queue                   │   │
+│  │  (Decompose  │    │  ┌────────┐ ┌────────┐ ┌────────┐   │   │
+│  │   requests)  │    │  │ Task 1 │ │ Task 2 │ │ Task 3 │   │   │
+│  └──────────────┘    │  └────────┘ └────────┘ └────────┘   │   │
+│                      └──────────────────────────────────────┘   │
+│                                    │                             │
+│         ┌──────────────────────────┼─────────────────────┐      │
+│         ▼                          ▼                     ▼      │
+│  ┌─────────────┐           ┌─────────────┐        ┌──────────┐ │
+│  │ Git Worktree│           │ Git Worktree│        │Git Branch│ │
+│  │   Worker 1  │           │   Worker 2  │        │ Worker 3 │ │
+│  │ (Claude Code)│          │ (Gemini CLI)│        │(Claude)  │ │
+│  └──────┬──────┘           └──────┬──────┘        └────┬─────┘ │
+│         │                         │                     │       │
+│         └────────────────────┬────┴────────────────────┘       │
+│                              ▼                                   │
+│                    ┌──────────────────┐                         │
+│                    │   Merge Results  │                         │
+│                    │  (git merge)     │                         │
+│                    └──────────────────┘                         │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Platform Support
+## Quick Start
 
-| Platform | Firecracker | Docker |
-|----------|-------------|--------|
-| **Linux** | ✅ Native (best security) | ✅ Supported |
-| **macOS** | ❌ Not supported | ✅ Supported (via Docker Desktop) |
-| **Windows** | ❌ Not supported | ✅ Supported (via Docker Desktop) |
+### Prerequisites
 
-**Default behavior**: Safe Coder auto-selects the best backend for your platform:
-- **Linux**: Firecracker (maximum security)
-- **macOS/Windows**: Docker (only option)
+1. **External AI CLIs** (at least one):
+   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code): `npm install -g @anthropic-ai/claude-code` or via the official installer
+   - [Gemini CLI](https://github.com/google/gemini-cli): Install from official repository
 
-You can override this in the config file.
+2. **Git**: Required for workspace isolation
 
-## Prerequisites
-
-### Option 1: Firecracker (Linux Only) - Maximum Security
-
-Firecracker requires Linux and KVM. Install Firecracker:
-
-```bash
-# Download Firecracker binary
-ARCH="$(uname -m)"
-release_url="https://github.com/firecracker-microvm/firecracker/releases"
-latest=$(basename $(curl -fsSLI -o /dev/null -w  %{url_effective} ${release_url}/latest))
-curl -L ${release_url}/download/${latest}/firecracker-${latest}-${ARCH}.tgz \
-| tar -xz
-
-# Move to /usr/local/bin
-sudo mv release-${latest}-${ARCH}/firecracker-${latest}-${ARCH} /usr/local/bin/firecracker
-sudo chmod +x /usr/local/bin/firecracker
-```
-
-### 2. Kernel and Root Filesystem
-
-You need a Linux kernel and root filesystem for the VMs:
-
-```bash
-# Create directory for VM assets
-sudo mkdir -p /var/lib/safe-coder
-
-# Download kernel (example using Ubuntu's kernel)
-curl -fsSL -o /tmp/vmlinux https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin
-sudo mv /tmp/vmlinux /var/lib/safe-coder/vmlinux
-
-# Create or download a rootfs
-# Option 1: Use a pre-built rootfs
-curl -fsSL -o /tmp/rootfs.ext4 https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4
-sudo mv /tmp/rootfs.ext4 /var/lib/safe-coder/rootfs.ext4
-
-# Option 2: Build your own (see Firecracker documentation)
-```
-
-### Option 2: Docker (All Platforms) - Cross-Platform
-
-Docker works on Linux, macOS, and Windows:
-
-```bash
-# Linux
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker $USER
-
-# macOS/Windows
-# Install Docker Desktop from https://www.docker.com/products/docker-desktop
-```
-
-Verify Docker is installed:
-```bash
-docker --version
-```
-
-### 3. LLM Provider Setup
-
-Choose one of the following:
-
-#### Option A: Cloud APIs (Anthropic/OpenAI)
-- **Anthropic** (recommended): Get API key from https://console.anthropic.com/
-- **OpenAI**: Get API key from https://platform.openai.com/
-
-#### Option B: Local with Ollama (Free, Private)
-- **Ollama**: Install from https://ollama.com
-- No API key needed, runs 100% locally
-- See [OLLAMA_SETUP.md](OLLAMA_SETUP.md) for detailed setup
-
-## Installation
-
-### From Source
+### Installation
 
 ```bash
 # Clone the repository
@@ -150,224 +81,172 @@ cargo build --release
 
 # Install the binary
 sudo cp target/release/safe-coder /usr/local/bin/
+```
 
-# Or add to your PATH
-export PATH="$PATH:$(pwd)/target/release"
+### Usage
+
+#### Orchestrate Mode (Recommended)
+
+```bash
+# Interactive orchestration
+cd /path/to/your/project
+safe-coder orchestrate
+
+# Execute a specific task
+safe-coder orchestrate --task "Refactor the auth module and add tests"
+
+# Use a specific worker
+safe-coder orchestrate --worker gemini --task "Fix the typo in README.md"
+
+# Disable worktrees (use branches instead)
+safe-coder orchestrate --worktrees false
+```
+
+#### Direct Chat Mode
+
+```bash
+# Start a TUI chat session (direct AI interaction, no delegation)
+safe-coder chat
+
+# Classic CLI mode
+safe-coder chat --tui false
+```
+
+## TUI Orchestration
+
+Within the TUI chat mode, you can spin off background tasks using the `/orchestrate` (or `/orch`) command:
+
+```
+/orchestrate Refactor the auth module and add comprehensive tests
+/orch Fix the typo in README.md
+```
+
+The TUI will:
+- Display orchestration progress in the chat panel
+- Show worker status in the "WORKERS" panel (right side)
+- Track background tasks in the "BACKGROUND TASKS" panel
+- Update status in real-time as workers complete
+
+### TUI Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `^C` | Exit the application |
+| `/orch <task>` | Orchestrate a task in background |
+| `↑↓` | Scroll through messages |
+| `Tab` | Switch between panels |
+
+## Orchestrator Commands
+
+When in interactive orchestrate mode:
+
+| Command | Description |
+|---------|-------------|
+| `exit` / `quit` | End session and cleanup workspaces |
+| `status` | Show status of all active workers |
+| `cancel` | Cancel all running workers |
+| `help` | Show help message |
+| *any text* | Submit as a task to orchestrate |
+
+### Example Session
+
+```
+🎯 Safe Coder Orchestrator
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Project: /home/user/my-project
+Default worker: ClaudeCode
+Using worktrees: true
+
+Enter tasks to orchestrate (type 'exit' to quit, 'status' for worker status):
+
+🎯 > Refactor the user service and add comprehensive tests
+
+📋 Planning task: Refactor the user service and add comprehensive tests
+
+Plan to address: "Refactor the user service and add comprehensive tests"
+
+Breaking down into 2 task(s):
+  1. Refactor the user service
+  2. Add comprehensive tests
+
+📊 Orchestration Complete
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tasks: 2 total, 2 successful, 0 failed
+
+✓ Task task-1: Refactor the user service
+  Worker: ClaudeCode
+  Workspace: /project/.safe-coder-workspaces/task-1
+
+✓ Task task-2: Add comprehensive tests
+  Worker: ClaudeCode
+  Workspace: /project/.safe-coder-workspaces/task-2
+
+🎯 > exit
+🧹 Cleaning up workspaces...
+✨ Orchestrator session ended. Goodbye!
 ```
 
 ## Configuration
-
-### Initial Setup
-
-```bash
-# Configure your API key
-safe-coder config --api-key YOUR_ANTHROPIC_API_KEY
-
-# Optional: Change the model
-safe-coder config --model claude-sonnet-4-20250514
-
-# View current configuration
-safe-coder config --show
-```
-
-### Configuration File
 
 The configuration is stored in `~/.config/safe-coder/config.toml`:
 
 ```toml
 [llm]
-provider = "anthropic"  # Options: anthropic, openai, ollama
-api_key = "your-api-key-here"  # Not needed for ollama
+provider = "anthropic"
+api_key = "your-api-key-here"
 model = "claude-sonnet-4-20250514"
 max_tokens = 8192
-# base_url = "http://localhost:11434"  # For ollama or custom endpoints
 
-# Isolation backend selection
-[isolation]
-# Options: "auto" (default), "firecracker", "docker"
-# - auto: Firecracker on Linux, Docker on other platforms
-# - firecracker: Force Firecracker (Linux only)
-# - docker: Force Docker (all platforms)
-backend = "auto"
+[git]
+auto_commit = true
 
-# Firecracker configuration (Linux only)
-[vm]
-firecracker_bin = "/usr/local/bin/firecracker"
-kernel_image = "/var/lib/safe-coder/vmlinux"
-rootfs_image = "/var/lib/safe-coder/rootfs.ext4"
-vcpu_count = 2
-mem_size_mib = 512
-
-# Docker configuration (all platforms)
-[docker]
-image = "ubuntu:22.04"
-cpus = 2.0
-memory_mb = 512
-auto_pull = true
+# Orchestrator configuration
+[orchestrator]
+claude_cli_path = "claude"     # Path to Claude Code CLI
+gemini_cli_path = "gemini"     # Path to Gemini CLI
+max_workers = 3                 # Maximum concurrent workers
+default_worker = "claude"       # Default: "claude" or "gemini"
+use_worktrees = true            # Use git worktrees for isolation
 ```
-
-## Usage
-
-### Start a Coding Session
-
-```bash
-# Use the beautiful TUI (default)
-cd /path/to/your/project
-safe-coder chat
-
-# Or specify a path
-safe-coder chat --path /path/to/project
-
-# Use classic CLI mode
-safe-coder chat --no-tui
-```
-
-### TUI Interface
-
-The TUI provides a modern, multi-panel interface:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                  🔥 Safe Coder | /path/to/project               │
-├──────────────────────────────────────────┬──────────────────────┤
-│ 💬 Conversation                          │ 🔥 VM Status         │
-│ ────────────────────────────────────     │ 🟢 Status: Running   │
-│ 👤 [12:30:45] You: Create hello.rs      │ ⏱️  Uptime: 5m 23s   │
-│                                          │ 💾 Memory: 512 MB    │
-│ 🤖 [12:30:47] Assistant: I'll create    │ ⚙️  vCPUs: 2         │
-│    a hello.rs file with a simple        │                      │
-│    "Hello, World!" program.             ├──────────────────────┤
-│                                          │ 🔧 Recent Tools      │
-│ ✓ Using write_file tool                 │ ✓ write_file         │
-│                                          │ ✓ bash               │
-│                                          │ ✓ read_file          │
-│                                          │                      │
-├──────────────────────────────────────────┴──────────────────────┤
-│ ❯ your message here█                                            │
-├─────────────────────────────────────────────────────────────────┤
-│ ^C Exit │ ↑↓ Scroll │ Tab Switch Panel │ Status: Ready         │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Keyboard Shortcuts:**
-- `Ctrl+C`: Exit the application
-- `↑/↓`: Scroll through conversation
-- `PageUp/PageDown`: Scroll by page
-- `Tab`: Switch between panels
-- `Enter`: Send message
-
-### Example Session
-
-```
-🔥 Safe Coder - AI Coding Assistant with Firecracker VM Isolation
-Project: /home/user/my-project
-Type 'exit' or 'quit' to end the session
-
-> Create a new file called hello.rs with a simple "Hello, World!" program
-
-[AI creates the file using the write_file tool]
-
-> Now compile and run it
-
-[AI uses the bash tool to run: rustc hello.rs && ./hello]
-
-> Add error handling to the program
-
-[AI edits the file using the edit_file tool]
-
-> exit
-
-Stopping VM and cleaning up...
-Goodbye!
-```
-
-### Available Tools
-
-The AI assistant has access to these tools:
-
-- **read_file**: Read file contents with line numbers
-- **write_file**: Create or overwrite files
-- **edit_file**: Make precise string replacements in files
-- **bash**: Execute shell commands in the VM
 
 ## How It Works
 
-### 🔒 **VM Isolation Flow**
+### 🎯 **Orchestration Flow**
 
-1. **Initialization** (Safe Sandbox Creation):
-   ```
-   - Create temp VM sandbox: /tmp/safe-coder-{uuid}/
-   - Copy entire project to sandbox
-   - Initialize git repository in sandbox
-   - Initial commit: "Initial snapshot - Safe Coder VM"
-   - VM ready: agent confined to sandbox
-   ```
+1. **Request Analysis**: The planner analyzes your request and identifies distinct tasks
+2. **Workspace Creation**: Each task gets its own git worktree (isolated copy)
+3. **Worker Assignment**: Tasks are assigned to AI agents (Claude Code, Gemini CLI)
+4. **Parallel Execution**: Workers execute tasks in their isolated workspaces
+5. **Result Merging**: Successful changes are merged back to the main branch
+6. **Cleanup**: Temporary worktrees are removed
 
-2. **Agent Operations** (Isolated Execution):
-   ```
-   - ALL tools execute ONLY in VM sandbox
-   - read_file: Reads from /tmp/safe-coder-{uuid}/
-   - write_file: Writes to /tmp/safe-coder-{uuid}/
-   - edit_file: Edits in /tmp/safe-coder-{uuid}/
-   - bash: Executes in /tmp/safe-coder-{uuid}/
-   - Auto-commit after each tool: "Agent executed: tool1, tool2"
-   ```
+### 📝 **Task Decomposition**
 
-3. **Cleanup** (Safe Sync Back):
-   ```
-   - Get git change summary from VM
-   - Display changes to user
-   - Sync files back to host (excluding .git)
-   - Shutdown VM and cleanup sandbox
-   - Host project updated with reviewed changes
-   ```
+The planner automatically splits complex requests:
 
-### 📝 **Git Tracking**
+```
+Input: "Add authentication, then create user CRUD endpoints, and write tests"
 
-Every change is version-controlled:
-
-```bash
-# In VM sandbox:
-git log --oneline
-
-d4e2b8c Agent executed: write, edit
-a1b2c3d Agent executed: bash
-f5e6d7c Initial snapshot - Safe Coder VM
+Output:
+  Task 1: Add authentication
+  Task 2: Create user CRUD endpoints (depends on Task 1)
+  Task 3: Write tests (depends on Tasks 1 & 2)
 ```
 
-**Read more:**
-- [VM_ISOLATION.md](VM_ISOLATION.md) - Detailed security architecture
-- [DOCKER_BACKEND.md](DOCKER_BACKEND.md) - Cross-platform Docker isolation
+### 🔀 **Git Worktree Isolation**
 
-## Security
-
-Safe Coder provides **defense-in-depth security**:
-
-### 🔒 **VM Isolation**
-- Each session runs in a fresh Firecracker microVM
-- Agent has **ZERO** access to host filesystem
-- All operations confined to `/tmp/safe-coder-{uuid}/` sandbox
-- No fallback to host paths (strict isolation enforced)
-
-### 📝 **Change Tracking**
-- Git initialized automatically in VM on startup
-- Auto-commit after every tool execution
-- Full audit trail of all agent actions
-- Rollback support for any mistakes
-
-### 🛡️ **Resource Limits**
-- Configurable CPU limits (default: 2 vCPUs)
-- Configurable memory limits (default: 512 MB)
-- No network access by default
-- Temporary sandbox cleanup on exit
-
-### ✅ **Change Review**
-- See exactly what changed before accepting
-- Changes synced to host only on exit
-- `.git` directory excluded from sync
-- Host project preserved until explicit sync
-
-**Read more**: [VM_ISOLATION.md](VM_ISOLATION.md)
+```
+project/
+├── .git/                          # Main repository
+├── .safe-coder-workspaces/        # Worktree base
+│   ├── task-1/                    # Isolated workspace for task 1
+│   │   ├── src/
+│   │   └── ... (full project copy)
+│   └── task-2/                    # Isolated workspace for task 2
+│       ├── src/
+│       └── ...
+└── src/                           # Main project files
+```
 
 ## Development
 
@@ -376,37 +255,21 @@ Safe Coder provides **defense-in-depth security**:
 ```
 safe-coder/
 ├── src/
-│   ├── main.rs           # CLI entry point
-│   ├── config.rs         # Configuration management
-│   ├── llm/              # LLM client integrations
-│   │   ├── mod.rs
-│   │   ├── anthropic.rs  # Anthropic API client
-│   │   └── openai.rs     # OpenAI API client
-│   ├── tools/            # Agent tools
-│   │   ├── mod.rs
-│   │   ├── read.rs       # Read file tool
-│   │   ├── write.rs      # Write file tool
-│   │   ├── edit.rs       # Edit file tool
-│   │   └── bash.rs       # Bash execution tool
-│   ├── tui/              # Terminal UI (Cyberpunk theme)
-│   │   ├── mod.rs        # TUI runner
-│   │   ├── app.rs        # Application state
-│   │   ├── ui.rs         # UI rendering (neon colors)
-│   │   ├── messages.rs   # Message types
-│   │   ├── spinner.rs    # Loading animation
-│   │   └── banner.rs     # ASCII banner
-│   ├── vm/               # Firecracker VM management
-│   │   └── mod.rs        # VM lifecycle, isolation, sync
-│   ├── git/              # Git change tracking
-│   │   └── mod.rs        # Auto-commit, rollback, diff
-│   └── session/          # Session management
-│       └── mod.rs        # Tool execution in VM
+│   ├── main.rs              # CLI entry point
+│   ├── config.rs            # Configuration management
+│   ├── orchestrator/        # NEW: Orchestration module
+│   │   ├── mod.rs           # Orchestrator coordinator
+│   │   ├── planner.rs       # Task decomposition
+│   │   ├── worker.rs        # CLI worker management
+│   │   ├── workspace.rs     # Git worktree manager
+│   │   └── task.rs          # Task definitions
+│   ├── llm/                 # LLM client integrations
+│   ├── tools/               # Agent tools
+│   ├── tui/                 # Terminal UI
+│   ├── git/                 # Git change tracking
+│   └── session/             # Session management
 ├── Cargo.toml
-├── README.md
-├── VM_ISOLATION.md       # Security architecture (Firecracker)
-├── DOCKER_BACKEND.md     # Docker isolation backend
-├── OLLAMA_SETUP.md       # Local LLM setup with Ollama
-└── CYBERPUNK_THEME.md    # TUI theme documentation
+└── README.md
 ```
 
 ### Building
@@ -427,66 +290,53 @@ cargo check
 
 ## Troubleshooting
 
-### VM Fails to Start
+### CLI Not Found
 
-- Ensure Firecracker is installed: `which firecracker`
-- Verify kernel and rootfs paths in config
-- Check KVM is available: `ls /dev/kvm`
-- Ensure you have permissions: `sudo chmod 666 /dev/kvm` (or add user to kvm group)
+```
+Error: Claude Code CLI not found at 'claude'
+```
 
-### API Errors
+**Solution**: Install the CLI or update the path in config:
+```bash
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
 
-**Cloud APIs (Anthropic/OpenAI):**
-- Verify your API key is correct: `safe-coder config --show`
-- Check your API key has sufficient credits
-- Ensure you're using a valid model name
+# Or update config
+safe-coder config --show  # Then edit ~/.config/safe-coder/config.toml
+```
 
-**Ollama:**
-- Check Ollama is running: `curl http://localhost:11434/api/tags`
-- Verify model is installed: `ollama list`
-- Start Ollama: `ollama serve`
-- See [OLLAMA_SETUP.md](OLLAMA_SETUP.md) for more help
+### Worktree Issues
 
-### File Synchronization Issues
+```
+Error: Failed to create worktree
+```
 
-- Check disk space: `df -h`
-- Verify write permissions on project directory
-- Look at logs: `RUST_LOG=debug safe-coder chat`
+**Solution**: Ensure you're in a git repository:
+```bash
+git init  # If not already a git repo
+```
 
-## Limitations
+### Merge Conflicts
 
-### Firecracker Backend
-- **Linux Only**: Requires Linux with KVM
-- **x86_64/aarch64**: Supports x86_64 and ARM64 architectures
-- **Resource Overhead**: Each VM uses ~512MB RAM
-- **Startup Time**: VM initialization takes 1-2 seconds
+When tasks modify the same files, you may encounter merge conflicts:
+```
+Error: Merge conflict when integrating task-2. Manual resolution needed.
+```
 
-### Docker Backend
-- **Shared Kernel**: Weaker isolation than Firecracker (containers share host kernel)
-- **Docker Required**: Must have Docker installed
-- **Platform-Specific**: Docker Desktop needed for macOS/Windows
+**Solution**: Resolve conflicts manually in the main repository.
 
 ## Future Enhancements
 
-- [x] Beautiful TUI with multi-panel layout
-- [x] Real-time VM status monitoring
-- [x] Loading animations and progress indicators
-- [x] Cyberpunk neon theme with pulsing borders
-- [x] VM isolation with strict sandbox enforcement
-- [x] Git change tracking in VM
-- [x] Auto-commit after tool execution
-- [ ] Manual approval flow before sync back to host
-- [ ] Interactive diff viewer in TUI
-- [ ] Selective file sync (choose what to accept)
-- [ ] Syntax highlighting for code blocks in TUI
-- [ ] Support for persistent VM images per project
-- [ ] Network isolation with controlled access
-- [ ] Multi-project workspace support
-- [ ] VS Code extension integration
-- [ ] Real-time file watching and synchronization
-- [ ] Custom tool definitions
-- [ ] Export conversation history
-- [ ] Additional theme options for TUI
+- [x] Orchestrator with multi-agent delegation
+- [x] Git worktree isolation for tasks
+- [x] Automatic task decomposition
+- [x] Parallel worker execution
+- [ ] LLM-assisted task planning (using AI for smarter decomposition)
+- [ ] Dependency-aware task scheduling
+- [ ] Interactive conflict resolution in TUI
+- [ ] Custom worker plugins
+- [ ] Task progress visualization
+- [ ] Checkpoint and resume for long tasks
 
 ## Contributing
 
@@ -498,8 +348,6 @@ MIT License - See LICENSE file for details
 
 ## Acknowledgments
 
-- Built with [Firecracker](https://github.com/firecracker-microvm/firecracker) for VM isolation
+- Orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Gemini CLI](https://github.com/google/gemini-cli)
 - TUI powered by [Ratatui](https://github.com/ratatui-org/ratatui)
-- Inspired by Claude Code and similar AI coding assistants
-- Uses Anthropic's Claude API for AI capabilities
-- Color scheme inspired by Google CLI and Claude Code
+- Built with Rust for performance and safety

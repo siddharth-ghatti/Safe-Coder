@@ -195,6 +195,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             MessageType::System => ("System", Style::default().fg(WARNING_COLOR), "ℹ️"),
             MessageType::Error => ("Error", Style::default().fg(ERROR_COLOR), "❌"),
             MessageType::Tool => ("Tool", Style::default().fg(SECONDARY_COLOR), "🔧"),
+            MessageType::Orchestration => ("Orchestrator", Style::default().fg(NEON_PINK), "🎯"),
         };
 
         let time = msg.timestamp.format("%H:%M:%S");
@@ -246,43 +247,89 @@ fn draw_vm_status(f: &mut Frame, app: &App, area: Rect) {
         BORDER_COLOR
     };
 
-    let status_icon = if app.vm_status.running { "◉" } else { "◯" };
-    let status_text = if app.vm_status.running { "ONLINE" } else { "OFFLINE" };
-    let status_color = if app.vm_status.running { NEON_GREEN } else { CYBER_RED };
+    // Show orchestration status if orchestrating, otherwise show VM status
+    let content = if app.is_orchestrating || !app.background_tasks.is_empty() {
+        let active = app.get_active_tasks_count();
+        let completed = app.get_completed_tasks_count();
+        let failed = app.get_failed_tasks_count();
+        
+        let status_icon = if active > 0 { "◉" } else { "◯" };
+        let status_text = if active > 0 { "RUNNING" } else { "IDLE" };
+        let status_color = if active > 0 { NEON_PINK } else { NEON_GREEN };
+        let pulse = if active > 0 && app.animation_frame % 10 < 5 { "▓" } else { "▒" };
 
-    let pulse = if app.vm_status.running && app.animation_frame % 20 < 10 { "▓" } else { "▒" };
+        vec![
+            Line::from(vec![
+                Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
+                Span::styled("ORCHESTRATOR: ", Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD)),
+                Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {}", pulse), Style::default().fg(status_color)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(NEON_PINK)),
+                Span::styled("ACTIVE: ", Style::default().fg(NEON_BLUE)),
+                Span::styled(format!("{}", active), Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(NEON_PINK)),
+                Span::styled("DONE: ", Style::default().fg(NEON_BLUE)),
+                Span::styled(format!("{}", completed), Style::default().fg(NEON_GREEN).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(NEON_PINK)),
+                Span::styled("FAILED: ", Style::default().fg(NEON_BLUE)),
+                Span::styled(format!("{}", failed), Style::default().fg(if failed > 0 { CYBER_RED } else { NEON_PURPLE }).add_modifier(Modifier::BOLD)),
+            ]),
+        ]
+    } else {
+        let status_icon = if app.vm_status.running { "◉" } else { "◯" };
+        let status_text = if app.vm_status.running { "ONLINE" } else { "OFFLINE" };
+        let status_color = if app.vm_status.running { NEON_GREEN } else { CYBER_RED };
+        let pulse = if app.vm_status.running && app.animation_frame % 20 < 10 { "▓" } else { "▒" };
 
-    let content = vec![
-        Line::from(vec![
-            Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
-            Span::styled("STATUS: ", Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD)),
-            Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {}", pulse), Style::default().fg(status_color)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("▶ ", Style::default().fg(NEON_PINK)),
-            Span::styled("UPTIME: ", Style::default().fg(NEON_BLUE)),
-            Span::styled(&app.vm_status.uptime, Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("▶ ", Style::default().fg(NEON_PINK)),
-            Span::styled("MEMORY: ", Style::default().fg(NEON_BLUE)),
-            Span::styled(format!("{} MB", app.vm_status.memory_mb), Style::default().fg(NEON_MAGENTA).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(vec![
-            Span::styled("▶ ", Style::default().fg(NEON_PINK)),
-            Span::styled("vCPUs: ", Style::default().fg(NEON_BLUE)),
-            Span::styled(format!("{}", app.vm_status.vcpus), Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD)),
-        ]),
-    ];
+        vec![
+            Line::from(vec![
+                Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
+                Span::styled("STATUS: ", Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD)),
+                Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {}", pulse), Style::default().fg(status_color)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(NEON_PINK)),
+                Span::styled("UPTIME: ", Style::default().fg(NEON_BLUE)),
+                Span::styled(&app.vm_status.uptime, Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(NEON_PINK)),
+                Span::styled("MEMORY: ", Style::default().fg(NEON_BLUE)),
+                Span::styled(format!("{} MB", app.vm_status.memory_mb), Style::default().fg(NEON_MAGENTA).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("▶ ", Style::default().fg(NEON_PINK)),
+                Span::styled("vCPUs: ", Style::default().fg(NEON_BLUE)),
+                Span::styled(format!("{}", app.vm_status.vcpus), Style::default().fg(NEON_PURPLE).add_modifier(Modifier::BOLD)),
+            ]),
+        ]
+    };
 
-    let block = Block::default()
-        .title(vec![
+    let title = if app.is_orchestrating || !app.background_tasks.is_empty() {
+        vec![
+            Span::styled("◢◤ ", Style::default().fg(NEON_PINK)),
+            Span::styled("WORKERS", Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD)),
+            Span::styled(" ◢◤", Style::default().fg(NEON_PINK)),
+        ]
+    } else {
+        vec![
             Span::styled("◢◤ ", Style::default().fg(NEON_PINK)),
             Span::styled("SYSTEM STATUS", Style::default().fg(NEON_CYAN).add_modifier(Modifier::BOLD)),
             Span::styled(" ◢◤", Style::default().fg(NEON_PINK)),
-        ])
+        ]
+    };
+
+    let block = Block::default()
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(BG_COLOR));
@@ -299,38 +346,80 @@ fn draw_tools(f: &mut Frame, app: &App, area: Rect) {
         BORDER_COLOR
     };
 
-    let block = Block::default()
-        .title(vec![
+    // Show background tasks if orchestrating, otherwise show tool executions
+    let (title, items): (Vec<Span>, Vec<ListItem>) = if !app.background_tasks.is_empty() {
+        let title = vec![
+            Span::styled("◢◤ ", Style::default().fg(NEON_PINK)),
+            Span::styled("BACKGROUND TASKS", Style::default().fg(NEON_MAGENTA).add_modifier(Modifier::BOLD)),
+            Span::styled(" ◢◤", Style::default().fg(NEON_PINK)),
+        ];
+        
+        let items: Vec<ListItem> = app
+            .background_tasks
+            .iter()
+            .rev()
+            .take(area.height.saturating_sub(2) as usize)
+            .map(|task| {
+                let (icon, color) = match &task.status {
+                    super::messages::BackgroundTaskStatus::Pending => ("○", NEON_BLUE),
+                    super::messages::BackgroundTaskStatus::Running => ("◉", NEON_PINK),
+                    super::messages::BackgroundTaskStatus::Completed => ("✓", NEON_GREEN),
+                    super::messages::BackgroundTaskStatus::Failed(_) => ("✗", CYBER_RED),
+                };
+
+                // Truncate description if too long
+                let desc = if task.description.len() > 20 {
+                    format!("{}...", &task.description[..17])
+                } else {
+                    task.description.clone()
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(desc, Style::default().fg(NEON_CYAN)),
+                ]))
+            })
+            .collect();
+        
+        (title, items)
+    } else {
+        let title = vec![
             Span::styled("◢◤ ", Style::default().fg(NEON_PINK)),
             Span::styled("TOOL EXECUTION", Style::default().fg(NEON_MAGENTA).add_modifier(Modifier::BOLD)),
             Span::styled(" ◢◤", Style::default().fg(NEON_PINK)),
-        ])
+        ];
+        
+        let items: Vec<ListItem> = app
+            .tool_executions
+            .iter()
+            .rev()
+            .take(area.height.saturating_sub(2) as usize)
+            .map(|tool| {
+                let (icon, color) = match tool.status {
+                    super::messages::ToolStatus::Running => ("◉", NEON_PINK),
+                    super::messages::ToolStatus::Success => ("◉", NEON_GREEN),
+                    super::messages::ToolStatus::Failed => ("◉", CYBER_RED),
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled("▶ ", Style::default().fg(NEON_CYAN)),
+                    Span::styled(format!("{} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                    Span::styled(&tool.tool_name, Style::default().fg(NEON_MAGENTA).add_modifier(Modifier::BOLD)),
+                ]))
+            })
+            .collect();
+        
+        (title, items)
+    };
+
+    let block = Block::default()
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(BG_COLOR));
 
     let inner_area = block.inner(area);
     f.render_widget(block, area);
-
-    let items: Vec<ListItem> = app
-        .tool_executions
-        .iter()
-        .rev()
-        .take(inner_area.height as usize)
-        .map(|tool| {
-            let (icon, color) = match tool.status {
-                super::messages::ToolStatus::Running => ("◉", NEON_PINK),
-                super::messages::ToolStatus::Success => ("◉", NEON_GREEN),
-                super::messages::ToolStatus::Failed => ("◉", CYBER_RED),
-            };
-
-            ListItem::new(Line::from(vec![
-                Span::styled("▶ ", Style::default().fg(NEON_CYAN)),
-                Span::styled(format!("{} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                Span::styled(&tool.tool_name, Style::default().fg(NEON_MAGENTA).add_modifier(Modifier::BOLD)),
-            ]))
-        })
-        .collect();
 
     let list = List::new(items);
     f.render_widget(list, inner_area);
@@ -409,13 +498,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Span::styled("^C", Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD)),
         Span::styled(" Exit ", Style::default().fg(TEXT_COLOR)),
         Span::styled("│", Style::default().fg(BORDER_COLOR)),
+        Span::styled(" /orch", Style::default().fg(NEON_PINK).add_modifier(Modifier::BOLD)),
+        Span::styled(" Orchestrate ", Style::default().fg(TEXT_COLOR)),
+        Span::styled("│", Style::default().fg(BORDER_COLOR)),
         Span::styled(" ↑↓", Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD)),
         Span::styled(" Scroll ", Style::default().fg(TEXT_COLOR)),
         Span::styled("│", Style::default().fg(BORDER_COLOR)),
         Span::styled(" Tab", Style::default().fg(PRIMARY_COLOR).add_modifier(Modifier::BOLD)),
-        Span::styled(" Switch Panel ", Style::default().fg(TEXT_COLOR)),
+        Span::styled(" Panel ", Style::default().fg(TEXT_COLOR)),
         Span::styled("│", Style::default().fg(BORDER_COLOR)),
-        Span::styled(" Status: ", Style::default().fg(TEXT_COLOR)),
+        Span::styled(" ", Style::default().fg(TEXT_COLOR)),
         Span::styled(&app.status, Style::default().fg(SUCCESS_COLOR)),
     ];
 
