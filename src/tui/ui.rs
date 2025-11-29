@@ -33,6 +33,12 @@ const BORDER_NORMAL: Color = Color::Rgb(66, 66, 66);        // Subtle border
 const BORDER_FOCUS: Color = Color::Rgb(100, 181, 246);      // Focus highlight
 const BG_COLOR: Color = Color::Reset;                       // Terminal default
 
+// Layout constants
+const HEADER_HEIGHT: u16 = 8;   // Height for ASCII art banner + project info
+const INPUT_HEIGHT: u16 = 3;    // Height for input area with border
+const FOOTER_HEIGHT: u16 = 1;   // Height for keyboard hints
+const STATUS_HEIGHT: u16 = 7;   // Height for status panel
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
@@ -40,10 +46,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),  // Header with ASCII art
-            Constraint::Min(0),     // Main content
-            Constraint::Length(3),  // Input area
-            Constraint::Length(1),  // Footer
+            Constraint::Length(HEADER_HEIGHT),
+            Constraint::Min(0),     // Main content (fills remaining space)
+            Constraint::Length(INPUT_HEIGHT),
+            Constraint::Length(FOOTER_HEIGHT),
         ])
         .split(size);
 
@@ -66,8 +72,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let side_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),  // Status
-            Constraint::Min(0),     // Tools
+            Constraint::Length(STATUS_HEIGHT),
+            Constraint::Min(0),     // Tools (fills remaining space)
         ])
         .split(main_chunks[1]);
 
