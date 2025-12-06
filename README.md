@@ -8,7 +8,8 @@ An **AI coding orchestrator** that delegates tasks to specialized AI CLI agents 
 - **Multi-Agent Delegation**: Orchestrate Claude Code, Gemini CLI, and other AI agents
 - **Task Planning**: Automatically break down complex requests into manageable tasks
 - **Workspace Isolation**: Each task runs in its own git worktree/branch
-- **Parallel Execution**: Run multiple AI agents concurrently
+- **Parallel Execution**: Run up to 3 AI agents concurrently with intelligent throttling
+- **Throttle Control**: Per-worker-type concurrency limits and start delays to respect rate limits
 - **Automatic Merging**: Merge completed work back to main branch
 
 ### 🔒 **Security First**
@@ -202,11 +203,17 @@ auto_commit = true
 
 # Orchestrator configuration
 [orchestrator]
-claude_cli_path = "claude"     # Path to Claude Code CLI
-gemini_cli_path = "gemini"     # Path to Gemini CLI
-max_workers = 3                 # Maximum concurrent workers
+claude_cli_path = "claude"      # Path to Claude Code CLI
+gemini_cli_path = "gemini"      # Path to Gemini CLI
+max_workers = 3                 # Maximum concurrent workers (up to 3)
 default_worker = "claude"       # Default: "claude" or "gemini"
 use_worktrees = true            # Use git worktrees for isolation
+
+# Throttle limits for controlling worker concurrency by type
+[orchestrator.throttle_limits]
+claude_max_concurrent = 2       # Max concurrent Claude workers
+gemini_max_concurrent = 2       # Max concurrent Gemini workers
+start_delay_ms = 100            # Delay between starting workers (ms)
 ```
 
 ## How It Works
@@ -216,9 +223,26 @@ use_worktrees = true            # Use git worktrees for isolation
 1. **Request Analysis**: The planner analyzes your request and identifies distinct tasks
 2. **Workspace Creation**: Each task gets its own git worktree (isolated copy)
 3. **Worker Assignment**: Tasks are assigned to AI agents (Claude Code, Gemini CLI)
-4. **Parallel Execution**: Workers execute tasks in their isolated workspaces
+4. **Parallel Execution**: Workers execute tasks concurrently (up to 3 at once)
 5. **Result Merging**: Successful changes are merged back to the main branch
 6. **Cleanup**: Temporary worktrees are removed
+
+### ⚡ **Parallel Execution with Throttling**
+
+Safe Coder can run up to 3 CLI agents in parallel, with intelligent throttling to prevent overwhelming the agents or hitting rate limits:
+
+- **Global Concurrency Limit**: Maximum of 3 workers running simultaneously (`max_workers`)
+- **Per-Worker-Type Limits**: Control how many Claude or Gemini workers can run at once
+  - `claude_max_concurrent`: Max concurrent Claude Code workers (default: 2)
+  - `gemini_max_concurrent`: Max concurrent Gemini CLI workers (default: 2)
+- **Start Delay**: Configurable delay between starting workers (`start_delay_ms`, default: 100ms)
+
+This ensures optimal performance while respecting API rate limits and preventing resource exhaustion.
+
+**Example**: With 5 tasks and `max_workers=3`, `claude_max_concurrent=2`:
+- Tasks 1, 2 (Claude), and 3 (Gemini) start immediately
+- As Task 1 completes, Task 4 starts (but only if <2 Claude workers are active)
+- Task 5 starts when another worker completes
 
 ### 📝 **Task Decomposition**
 

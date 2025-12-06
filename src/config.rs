@@ -51,6 +51,23 @@ pub struct OrchestratorConfig {
     /// Use git worktrees for task isolation
     #[serde(default = "default_true")]
     pub use_worktrees: bool,
+    /// Throttle limits for worker types
+    #[serde(default)]
+    pub throttle_limits: ThrottleLimitsConfig,
+}
+
+/// Throttle limits configuration for different worker types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThrottleLimitsConfig {
+    /// Maximum concurrent Claude Code workers
+    #[serde(default = "default_claude_max")]
+    pub claude_max_concurrent: usize,
+    /// Maximum concurrent Gemini CLI workers
+    #[serde(default = "default_gemini_max")]
+    pub gemini_max_concurrent: usize,
+    /// Delay between starting workers of the same type (milliseconds)
+    #[serde(default = "default_start_delay")]
+    pub start_delay_ms: u64,
 }
 
 fn default_claude_cli() -> String {
@@ -69,6 +86,28 @@ fn default_worker() -> String {
     "claude".to_string()
 }
 
+fn default_claude_max() -> usize {
+    2
+}
+
+fn default_gemini_max() -> usize {
+    2
+}
+
+fn default_start_delay() -> u64 {
+    100
+}
+
+impl Default for ThrottleLimitsConfig {
+    fn default() -> Self {
+        Self {
+            claude_max_concurrent: default_claude_max(),
+            gemini_max_concurrent: default_gemini_max(),
+            start_delay_ms: default_start_delay(),
+        }
+    }
+}
+
 impl Default for OrchestratorConfig {
     fn default() -> Self {
         Self {
@@ -77,6 +116,7 @@ impl Default for OrchestratorConfig {
             max_workers: default_max_workers(),
             default_worker: default_worker(),
             use_worktrees: true,
+            throttle_limits: ThrottleLimitsConfig::default(),
         }
     }
 }
