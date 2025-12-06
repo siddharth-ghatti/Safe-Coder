@@ -70,12 +70,15 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Get version from Cargo.toml
+      - name: Get version and commit info
         id: get_version
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -n1 | cut -d '"' -f2)
+          SHORT_SHA=$(git rev-parse --short HEAD)
           echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=v${VERSION}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           echo "Version: v${VERSION}"
+          echo "Tag: v${VERSION}-${SHORT_SHA}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -88,8 +91,18 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ steps.get_version.outputs.version }}-${{ github.run_number }}
-          name: Release ${{ steps.get_version.outputs.version }}-${{ github.run_number }}
+          tag_name: ${{ steps.get_version.outputs.tag }}
+          name: Release ${{ steps.get_version.outputs.version }} (${{ github.sha }})
           files: artifacts/*/*
+          body: |
+            Release of safe-coder ${{ steps.get_version.outputs.version }}
+            
+            Built from commit: ${{ github.sha }}
+            
+            ## Downloads
+            - **Linux (x86_64)**: safe-coder-linux-x86_64
+            - **macOS (x86_64)**: safe-coder-macos-x86_64
+            - **macOS (ARM64)**: safe-coder-macos-aarch64
+            - **Windows (x86_64)**: safe-coder-windows-x86_64.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
