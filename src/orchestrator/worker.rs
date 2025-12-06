@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use crate::orchestrator::Task;
 
 /// Types of CLI workers available
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum WorkerKind {
     /// Claude Code CLI (https://docs.anthropic.com/en/docs/claude-code)
     ClaudeCode,

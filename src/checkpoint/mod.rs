@@ -90,6 +90,7 @@ impl CheckpointManager {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+    use tokio::fs;
 
     #[tokio::test]
     async fn test_checkpoint_restore() {
@@ -102,7 +103,7 @@ mod tests {
         fs::write(&test_file, "original content").await.unwrap();
 
         // Create checkpoint
-        manager.create_checkpoint(&test_file).await.unwrap();
+        manager.create_checkpoint("test").await.unwrap();
 
         // Modify file
         fs::write(&test_file, "modified content").await.unwrap();

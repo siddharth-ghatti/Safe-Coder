@@ -63,6 +63,15 @@ enum Commands {
         /// Maximum concurrent workers
         #[arg(long, default_value = "3")]
         max_workers: usize,
+        /// Maximum concurrent Claude workers (overrides config)
+        #[arg(long)]
+        claude_max: Option<usize>,
+        /// Maximum concurrent Gemini workers (overrides config)
+        #[arg(long)]
+        gemini_max: Option<usize>,
+        /// Delay between starting workers in milliseconds (overrides config)
+        #[arg(long)]
+        start_delay_ms: Option<u64>,
     },
     /// Configure safe-coder
     Config {
@@ -106,8 +115,8 @@ async fn main() -> Result<()> {
         Commands::Chat { path, tui, demo } => {
             run_chat(path, tui, demo).await?;
         }
-        Commands::Orchestrate { task, path, worker, worktrees, max_workers } => {
-            run_orchestrate(task, path, worker, worktrees, max_workers).await?;
+        Commands::Orchestrate { task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms } => {
+            run_orchestrate(task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms).await?;
         }
         Commands::Config { show, api_key, model } => {
             handle_config(show, api_key, model)?;
@@ -227,6 +236,9 @@ async fn run_orchestrate(
     worker: String,
     use_worktrees: bool,
     max_workers: usize,
+    claude_max: Option<usize>,
+    gemini_max: Option<usize>,
+    start_delay_ms: Option<u64>,
 ) -> Result<()> {
     let canonical_path = project_path.canonicalize()?;
     
@@ -240,13 +252,21 @@ async fn run_orchestrate(
         }
     };
     
-    // Create orchestrator config
-    let config = OrchestratorConfig {
-        claude_cli_path: Some("claude".to_string()),
-        gemini_cli_path: Some("gemini".to_string()),
+    // Load config for throttle limits
+    let user_config = Config::load().unwrap_or_default();
+    
+    // Create orchestrator config (CLI args override config file)
+    let config = orchestrator::OrchestratorConfig {
+        claude_cli_path: Some(user_config.orchestrator.claude_cli_path.clone()),
+        gemini_cli_path: Some(user_config.orchestrator.gemini_cli_path.clone()),
         max_workers,
         default_worker,
         use_worktrees,
+        throttle_limits: orchestrator::ThrottleLimits {
+            claude_max_concurrent: claude_max.unwrap_or(user_config.orchestrator.throttle_limits.claude_max_concurrent),
+            gemini_max_concurrent: gemini_max.unwrap_or(user_config.orchestrator.throttle_limits.gemini_max_concurrent),
+            start_delay_ms: start_delay_ms.unwrap_or(user_config.orchestrator.throttle_limits.start_delay_ms),
+        },
     };
     
     // Create orchestrator
@@ -256,7 +276,12 @@ async fn run_orchestrate(
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Project: {}", canonical_path.display());
     println!("Default worker: {:?}", orchestrator.config.default_worker);
+    println!("Max concurrent workers: {}", orchestrator.config.max_workers);
     println!("Using worktrees: {}", use_worktrees);
+    println!("Throttle limits:");
+    println!("  - Claude max concurrent: {}", orchestrator.config.throttle_limits.claude_max_concurrent);
+    println!("  - Gemini max concurrent: {}", orchestrator.config.throttle_limits.gemini_max_concurrent);
+    println!("  - Start delay: {}ms", orchestrator.config.throttle_limits.start_delay_ms);
     println!();
     
     // If task provided via CLI, execute it directly
