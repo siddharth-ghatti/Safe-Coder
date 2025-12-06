@@ -130,83 +130,25 @@ impl Orchestrator {
     /// Execute tasks in parallel with throttling (max concurrent workers)
     async fn execute_tasks_parallel(&mut self, tasks: &[Task]) -> Result<Vec<TaskResult>> {
         use tokio::task::JoinSet;
-        use std::collections::HashMap;
+        use std::collections::{HashMap, VecDeque};
         
         let mut results = Vec::new();
         let mut join_set = JoinSet::new();
-        let mut task_iter = tasks.iter();
+        let mut task_queue: VecDeque<Task> = tasks.iter().cloned().collect();
         
         // Track active workers by type for throttling
         let mut active_by_type: HashMap<WorkerKind, usize> = HashMap::new();
         let mut last_start_time = std::time::Instant::now();
         
-        // Helper to check if we can start a worker of this type
-        let can_start_worker = |worker_kind: &WorkerKind, active: &HashMap<WorkerKind, usize>| -> bool {
-            let count = active.get(worker_kind).copied().unwrap_or(0);
-            let max = match worker_kind {
-                WorkerKind::ClaudeCode => self.config.throttle_limits.claude_max_concurrent,
-                WorkerKind::GeminiCli => self.config.throttle_limits.gemini_max_concurrent,
-            };
-            count < max
-        };
-        
         // Start initial batch of workers (respecting throttle limits)
-        let mut started = 0;
-        while started < self.config.max_workers && started < tasks.len() {
-            if let Some(task) = task_iter.next() {
-                let worker_kind = task.preferred_worker
-                    .clone()
-                    .unwrap_or(self.config.default_worker.clone());
-                
-                // Check throttle limits for this worker type
-                if !can_start_worker(&worker_kind, &active_by_type) {
-                    continue;
-                }
-                
-                // Apply start delay between workers
-                let elapsed = last_start_time.elapsed().as_millis() as u64;
-                if elapsed < self.config.throttle_limits.start_delay_ms {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(
-                        self.config.throttle_limits.start_delay_ms - elapsed
-                    )).await;
-                }
-                
-                let task = task.clone();
-                let workspace = self.workspace_manager.create_workspace(&task.id).await?;
-                let cli_path = self.get_cli_path(&worker_kind);
-                
-                let worker = Worker::new(
-                    task.clone(),
-                    workspace.clone(),
-                    worker_kind.clone(),
-                    cli_path,
-                )?;
-                
-                let worker = Arc::new(Mutex::new(worker));
-                self.workers.push(worker.clone());
-                
-                // Track active worker
-                *active_by_type.entry(worker_kind.clone()).or_insert(0) += 1;
-                last_start_time = std::time::Instant::now();
-                
-                // Spawn task execution
-                let worker_kind_clone = worker_kind.clone();
-                join_set.spawn(async move {
-                    let result = {
-                        let mut w = worker.lock().await;
-                        w.execute().await
-                    };
-                    
-                    (TaskResult {
-                        task_id: task.id.clone(),
-                        worker_kind: worker_kind_clone.clone(),
-                        workspace_path: workspace,
-                        result,
-                    }, worker_kind_clone)
-                });
-                
-                started += 1;
-            } else {
+        while !task_queue.is_empty() && join_set.len() < self.config.max_workers {
+            if self.try_start_next_task(
+                &mut task_queue, 
+                &mut active_by_type, 
+                &mut last_start_time, 
+                &mut join_set
+            ).await?.is_none() {
+                // No tasks can be started due to throttle limits, wait for one to complete
                 break;
             }
         }
@@ -221,63 +163,105 @@ impl Orchestrator {
                 *count = count.saturating_sub(1);
             }
             
-            // Try to start next task if available
-            for task in task_iter.by_ref() {
-                let worker_kind = task.preferred_worker
-                    .clone()
-                    .unwrap_or(self.config.default_worker.clone());
-                
-                // Check throttle limits for this worker type
-                if !can_start_worker(&worker_kind, &active_by_type) {
-                    continue;
+            // Try to start next task from queue
+            while !task_queue.is_empty() && join_set.len() < self.config.max_workers {
+                if self.try_start_next_task(
+                    &mut task_queue, 
+                    &mut active_by_type, 
+                    &mut last_start_time, 
+                    &mut join_set
+                ).await?.is_some() {
+                    // Task was started successfully
+                    break;
+                } else {
+                    // No tasks can be started due to throttle limits
+                    break;
                 }
-                
-                // Apply start delay between workers
-                let elapsed = last_start_time.elapsed().as_millis() as u64;
-                if elapsed < self.config.throttle_limits.start_delay_ms {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(
-                        self.config.throttle_limits.start_delay_ms - elapsed
-                    )).await;
-                }
-                
-                let task = task.clone();
-                let workspace = self.workspace_manager.create_workspace(&task.id).await?;
-                let cli_path = self.get_cli_path(&worker_kind);
-                
-                let worker = Worker::new(
-                    task.clone(),
-                    workspace.clone(),
-                    worker_kind.clone(),
-                    cli_path,
-                )?;
-                
-                let worker = Arc::new(Mutex::new(worker));
-                self.workers.push(worker.clone());
-                
-                // Track active worker
-                *active_by_type.entry(worker_kind.clone()).or_insert(0) += 1;
-                last_start_time = std::time::Instant::now();
-                
-                let worker_kind_clone = worker_kind.clone();
-                join_set.spawn(async move {
-                    let result = {
-                        let mut w = worker.lock().await;
-                        w.execute().await
-                    };
-                    
-                    (TaskResult {
-                        task_id: task.id.clone(),
-                        worker_kind: worker_kind_clone.clone(),
-                        workspace_path: workspace,
-                        result,
-                    }, worker_kind_clone)
-                });
-                
-                break; // Successfully started a worker, go back to waiting
             }
         }
         
         Ok(results)
+    }
+    
+    /// Try to start the next task from the queue that respects throttle limits
+    /// Returns Some(task) if a task was started, None otherwise
+    async fn try_start_next_task(
+        &mut self,
+        task_queue: &mut std::collections::VecDeque<Task>,
+        active_by_type: &mut std::collections::HashMap<WorkerKind, usize>,
+        last_start_time: &mut std::time::Instant,
+        join_set: &mut tokio::task::JoinSet<(TaskResult, WorkerKind)>,
+    ) -> Result<Option<Task>> {
+        // Try each task in the queue to find one that can be started
+        for i in 0..task_queue.len() {
+            let task = &task_queue[i];
+            let worker_kind = task.preferred_worker
+                .clone()
+                .unwrap_or(self.config.default_worker.clone());
+            
+            // Check throttle limits for this worker type
+            let count = active_by_type.get(&worker_kind).copied().unwrap_or(0);
+            let max = match worker_kind {
+                WorkerKind::ClaudeCode => self.config.throttle_limits.claude_max_concurrent,
+                WorkerKind::GeminiCli => self.config.throttle_limits.gemini_max_concurrent,
+            };
+            
+            if count >= max {
+                // This worker type is at limit, try next task
+                continue;
+            }
+            
+            // Can start this task, remove it from queue
+            let task = task_queue.remove(i).unwrap();
+            let task_id = task.id.clone();
+            
+            // Apply start delay between workers
+            let elapsed = last_start_time.elapsed().as_millis() as u64;
+            if elapsed < self.config.throttle_limits.start_delay_ms {
+                tokio::time::sleep(tokio::time::Duration::from_millis(
+                    self.config.throttle_limits.start_delay_ms - elapsed
+                )).await;
+            }
+            
+            // Start the worker
+            let workspace = self.workspace_manager.create_workspace(&task_id).await?;
+            let cli_path = self.get_cli_path(&worker_kind);
+            
+            let worker = Worker::new(
+                task.clone(),
+                workspace.clone(),
+                worker_kind.clone(),
+                cli_path,
+            )?;
+            
+            let worker = Arc::new(Mutex::new(worker));
+            self.workers.push(worker.clone());
+            
+            // Track active worker
+            *active_by_type.entry(worker_kind.clone()).or_insert(0) += 1;
+            *last_start_time = std::time::Instant::now();
+            
+            // Spawn task execution
+            let worker_kind_clone = worker_kind.clone();
+            join_set.spawn(async move {
+                let result = {
+                    let mut w = worker.lock().await;
+                    w.execute().await
+                };
+                
+                (TaskResult {
+                    task_id,
+                    worker_kind: worker_kind_clone.clone(),
+                    workspace_path: workspace,
+                    result,
+                }, worker_kind_clone)
+            });
+            
+            return Ok(Some(task));
+        }
+        
+        // No tasks could be started due to throttle limits
+        Ok(None)
     }
     
     /// Get the CLI path for a worker kind
