@@ -76,7 +76,7 @@ impl App {
         // Increment animation frame
         self.animation_frame = (self.animation_frame + 1) % 100;
 
-        // Update session uptime
+        // Update session uptime if session is active
         if self.session_status.active {
             let elapsed = Local::now()
                 .signed_duration_since(self.start_time)
