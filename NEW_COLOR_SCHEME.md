@@ -24,11 +24,11 @@ Inspired by Google CLI and Claude Code styling.
 ╔═══════════════════════════════════════════════════════════════════════════════╗
 ║                    🔥 Safe Coder | /path/to/test-project                      ║
 ╠════════════════════════════════════════════════╦══════════════════════════════╣
-║ 💬 Conversation                                ║ 🔥 VM Status                 ║
-║                                                ║ 🟢 Status: Running           ║
+║ 💬 Conversation                                ║ 🔥 Session Status            ║
+║                                                ║ 🟢 Status: Active            ║
 ║ ℹ️  [14:32:01] System: Demo mode              ║ ⏱️  Uptime: 5m 23s           ║
-║    Type 'exit' to quit.                        ║ 💾 Memory: 512 MB            ║
-║    (dark blue text on black background)       ║ ⚙️  vCPUs: 2                 ║
+║    Type 'exit' to quit.                        ║ 📁 Workspaces: 0             ║
+║    (dark blue text on black background)       ║                              ║
 ║                                                ║                              ║
 ║ 👤 [14:32:15] You: Create hello.rs            ║──────────────────────────────║
 ║    (bright blue "You", dark blue text)        ║ 🔧 Recent Tools              ║

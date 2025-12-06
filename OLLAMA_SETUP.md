@@ -146,8 +146,7 @@ Once configured, use Safe Coder normally:
 
 # Output:
 🦙 Using Ollama (local LLM)
-🐳 Auto-selected Docker (darwin detected)
-🐳 Creating isolated copy of project in Docker container
+🔒 Session starting with git tracking
 ...
 ```
 
@@ -452,7 +451,7 @@ Ollama lets you run Safe Coder **completely locally**:
 - ✅ Complete privacy
 - ✅ Works offline
 - ✅ Same tool features (read, write, edit, bash)
-- ✅ Same isolation (Firecracker/Docker)
+- ✅ Git-based change tracking and isolation
 - ⚠️ Requires decent hardware (8GB+ RAM)
 - ⚠️ Smaller models less capable than GPT-4
 

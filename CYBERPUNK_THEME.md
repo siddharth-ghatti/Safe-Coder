@@ -26,7 +26,7 @@ PURE BLACK    #000000  ████████  Background
 - Cursor alternates CYAN ↔ MAGENTA continuously
 
 ### 3. **ANIMATED ELEMENTS**
-- Status pulse: `▓` ↔ `▒` when VM is ONLINE
+- Status pulse: `▓` ↔ `▒` when session is ACTIVE
 - Processing braille: 8-frame smooth cycle
 - All caps text for MAXIMUM IMPACT
 
