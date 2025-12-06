@@ -42,7 +42,7 @@ enum Commands {
         /// Use the TUI (Terminal User Interface) mode
         #[arg(long, default_value = "true")]
         tui: bool,
-        /// Run in demo mode (no VM required)
+        /// Run in demo mode (no LLM API required)
         #[arg(long, default_value = "false")]
         demo: bool,
     },
