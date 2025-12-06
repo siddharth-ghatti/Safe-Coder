@@ -164,19 +164,14 @@ impl Orchestrator {
             }
             
             // Try to start next task from queue
-            while !task_queue.is_empty() && join_set.len() < self.config.max_workers {
-                if self.try_start_next_task(
+            if !task_queue.is_empty() && join_set.len() < self.config.max_workers {
+                // Try to start one task, then go back to waiting for completions
+                self.try_start_next_task(
                     &mut task_queue, 
                     &mut active_by_type, 
                     &mut last_start_time, 
                     &mut join_set
-                ).await?.is_some() {
-                    // Task was started successfully
-                    break;
-                } else {
-                    // No tasks can be started due to throttle limits
-                    break;
-                }
+                ).await?;
             }
         }
         
@@ -211,8 +206,12 @@ impl Orchestrator {
                 continue;
             }
             
-            // Can start this task, remove it from queue
-            let task = task_queue.remove(i).unwrap();
+            // Can start this task, remove it from queue (O(1) for front, O(n) otherwise)
+            let task = if i == 0 {
+                task_queue.pop_front().unwrap()
+            } else {
+                task_queue.remove(i).unwrap()
+            };
             let task_id = task.id.clone();
             
             // Apply start delay between workers
