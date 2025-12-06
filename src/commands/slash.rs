@@ -348,18 +348,18 @@ APPROVAL MODES
 fn get_about_text() -> String {
     format!(r#"Safe Coder v{}
 
-An AI-powered coding assistant with VM/Docker isolation.
+An AI-powered coding assistant with git workspace isolation.
 Built in Rust with security-first design.
 
 Features:
-  • Firecracker microVM or Docker isolation
+  • Git workspace isolation for CLI sessions
   • Multi-LLM support (Claude, OpenAI, Ollama)
   • Git change tracking
   • Session management
   • Custom commands
-  • Tool execution in isolated sandbox
+  • Tool execution in isolated workspaces
 
-Repository: https://github.com/yourusername/safe-coder
+Repository: https://github.com/siddharth-ghatti/safe-coder
 License: MIT
 "#, env!("CARGO_PKG_VERSION"))
 }

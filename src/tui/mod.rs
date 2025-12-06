@@ -46,8 +46,8 @@ impl TuiRunner {
         let mut terminal = Terminal::new(backend)?;
 
         // Add demo messages
-        self.app.start_vm("demo-vm-12345".to_string());
-        self.app.add_system_message("Demo mode - no VM required. Type 'exit' to quit.");
+        self.app.start_session("demo-session-12345".to_string());
+        self.app.add_system_message("Demo mode - Type 'exit' to quit.");
         self.app.add_user_message("Create a hello.rs file");
         self.app.add_assistant_message("I'll create a simple Hello World program in Rust for you.");
 
@@ -320,7 +320,7 @@ impl TuiRunner {
 
                                 // Add demo response
                                 self.app.add_assistant_message(
-                                    "This is demo mode. In production, I would process your request using the LLM and execute tools in the Firecracker VM."
+                                    "This is demo mode. In production, I would process your request using the LLM and execute tools in isolated git workspaces."
                                 );
 
                                 // Add a demo tool execution

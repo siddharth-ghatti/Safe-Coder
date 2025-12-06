@@ -78,7 +78,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         .split(main_chunks[1]);
 
     // Draw status
-    draw_vm_status(f, app, side_chunks[0]);
+    draw_session_status(f, app, side_chunks[0]);
 
     // Draw tools
     draw_tools(f, app, side_chunks[1]);
@@ -232,11 +232,11 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(list, inner_area);
 }
 
-fn draw_vm_status(f: &mut Frame, app: &App, area: Rect) {
+fn draw_session_status(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = app.focus == FocusPanel::Status;
     let border_color = if is_focused { BORDER_FOCUS } else { BORDER_NORMAL };
 
-    // Show orchestration status if orchestrating, otherwise show VM status
+    // Show orchestration status if orchestrating, otherwise show session status
     let content = if app.is_orchestrating || !app.background_tasks.is_empty() {
         let active = app.get_active_tasks_count();
         let completed = app.get_completed_tasks_count();
@@ -266,9 +266,9 @@ fn draw_vm_status(f: &mut Frame, app: &App, area: Rect) {
             ]),
         ]
     } else {
-        let status_icon = if app.vm_status.running { "●" } else { "○" };
-        let status_text = if app.vm_status.running { "Online" } else { "Offline" };
-        let status_color = if app.vm_status.running { ACCENT_GREEN } else { TEXT_SECONDARY };
+        let status_icon = if app.session_status.active { "●" } else { "○" };
+        let status_text = if app.session_status.active { "Active" } else { "Inactive" };
+        let status_color = if app.session_status.active { ACCENT_GREEN } else { TEXT_SECONDARY };
 
         vec![
             Line::from(vec![
@@ -277,16 +277,12 @@ fn draw_vm_status(f: &mut Frame, app: &App, area: Rect) {
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("  Uptime: ", Style::default().fg(TEXT_SECONDARY)),
-                Span::styled(&app.vm_status.uptime, Style::default().fg(TEXT_PRIMARY)),
+                Span::styled("  Uptime:     ", Style::default().fg(TEXT_SECONDARY)),
+                Span::styled(&app.session_status.uptime, Style::default().fg(TEXT_PRIMARY)),
             ]),
             Line::from(vec![
-                Span::styled("  Memory: ", Style::default().fg(TEXT_SECONDARY)),
-                Span::styled(format!("{} MB", app.vm_status.memory_mb), Style::default().fg(TEXT_PRIMARY)),
-            ]),
-            Line::from(vec![
-                Span::styled("  vCPUs:  ", Style::default().fg(TEXT_SECONDARY)),
-                Span::styled(format!("{}", app.vm_status.vcpus), Style::default().fg(TEXT_PRIMARY)),
+                Span::styled("  Workspaces: ", Style::default().fg(TEXT_SECONDARY)),
+                Span::styled(format!("{}", app.session_status.active_workspaces), Style::default().fg(TEXT_PRIMARY)),
             ]),
         ]
     };

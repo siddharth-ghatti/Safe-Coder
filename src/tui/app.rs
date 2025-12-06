@@ -23,17 +23,16 @@ pub struct App {
     pub spinner: Spinner,
     pub scroll_offset: usize,
     pub focus: FocusPanel,
-    pub vm_status: VmStatus,
+    pub session_status: SessionStatus,
     pub start_time: chrono::DateTime<Local>,
 }
 
 #[derive(Debug, Clone)]
-pub struct VmStatus {
-    pub running: bool,
-    pub vm_id: Option<String>,
+pub struct SessionStatus {
+    pub active: bool,
+    pub session_id: Option<String>,
     pub uptime: String,
-    pub memory_mb: usize,
-    pub vcpus: u8,
+    pub active_workspaces: usize,
 }
 
 impl App {
@@ -52,12 +51,11 @@ impl App {
             spinner: Spinner::new(),
             scroll_offset: 0,
             focus: FocusPanel::Chat,
-            vm_status: VmStatus {
-                running: false,
-                vm_id: None,
+            session_status: SessionStatus {
+                active: false,
+                session_id: None,
                 uptime: "0s".to_string(),
-                memory_mb: 512,
-                vcpus: 2,
+                active_workspaces: 0,
             },
             start_time: Local::now(),
         };
@@ -78,12 +76,12 @@ impl App {
         // Increment animation frame
         self.animation_frame = (self.animation_frame + 1) % 100;
 
-        // Update VM uptime
-        if self.vm_status.running {
+        // Update session uptime
+        if self.session_status.active {
             let elapsed = Local::now()
                 .signed_duration_since(self.start_time)
                 .num_seconds();
-            self.vm_status.uptime = if elapsed < 60 {
+            self.session_status.uptime = if elapsed < 60 {
                 format!("{}s", elapsed)
             } else if elapsed < 3600 {
                 format!("{}m {}s", elapsed / 60, elapsed % 60)
@@ -154,19 +152,23 @@ impl App {
         self.processing_message = message.to_string();
     }
 
-    pub fn start_vm(&mut self, vm_id: String) {
-        self.vm_status.running = true;
-        self.vm_status.vm_id = Some(vm_id.clone());
+    pub fn start_session(&mut self, session_id: String) {
+        self.session_status.active = true;
+        self.session_status.session_id = Some(session_id.clone());
         self.start_time = Local::now();
-        self.add_system_message(&format!("VM started: {}", vm_id));
+        self.add_system_message(&format!("Session started: {}", session_id));
     }
 
-    pub fn stop_vm(&mut self) {
-        if let Some(vm_id) = &self.vm_status.vm_id {
-            self.add_system_message(&format!("VM stopped: {}", vm_id));
+    pub fn stop_session(&mut self) {
+        if let Some(session_id) = &self.session_status.session_id {
+            self.add_system_message(&format!("Session ended: {}", session_id));
         }
-        self.vm_status.running = false;
-        self.vm_status.vm_id = None;
+        self.session_status.active = false;
+        self.session_status.session_id = None;
+    }
+
+    pub fn update_workspace_count(&mut self, count: usize) {
+        self.session_status.active_workspaces = count;
     }
 
     pub fn scroll_up(&mut self) {
