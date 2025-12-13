@@ -3,9 +3,23 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
+use crate::auth::StoredToken;
+use crate::auth::anthropic::get_oauth_beta_headers;
+
+/// Authentication type for the Anthropic client
+#[derive(Debug, Clone)]
+pub enum AuthType {
+    /// API key authentication (x-api-key header)
+    ApiKey(String),
+    /// OAuth Bearer token authentication
+    OAuth {
+        access_token: String,
+        refresh_token: String,
+    },
+}
 
 pub struct AnthropicClient {
-    api_key: String,
+    auth: AuthType,
     model: String,
     max_tokens: usize,
     client: reqwest::Client,
@@ -48,13 +62,38 @@ struct AnthropicResponse {
 }
 
 impl AnthropicClient {
+    /// Create a new Anthropic client with API key authentication
     pub fn new(api_key: String, model: String, max_tokens: usize) -> Self {
         Self {
-            api_key,
+            auth: AuthType::ApiKey(api_key),
             model,
             max_tokens,
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Create a new Anthropic client from a stored token
+    pub fn from_token(token: &StoredToken, model: String, max_tokens: usize) -> Self {
+        let auth = match token {
+            StoredToken::Api { key } => AuthType::ApiKey(key.clone()),
+            StoredToken::OAuth { access_token, refresh_token, .. } => AuthType::OAuth {
+                access_token: access_token.clone(),
+                refresh_token: refresh_token.clone(),
+            },
+            StoredToken::Device { access_token, .. } => AuthType::ApiKey(access_token.clone()),
+        };
+
+        Self {
+            auth,
+            model,
+            max_tokens,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    /// Check if using OAuth authentication
+    pub fn is_oauth(&self) -> bool {
+        matches!(self.auth, AuthType::OAuth { .. })
     }
 
     fn convert_message_to_anthropic(msg: &Message) -> AnthropicMessage {
@@ -117,11 +156,26 @@ impl LlmClient for AnthropicClient {
             }).collect(),
         };
 
-        let response = self.client
+        // Build the request with appropriate auth headers
+        let mut req_builder = self.client
             .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        // Add authentication headers based on auth type
+        match &self.auth {
+            AuthType::ApiKey(api_key) => {
+                req_builder = req_builder.header("x-api-key", api_key);
+            }
+            AuthType::OAuth { access_token, .. } => {
+                // OAuth uses Bearer token and special beta headers
+                req_builder = req_builder
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .header("anthropic-beta", get_oauth_beta_headers());
+            }
+        }
+
+        let response = req_builder
             .json(&request)
             .send()
             .await

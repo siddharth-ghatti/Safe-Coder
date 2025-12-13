@@ -231,7 +231,7 @@ fn handle_config(show: bool, api_key: Option<String>, model: Option<String>) -> 
 }
 
 async fn handle_login(provider: &str) -> Result<()> {
-    use auth::{run_device_flow, DeviceFlowAuth};
+    use auth::run_device_flow;
     use config::{Config, LlmProvider};
 
     let llm_provider = match provider.to_lowercase().as_str() {
@@ -251,11 +251,11 @@ async fn handle_login(provider: &str) -> Result<()> {
             run_device_flow(&auth, "GitHub Copilot").await?
         }
         LlmProvider::Anthropic => {
-            let auth = auth::anthropic::AnthropicAuth::new();
-            run_device_flow(&auth, "Anthropic (Claude)").await?
+            // Use the new OAuth PKCE flow for Anthropic
+            handle_anthropic_login().await?
         }
         _ => {
-            anyhow::bail!("Provider does not support device flow authentication");
+            anyhow::bail!("Provider does not support authentication");
         }
     };
 
@@ -263,10 +263,98 @@ async fn handle_login(provider: &str) -> Result<()> {
     let token_path = Config::token_path(&llm_provider)?;
     token.save(&token_path)?;
 
-    println!("✅ Token saved to: {:?}", token_path);
-    println!("\nYou can now use safe-coder with your {} subscription!", provider);
+    println!("\nToken saved to: {:?}", token_path);
+    println!("\nYou can now use safe-coder with your {} account!", provider);
 
     Ok(())
+}
+
+async fn handle_anthropic_login() -> Result<auth::StoredToken> {
+    use auth::anthropic::{AnthropicAuth, AuthMode};
+
+    println!("\nStarting Anthropic/Claude authentication...\n");
+
+    // Ask which mode to use
+    println!("Select login method:");
+    println!("  1. Claude Pro/Max (use your Claude subscription)");
+    println!("  2. Create API Key (generates an API key via console)");
+    println!("  3. Enter API Key manually");
+    print!("\nChoice [1/2/3]: ");
+    io::stdout().flush()?;
+
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice)?;
+    let choice = choice.trim();
+
+    match choice {
+        "1" => {
+            let auth = AnthropicAuth::new();
+            let pending = auth.start_authorization(AuthMode::ClaudeMax);
+
+            println!("\nVisit this URL to authorize:");
+            println!("{}\n", pending.url);
+            println!("After authorizing, you'll get a code. Paste it below.");
+            print!("\nAuthorization code: ");
+            io::stdout().flush()?;
+
+            let mut code = String::new();
+            io::stdin().read_line(&mut code)?;
+            let code = code.trim();
+
+            if code.is_empty() {
+                anyhow::bail!("Authorization code cannot be empty");
+            }
+
+            println!("\nExchanging code for token...");
+            let token = auth.exchange_code(code, &pending.verifier, AuthMode::ClaudeMax).await?;
+            println!("Successfully authenticated with Claude Pro/Max!");
+
+            Ok(token)
+        }
+        "2" => {
+            let auth = AnthropicAuth::new();
+            let pending = auth.start_authorization(AuthMode::Console);
+
+            println!("\nVisit this URL to authorize:");
+            println!("{}\n", pending.url);
+            println!("After authorizing, you'll get a code. Paste it below.");
+            print!("\nAuthorization code: ");
+            io::stdout().flush()?;
+
+            let mut code = String::new();
+            io::stdin().read_line(&mut code)?;
+            let code = code.trim();
+
+            if code.is_empty() {
+                anyhow::bail!("Authorization code cannot be empty");
+            }
+
+            println!("\nExchanging code for API key...");
+            let token = auth.exchange_code(code, &pending.verifier, AuthMode::Console).await?;
+            println!("Successfully created API key!");
+
+            Ok(token)
+        }
+        "3" => {
+            print!("\nEnter your API key: ");
+            io::stdout().flush()?;
+
+            let mut api_key = String::new();
+            io::stdin().read_line(&mut api_key)?;
+            let api_key = api_key.trim().to_string();
+
+            if api_key.is_empty() {
+                anyhow::bail!("API key cannot be empty");
+            }
+
+            println!("API key saved!");
+
+            Ok(auth::StoredToken::Api { key: api_key })
+        }
+        _ => {
+            anyhow::bail!("Invalid choice. Please enter 1, 2, or 3.");
+        }
+    }
 }
 
 fn init_project(path: PathBuf) -> Result<()> {
