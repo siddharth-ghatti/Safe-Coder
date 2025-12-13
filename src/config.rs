@@ -176,18 +176,26 @@ impl Config {
         Ok(config_dir.join("safe-coder").join(token_file))
     }
 
-    /// Get the effective API key/token for the current provider
-    /// Checks for stored tokens first, then falls back to configured API key
-    pub fn get_auth_token(&self) -> Result<String> {
-        // First check if there's a stored token for this provider
+    /// Get the stored token for the current provider (if any)
+    pub fn get_stored_token(&self) -> Option<crate::auth::StoredToken> {
         if let Ok(token_path) = Self::token_path(&self.llm.provider) {
             if token_path.exists() {
                 use crate::auth::StoredToken;
                 if let Ok(stored_token) = StoredToken::load(&token_path) {
-                    if !stored_token.is_expired() {
-                        return Ok(stored_token.access_token);
-                    }
+                    return Some(stored_token);
                 }
+            }
+        }
+        None
+    }
+
+    /// Get the effective API key/token for the current provider
+    /// Checks for stored tokens first, then falls back to configured API key
+    pub fn get_auth_token(&self) -> Result<String> {
+        // First check if there's a stored token for this provider
+        if let Some(stored_token) = self.get_stored_token() {
+            if !stored_token.is_expired() {
+                return Ok(stored_token.get_access_token().to_string());
             }
         }
 

@@ -49,6 +49,20 @@ pub trait LlmClient: Send + Sync {
 pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
     match config.llm.provider {
         LlmProvider::Anthropic => {
+            // Check if we have a stored token (could be OAuth or API key)
+            if let Some(stored_token) = config.get_stored_token() {
+                if !stored_token.is_expired() {
+                    tracing::info!("Using stored {} authentication for Anthropic",
+                        if stored_token.is_oauth() { "OAuth" } else { "API key" });
+                    return Ok(Box::new(anthropic::AnthropicClient::from_token(
+                        &stored_token,
+                        config.llm.model.clone(),
+                        config.llm.max_tokens,
+                    )));
+                }
+            }
+
+            // Fall back to configured API key or environment variable
             let api_key = config.get_auth_token()
                 .context("Anthropic API key not set. Use 'safe-coder login anthropic' or set ANTHROPIC_API_KEY")?;
             Ok(Box::new(anthropic::AnthropicClient::new(

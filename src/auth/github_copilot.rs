@@ -150,7 +150,7 @@ impl DeviceFlowAuth for GitHubCopilotAuth {
                             + exp
                     });
 
-                    return Ok(StoredToken {
+                    return Ok(StoredToken::Device {
                         access_token,
                         refresh_token,
                         expires_at,

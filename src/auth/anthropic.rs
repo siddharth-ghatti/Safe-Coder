@@ -1,61 +1,72 @@
 use anyhow::{Context, Result};
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime};
-use tokio::time::sleep;
+use std::time::SystemTime;
 
-use super::{DeviceCodeResponse, DeviceFlowAuth, StoredToken};
+use super::{pkce, StoredToken};
 
-// Note: These endpoints are based on standard OAuth 2.0 device flow
-// Anthropic may use different endpoints for Claude.ai authentication
-const ANTHROPIC_DEVICE_CODE_URL: &str = "https://api.anthropic.com/v1/oauth/device/code";
-const ANTHROPIC_TOKEN_URL: &str = "https://api.anthropic.com/v1/oauth/token";
-const ANTHROPIC_CLIENT_ID: &str = "anthropic-cli"; // This may need to be updated
+// Claude Code OAuth client ID (from OpenCode)
+const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const ANTHROPIC_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const ANTHROPIC_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
+
+/// Authentication mode for Anthropic
+#[derive(Debug, Clone, Copy)]
+pub enum AuthMode {
+    /// Claude Pro/Max subscription - uses claude.ai
+    ClaudeMax,
+    /// Console API - creates an API key
+    Console,
+}
+
+impl AuthMode {
+    fn authorization_url(&self) -> &'static str {
+        match self {
+            AuthMode::ClaudeMax => "https://claude.ai/oauth/authorize",
+            AuthMode::Console => "https://console.anthropic.com/oauth/authorize",
+        }
+    }
+}
 
 pub struct AnthropicAuth {
     client: reqwest::Client,
 }
 
-#[derive(Debug, Serialize)]
-struct DeviceCodeRequest {
-    client_id: String,
-    scope: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct AnthropicDeviceCodeResponse {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    #[serde(default)]
-    verification_uri_complete: Option<String>,
-    expires_in: u64,
-    interval: u64,
+/// Pending authorization state
+pub struct PendingAuthorization {
+    pub url: String,
+    pub verifier: String,
+    pub mode: AuthMode,
 }
 
 #[derive(Debug, Serialize)]
-struct TokenRequest {
-    client_id: String,
-    device_code: String,
+struct TokenExchangeRequest {
+    code: String,
+    state: String,
     grant_type: String,
+    client_id: String,
+    redirect_uri: String,
+    code_verifier: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenRefreshRequest {
+    grant_type: String,
+    refresh_token: String,
+    client_id: String,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum TokenResponse {
-    Success {
-        access_token: String,
-        token_type: String,
-        #[serde(default)]
-        refresh_token: Option<String>,
-        #[serde(default)]
-        expires_in: Option<u64>,
-    },
-    Pending {
-        error: String,
-        #[serde(default)]
-        error_description: Option<String>,
-    },
+struct TokenResponse {
+    access_token: String,
+    refresh_token: String,
+    expires_in: u64,
+    #[serde(default)]
+    token_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiKeyResponse {
+    raw_key: String,
 }
 
 impl AnthropicAuth {
@@ -64,126 +75,160 @@ impl AnthropicAuth {
             client: reqwest::Client::new(),
         }
     }
-}
 
-#[async_trait]
-impl DeviceFlowAuth for AnthropicAuth {
-    async fn start_device_flow(&self) -> Result<DeviceCodeResponse> {
-        let request = DeviceCodeRequest {
-            client_id: ANTHROPIC_CLIENT_ID.to_string(),
-            scope: "api".to_string(),
+    /// Start the OAuth authorization flow
+    /// Returns the URL to visit and the PKCE verifier to use for token exchange
+    pub fn start_authorization(&self, mode: AuthMode) -> PendingAuthorization {
+        let pkce_challenge = pkce::generate();
+
+        let mut url = url::Url::parse(mode.authorization_url()).unwrap();
+        url.query_pairs_mut()
+            .append_pair("code", "true")
+            .append_pair("client_id", ANTHROPIC_CLIENT_ID)
+            .append_pair("response_type", "code")
+            .append_pair("redirect_uri", ANTHROPIC_REDIRECT_URI)
+            .append_pair("scope", "org:create_api_key user:profile user:inference")
+            .append_pair("code_challenge", &pkce_challenge.challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", &pkce_challenge.verifier);
+
+        PendingAuthorization {
+            url: url.to_string(),
+            verifier: pkce_challenge.verifier,
+            mode,
+        }
+    }
+
+    /// Exchange the authorization code for tokens
+    /// The code format is: "authorization_code#state"
+    pub async fn exchange_code(
+        &self,
+        code: &str,
+        verifier: &str,
+        mode: AuthMode,
+    ) -> Result<StoredToken> {
+        // Parse the code - format is "code#state"
+        let parts: Vec<&str> = code.split('#').collect();
+        let (auth_code, state) = if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            (code, verifier)
         };
 
-        let response = self
-            .client
-            .post(ANTHROPIC_DEVICE_CODE_URL)
+        let request = TokenExchangeRequest {
+            code: auth_code.to_string(),
+            state: state.to_string(),
+            grant_type: "authorization_code".to_string(),
+            client_id: ANTHROPIC_CLIENT_ID.to_string(),
+            redirect_uri: ANTHROPIC_REDIRECT_URI.to_string(),
+            code_verifier: verifier.to_string(),
+        };
+
+        let response = self.client
+            .post(ANTHROPIC_TOKEN_URL)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
             .json(&request)
             .send()
             .await
-            .context("Failed to request device code from Anthropic")?;
+            .context("Failed to exchange code for token")?;
 
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await?;
-            anyhow::bail!("Anthropic device code request failed ({}): {}", status, text);
+            anyhow::bail!("Token exchange failed ({}): {}", status, text);
         }
 
-        let anthropic_response: AnthropicDeviceCodeResponse = response
-            .json()
-            .await
-            .context("Failed to parse device code response")?;
+        let token_response: TokenResponse = response.json().await
+            .context("Failed to parse token response")?;
 
-        Ok(DeviceCodeResponse {
-            device_code: anthropic_response.device_code,
-            user_code: anthropic_response.user_code,
-            verification_uri: anthropic_response.verification_uri,
-            verification_uri_complete: anthropic_response.verification_uri_complete,
-            expires_in: anthropic_response.expires_in,
-            interval: anthropic_response.interval,
+        // For Console mode, we need to create an API key
+        if matches!(mode, AuthMode::Console) {
+            return self.create_api_key(&token_response.access_token).await;
+        }
+
+        // For Claude Max mode, return OAuth tokens
+        let expires_at = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + (token_response.expires_in * 1000);
+
+        Ok(StoredToken::OAuth {
+            access_token: token_response.access_token,
+            refresh_token: token_response.refresh_token,
+            expires_at,
         })
     }
 
-    async fn poll_for_token(&self, device_code: &str, interval: u64) -> Result<StoredToken> {
-        let request = TokenRequest {
+    /// Create an API key using the access token (Console mode)
+    async fn create_api_key(&self, access_token: &str) -> Result<StoredToken> {
+        let response = self.client
+            .post("https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", access_token))
+            .send()
+            .await
+            .context("Failed to create API key")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await?;
+            anyhow::bail!("API key creation failed ({}): {}", status, text);
+        }
+
+        let api_key_response: ApiKeyResponse = response.json().await
+            .context("Failed to parse API key response")?;
+
+        Ok(StoredToken::Api {
+            key: api_key_response.raw_key,
+        })
+    }
+
+    /// Refresh an OAuth token
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<StoredToken> {
+        let request = TokenRefreshRequest {
+            grant_type: "refresh_token".to_string(),
+            refresh_token: refresh_token.to_string(),
             client_id: ANTHROPIC_CLIENT_ID.to_string(),
-            device_code: device_code.to_string(),
-            grant_type: "urn:ietf:params:oauth:grant-type:device_code".to_string(),
         };
 
-        loop {
-            sleep(Duration::from_secs(interval)).await;
+        let response = self.client
+            .post(ANTHROPIC_TOKEN_URL)
+            .header("Content-Type", "application/json")
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to refresh token")?;
 
-            let response = self
-                .client
-                .post(ANTHROPIC_TOKEN_URL)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .json(&request)
-                .send()
-                .await
-                .context("Failed to poll for token")?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await?;
-                anyhow::bail!("Anthropic token request failed ({}): {}", status, text);
-            }
-
-            let token_response: TokenResponse = response
-                .json()
-                .await
-                .context("Failed to parse token response")?;
-
-            match token_response {
-                TokenResponse::Success {
-                    access_token,
-                    token_type,
-                    refresh_token,
-                    expires_in,
-                } => {
-                    let expires_at = expires_in.map(|exp| {
-                        SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs()
-                            + exp
-                    });
-
-                    return Ok(StoredToken {
-                        access_token,
-                        refresh_token,
-                        expires_at,
-                        token_type,
-                    });
-                }
-                TokenResponse::Pending { error, .. } => {
-                    if error == "authorization_pending" {
-                        // Continue polling
-                        continue;
-                    } else if error == "slow_down" {
-                        // Increase interval
-                        sleep(Duration::from_secs(5)).await;
-                        continue;
-                    } else if error == "expired_token" {
-                        anyhow::bail!("Device code expired. Please try again.");
-                    } else if error == "access_denied" {
-                        anyhow::bail!("Access denied by user.");
-                    } else {
-                        anyhow::bail!("Authentication error: {}", error);
-                    }
-                }
-            }
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await?;
+            anyhow::bail!("Token refresh failed ({}): {}", status, text);
         }
+
+        let token_response: TokenResponse = response.json().await
+            .context("Failed to parse refresh token response")?;
+
+        let expires_at = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + (token_response.expires_in * 1000);
+
+        Ok(StoredToken::OAuth {
+            access_token: token_response.access_token,
+            refresh_token: token_response.refresh_token,
+            expires_at,
+        })
     }
 }
 
-// Helper to get session token from Claude.ai (alternative auth method)
-pub async fn get_claude_session_token(email: &str) -> Result<String> {
-    // This is a placeholder for Claude.ai session-based authentication
-    // The actual implementation would depend on Anthropic's consumer API
-    println!("Note: Claude.ai session authentication is not yet fully implemented.");
-    println!("Please use an API key from https://console.anthropic.com for now.");
-    anyhow::bail!("Claude.ai session auth not implemented. Use API key instead.")
+/// Get the beta headers for OAuth-authenticated requests
+pub fn get_oauth_beta_headers() -> String {
+    [
+        "oauth-2025-04-20",
+        "claude-code-20250219",
+        "interleaved-thinking-2025-05-14",
+        "fine-grained-tool-streaming-2025-05-14",
+    ].join(",")
 }
