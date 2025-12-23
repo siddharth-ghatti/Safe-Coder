@@ -80,21 +80,22 @@ Download the latest release for your platform from the [Releases page](https://g
 
 **Linux / macOS:**
 ```bash
-# Download the binary for your platform
+# Download the binary for your platform (choose one)
+
 # For Linux x86_64:
 curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-linux-x86_64
+chmod +x safe-coder-linux-x86_64
+sudo mv safe-coder-linux-x86_64 /usr/local/bin/safe-coder
 
 # For macOS Intel:
 curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-macos-x86_64
+chmod +x safe-coder-macos-x86_64
+sudo mv safe-coder-macos-x86_64 /usr/local/bin/safe-coder
 
 # For macOS Apple Silicon (M1/M2/M3):
 curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-macos-aarch64
-
-# Make it executable
-chmod +x safe-coder-*
-
-# Move to your PATH
-sudo mv safe-coder-* /usr/local/bin/safe-coder
+chmod +x safe-coder-macos-aarch64
+sudo mv safe-coder-macos-aarch64 /usr/local/bin/safe-coder
 ```
 
 **Windows:**
