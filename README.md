@@ -74,10 +74,38 @@ An **AI coding orchestrator** that delegates tasks to specialized AI CLI agents 
 
 ### Installation
 
+#### From GitHub Releases (Recommended)
+
+Download the latest release for your platform from the [Releases page](https://github.com/siddharth-ghatti/Safe-Coder/releases).
+
+**Linux / macOS:**
+```bash
+# Download the binary for your platform
+# For Linux x86_64:
+curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-linux-x86_64
+
+# For macOS Intel:
+curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-macos-x86_64
+
+# For macOS Apple Silicon (M1/M2/M3):
+curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-macos-aarch64
+
+# Make it executable
+chmod +x safe-coder-*
+
+# Move to your PATH
+sudo mv safe-coder-* /usr/local/bin/safe-coder
+```
+
+**Windows:**
+Download `safe-coder-windows-x86_64.exe` from the releases page and either run it directly or add it to your PATH.
+
+#### From Source
+
 ```bash
 # Clone the repository
-git clone <your-repo-url>
-cd safe-coder
+git clone https://github.com/siddharth-ghatti/Safe-Coder.git
+cd Safe-Coder
 
 # Build the project
 cargo build --release
