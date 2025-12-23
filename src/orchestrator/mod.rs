@@ -1,5 +1,5 @@
 //! Orchestrator module for delegating tasks to external CLI agents
-//! 
+//!
 //! This module implements the orchestrator pattern where Safe Coder acts as a
 //! high-level planner that delegates tasks to specialized CLI agents (Claude Code,
 //! Gemini CLI) running in isolated git workspaces.
@@ -15,9 +15,12 @@ pub use workspace::WorkspaceManager;
 pub use task::{Task, TaskStatus, TaskPlan};
 
 use anyhow::Result;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+use crate::approval::ExecutionMode;
 
 /// The main orchestrator that coordinates between the planner and workers
 pub struct Orchestrator {
@@ -48,6 +51,8 @@ pub struct OrchestratorConfig {
     pub use_worktrees: bool,
     /// Throttle limits per worker type
     pub throttle_limits: ThrottleLimits,
+    /// Execution mode: Plan (requires approval) or Act (auto-execute)
+    pub execution_mode: ExecutionMode,
 }
 
 /// Throttle limits for different worker types
@@ -70,6 +75,7 @@ impl Default for OrchestratorConfig {
             default_worker: WorkerKind::ClaudeCode,
             use_worktrees: true,
             throttle_limits: ThrottleLimits::default(),
+            execution_mode: ExecutionMode::default(),
         }
     }
 }
@@ -103,78 +109,178 @@ impl Orchestrator {
     pub async fn process_request(&mut self, request: &str) -> Result<OrchestratorResponse> {
         // Step 1: Create a high-level plan
         let plan = self.planner.create_plan(request).await?;
-        
+
         let mut response = OrchestratorResponse {
             plan: plan.clone(),
             task_results: Vec::new(),
             summary: String::new(),
         };
-        
+
+        // Step 1.5: Handle planning mode - show detailed plan and ask for approval
+        match self.config.execution_mode {
+            ExecutionMode::Plan => {
+                // Show detailed plan
+                let detailed_plan = self.format_orchestration_plan(&plan);
+                println!("{}", detailed_plan);
+
+                // Ask for user approval
+                if !self.ask_plan_approval().await? {
+                    response.summary = "❌ Plan rejected by user. No tasks were executed.".to_string();
+                    return Ok(response);
+                }
+                println!("\n✅ Plan approved. Distributing tasks to workers...\n");
+            }
+            ExecutionMode::Act => {
+                // Brief summary in Act mode
+                println!("📋 Plan created: {} task(s) to execute", plan.tasks.len());
+                for task in &plan.tasks {
+                    let worker = task.preferred_worker.as_ref()
+                        .unwrap_or(&self.config.default_worker);
+                    println!("  • Task {}: {} → {:?}", task.id, task.description, worker);
+                }
+                println!();
+            }
+        }
+
         // Step 2: Execute tasks in parallel with throttling
-        let task_results = self.execute_tasks_parallel(&plan.tasks).await?;
+        // Pass the plan to enhance task instructions with context
+        let task_results = self.execute_tasks_parallel(&plan).await?;
         response.task_results = task_results;
-        
+
         // Step 3: Merge results back
         for task_result in &response.task_results {
             if task_result.result.is_ok() {
                 self.workspace_manager.merge_workspace(&task_result.task_id).await?;
             }
         }
-        
+
         // Generate summary
         response.summary = self.generate_summary(&response);
-        
+
         Ok(response)
+    }
+
+    /// Format a detailed orchestration plan for display
+    fn format_orchestration_plan(&self, plan: &TaskPlan) -> String {
+        let mut output = String::new();
+
+        output.push_str("🎯 ORCHESTRATION PLAN\n");
+        output.push_str("══════════════════════════════════════════════════════════════\n\n");
+
+        output.push_str(&format!("📝 Request: {}\n\n", plan.original_request));
+        output.push_str(&format!("📋 Summary: {}\n\n", plan.summary));
+
+        // Tasks breakdown
+        output.push_str(&format!("🔧 Tasks ({}):\n", plan.tasks.len()));
+        output.push_str("───────────────────────────────────────────────────────────────\n");
+
+        for (i, task) in plan.tasks.iter().enumerate() {
+            let worker = task.preferred_worker.as_ref()
+                .unwrap_or(&self.config.default_worker);
+            let worker_icon = match worker {
+                WorkerKind::ClaudeCode => "🤖",
+                WorkerKind::GeminiCli => "💎",
+            };
+
+            output.push_str(&format!("\n  {}. {} {:?}\n", i + 1, worker_icon, worker));
+            output.push_str(&format!("     📌 {}\n", task.description));
+
+            if !task.relevant_files.is_empty() {
+                output.push_str("     📁 Files: ");
+                output.push_str(&task.relevant_files.join(", "));
+                output.push('\n');
+            }
+
+            if !task.dependencies.is_empty() {
+                output.push_str("     🔗 Depends on: ");
+                output.push_str(&task.dependencies.join(", "));
+                output.push('\n');
+            }
+
+            // Show truncated instructions
+            let instructions_preview = if task.instructions.len() > 100 {
+                format!("{}...", &task.instructions[..100])
+            } else {
+                task.instructions.clone()
+            };
+            output.push_str(&format!("     💬 Instructions: {}\n", instructions_preview));
+        }
+
+        output.push_str("\n───────────────────────────────────────────────────────────────\n");
+
+        // Execution info
+        output.push_str(&format!("\n⚙️  Execution Configuration:\n"));
+        output.push_str(&format!("   • Max concurrent workers: {}\n", self.config.max_workers));
+        output.push_str(&format!("   • Claude max concurrent: {}\n", self.config.throttle_limits.claude_max_concurrent));
+        output.push_str(&format!("   • Gemini max concurrent: {}\n", self.config.throttle_limits.gemini_max_concurrent));
+        output.push_str(&format!("   • Worker start delay: {}ms\n", self.config.throttle_limits.start_delay_ms));
+        output.push_str(&format!("   • Using worktrees: {}\n", self.config.use_worktrees));
+
+        output
+    }
+
+    /// Ask user for approval to execute the plan
+    async fn ask_plan_approval(&self) -> Result<bool> {
+        print!("\n🔒 Execute this orchestration plan? [y/N]: ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        let input = input.trim().to_lowercase();
+        Ok(input == "y" || input == "yes")
     }
     
     /// Execute tasks in parallel with throttling (max concurrent workers)
-    async fn execute_tasks_parallel(&mut self, tasks: &[Task]) -> Result<Vec<TaskResult>> {
+    async fn execute_tasks_parallel(&mut self, plan: &TaskPlan) -> Result<Vec<TaskResult>> {
         use tokio::task::JoinSet;
         use std::collections::{HashMap, VecDeque};
-        
+
         let mut results = Vec::new();
         let mut join_set = JoinSet::new();
-        let mut task_queue: VecDeque<Task> = tasks.iter().cloned().collect();
-        
+        let mut task_queue: VecDeque<Task> = plan.tasks.iter().cloned().collect();
+
         // Track active workers by type for throttling
         let mut active_by_type: HashMap<WorkerKind, usize> = HashMap::new();
         let mut last_start_time = std::time::Instant::now();
-        
+
         // Start initial batch of workers (respecting throttle limits)
         while !task_queue.is_empty() && join_set.len() < self.config.max_workers {
             if self.try_start_next_task(
-                &mut task_queue, 
-                &mut active_by_type, 
-                &mut last_start_time, 
-                &mut join_set
+                &mut task_queue,
+                &mut active_by_type,
+                &mut last_start_time,
+                &mut join_set,
+                plan,
             ).await?.is_none() {
                 // No tasks can be started due to throttle limits, wait for one to complete
                 break;
             }
         }
-        
+
         // As workers complete, start new ones until all tasks are done
         while let Some(result) = join_set.join_next().await {
             let (task_result, completed_worker_kind) = result?;
             results.push(task_result);
-            
+
             // Decrement active count for this worker type
             if let Some(count) = active_by_type.get_mut(&completed_worker_kind) {
                 *count = count.saturating_sub(1);
             }
-            
+
             // Try to start next task from queue
             if !task_queue.is_empty() && join_set.len() < self.config.max_workers {
                 // Try to start one task, then go back to waiting for completions
                 self.try_start_next_task(
-                    &mut task_queue, 
-                    &mut active_by_type, 
-                    &mut last_start_time, 
-                    &mut join_set
+                    &mut task_queue,
+                    &mut active_by_type,
+                    &mut last_start_time,
+                    &mut join_set,
+                    plan,
                 ).await?;
             }
         }
-        
+
         Ok(results)
     }
     
@@ -186,6 +292,7 @@ impl Orchestrator {
         active_by_type: &mut std::collections::HashMap<WorkerKind, usize>,
         last_start_time: &mut std::time::Instant,
         join_set: &mut tokio::task::JoinSet<(TaskResult, WorkerKind)>,
+        plan: &TaskPlan,
     ) -> Result<Option<Task>> {
         // Try each task in the queue to find one that can be started
         for i in 0..task_queue.len() {
@@ -193,27 +300,31 @@ impl Orchestrator {
             let worker_kind = task.preferred_worker
                 .clone()
                 .unwrap_or(self.config.default_worker.clone());
-            
+
             // Check throttle limits for this worker type
             let count = active_by_type.get(&worker_kind).copied().unwrap_or(0);
             let max = match worker_kind {
                 WorkerKind::ClaudeCode => self.config.throttle_limits.claude_max_concurrent,
                 WorkerKind::GeminiCli => self.config.throttle_limits.gemini_max_concurrent,
             };
-            
+
             if count >= max {
                 // This worker type is at limit, try next task
                 continue;
             }
-            
+
             // Can start this task, remove it from queue (O(1) for front, O(n) otherwise)
-            let task = if i == 0 {
+            let mut task = if i == 0 {
                 task_queue.pop_front().unwrap()
             } else {
                 task_queue.remove(i).unwrap()
             };
             let task_id = task.id.clone();
-            
+
+            // Enhance task instructions with plan context
+            // This gives external CLIs the full context of what they're working on
+            task.instructions = task.instructions_with_plan_context(plan);
+
             // Apply start delay between workers
             let elapsed = last_start_time.elapsed().as_millis() as u64;
             if elapsed < self.config.throttle_limits.start_delay_ms {
@@ -221,25 +332,25 @@ impl Orchestrator {
                     self.config.throttle_limits.start_delay_ms - elapsed
                 )).await;
             }
-            
+
             // Start the worker
             let workspace = self.workspace_manager.create_workspace(&task_id).await?;
             let cli_path = self.get_cli_path(&worker_kind);
-            
+
             let worker = Worker::new(
                 task.clone(),
                 workspace.clone(),
                 worker_kind.clone(),
                 cli_path,
             )?;
-            
+
             let worker = Arc::new(Mutex::new(worker));
             self.workers.push(worker.clone());
-            
+
             // Track active worker
             *active_by_type.entry(worker_kind.clone()).or_insert(0) += 1;
             *last_start_time = std::time::Instant::now();
-            
+
             // Spawn task execution
             let worker_kind_clone = worker_kind.clone();
             join_set.spawn(async move {
@@ -247,7 +358,7 @@ impl Orchestrator {
                     let mut w = worker.lock().await;
                     w.execute().await
                 };
-                
+
                 (TaskResult {
                     task_id,
                     worker_kind: worker_kind_clone.clone(),
@@ -255,10 +366,10 @@ impl Orchestrator {
                     result,
                 }, worker_kind_clone)
             });
-            
+
             return Ok(Some(task));
         }
-        
+
         // No tasks could be started due to throttle limits
         Ok(None)
     }
@@ -385,19 +496,20 @@ mod tests {
                 gemini_max_concurrent: 1,
                 start_delay_ms: 50,
             },
+            execution_mode: ExecutionMode::default(),
         };
-        
+
         let orchestrator = Orchestrator::new(temp_dir.path().to_path_buf(), config).await.unwrap();
-        
+
         assert_eq!(orchestrator.config.throttle_limits.claude_max_concurrent, 2);
         assert_eq!(orchestrator.config.throttle_limits.gemini_max_concurrent, 1);
         assert_eq!(orchestrator.config.throttle_limits.start_delay_ms, 50);
     }
-    
+
     #[tokio::test]
     async fn test_max_workers_enforced() {
         let temp_dir = TempDir::new().unwrap();
-        
+
         let config = OrchestratorConfig {
             claude_cli_path: Some("echo".to_string()), // Use echo as mock CLI
             gemini_cli_path: Some("echo".to_string()),
@@ -409,6 +521,7 @@ mod tests {
                 gemini_max_concurrent: 2,
                 start_delay_ms: 0,
             },
+            execution_mode: ExecutionMode::default(),
         };
         
         let mut orchestrator = Orchestrator::new(temp_dir.path().to_path_buf(), config).await.unwrap();

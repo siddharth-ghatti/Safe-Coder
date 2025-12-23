@@ -110,28 +110,89 @@ impl Task {
             status: TaskStatus::default(),
         }
     }
-    
+
     /// Add relevant files
     pub fn with_files(mut self, files: Vec<String>) -> Self {
         self.relevant_files = files;
         self
     }
-    
+
     /// Add dependencies
     pub fn with_dependencies(mut self, deps: Vec<String>) -> Self {
         self.dependencies = deps;
         self
     }
-    
+
     /// Set preferred worker
     pub fn with_worker(mut self, worker: WorkerKind) -> Self {
         self.preferred_worker = Some(worker);
         self
     }
-    
+
     /// Set priority
     pub fn with_priority(mut self, priority: u32) -> Self {
         self.priority = priority;
         self
+    }
+
+    /// Generate enhanced instructions with plan context
+    /// This creates a structured prompt that includes the plan context
+    pub fn instructions_with_plan_context(&self, plan: &TaskPlan) -> String {
+        let mut enhanced = String::new();
+
+        // Add plan context header
+        enhanced.push_str("# Task Context from Safe Coder Orchestration Plan\n\n");
+        enhanced.push_str(&format!("## Overall Plan: {}\n\n", plan.summary));
+        enhanced.push_str(&format!("## Your Task (ID: {})\n", self.id));
+        enhanced.push_str(&format!("**Description**: {}\n\n", self.description));
+
+        // Add file context if available
+        if !self.relevant_files.is_empty() {
+            enhanced.push_str("**Relevant Files**:\n");
+            for file in &self.relevant_files {
+                enhanced.push_str(&format!("- {}\n", file));
+            }
+            enhanced.push('\n');
+        }
+
+        // Add dependency context
+        if !self.dependencies.is_empty() {
+            enhanced.push_str("**Dependencies (tasks that run before this)**:\n");
+            for dep_id in &self.dependencies {
+                if let Some(dep_task) = plan.tasks.iter().find(|t| &t.id == dep_id) {
+                    enhanced.push_str(&format!("- {}: {}\n", dep_id, dep_task.description));
+                }
+            }
+            enhanced.push('\n');
+        }
+
+        // Add related tasks context (other tasks in the plan)
+        let other_tasks: Vec<_> = plan.tasks.iter()
+            .filter(|t| t.id != self.id)
+            .collect();
+        if !other_tasks.is_empty() {
+            enhanced.push_str("**Other tasks in this plan** (for context, not your responsibility):\n");
+            for task in other_tasks.iter().take(5) {
+                enhanced.push_str(&format!("- {}: {}\n", task.id, task.description));
+            }
+            if other_tasks.len() > 5 {
+                enhanced.push_str(&format!("- ...and {} more tasks\n", other_tasks.len() - 5));
+            }
+            enhanced.push('\n');
+        }
+
+        // Add main instructions
+        enhanced.push_str("## Instructions\n\n");
+        enhanced.push_str(&self.instructions);
+        enhanced.push_str("\n\n");
+
+        // Add execution guidelines
+        enhanced.push_str("## Guidelines\n");
+        enhanced.push_str("- Focus only on your assigned task\n");
+        enhanced.push_str("- Make changes in the provided workspace\n");
+        enhanced.push_str("- Ensure your changes are complete and tested before finishing\n");
+        enhanced.push_str("- If you encounter blockers, document them clearly in your output\n");
+
+        enhanced
     }
 }

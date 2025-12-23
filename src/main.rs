@@ -75,6 +75,9 @@ enum Commands {
         /// Delay between starting workers in milliseconds (overrides config)
         #[arg(long)]
         start_delay_ms: Option<u64>,
+        /// Execution mode: plan (create plan and wait for approval) or act (auto-execute)
+        #[arg(short, long, default_value = "act")]
+        mode: String,
     },
     /// Configure safe-coder
     Config {
@@ -118,8 +121,8 @@ async fn main() -> Result<()> {
         Commands::Chat { path, tui, demo, mode } => {
             run_chat(path, tui, demo, mode).await?;
         }
-        Commands::Orchestrate { task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms } => {
-            run_orchestrate(task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms).await?;
+        Commands::Orchestrate { task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms, mode } => {
+            run_orchestrate(task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms, mode).await?;
         }
         Commands::Config { show, api_key, model } => {
             handle_config(show, api_key, model)?;
@@ -257,9 +260,15 @@ async fn run_orchestrate(
     claude_max: Option<usize>,
     gemini_max: Option<usize>,
     start_delay_ms: Option<u64>,
+    mode: String,
 ) -> Result<()> {
+    use approval::ExecutionMode;
+
     let canonical_path = project_path.canonicalize()?;
-    
+
+    // Parse execution mode
+    let execution_mode = ExecutionMode::from_str(&mode)?;
+
     // Parse worker preference
     let default_worker = match worker.to_lowercase().as_str() {
         "claude" | "claude-code" => WorkerKind::ClaudeCode,
@@ -269,10 +278,10 @@ async fn run_orchestrate(
             WorkerKind::ClaudeCode
         }
     };
-    
+
     // Load config for throttle limits
     let user_config = Config::load().unwrap_or_default();
-    
+
     // Create orchestrator config (CLI args override config file)
     let config = orchestrator::OrchestratorConfig {
         claude_cli_path: Some(user_config.orchestrator.claude_cli_path.clone()),
@@ -285,14 +294,21 @@ async fn run_orchestrate(
             gemini_max_concurrent: gemini_max.unwrap_or(user_config.orchestrator.throttle_limits.gemini_max_concurrent),
             start_delay_ms: start_delay_ms.unwrap_or(user_config.orchestrator.throttle_limits.start_delay_ms),
         },
+        execution_mode,
     };
-    
+
     // Create orchestrator
     let mut orchestrator = Orchestrator::new(canonical_path.clone(), config).await?;
-    
+
+    let mode_desc = match execution_mode {
+        ExecutionMode::Plan => "PLAN (requires approval before execution)",
+        ExecutionMode::Act => "ACT (auto-execute)",
+    };
+
     println!("🎯 Safe Coder Orchestrator");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Project: {}", canonical_path.display());
+    println!("Mode: {}", mode_desc);
     println!("Default worker: {:?}", orchestrator.config.default_worker);
     println!("Max concurrent workers: {}", orchestrator.config.max_workers);
     println!("Using worktrees: {}", use_worktrees);
@@ -301,12 +317,12 @@ async fn run_orchestrate(
     println!("  - Gemini max concurrent: {}", orchestrator.config.throttle_limits.gemini_max_concurrent);
     println!("  - Start delay: {}ms", orchestrator.config.throttle_limits.start_delay_ms);
     println!();
-    
+
     // If task provided via CLI, execute it directly
     if let Some(task_text) = task {
         println!("📋 Processing task: {}", task_text);
         println!();
-        
+
         match orchestrator.process_request(&task_text).await {
             Ok(response) => {
                 println!("{}", response.summary);
@@ -315,29 +331,29 @@ async fn run_orchestrate(
                 eprintln!("❌ Orchestration failed: {}", e);
             }
         }
-        
+
         // Cleanup
         orchestrator.cleanup().await?;
         return Ok(());
     }
-    
+
     // Interactive mode
     println!("Enter tasks to orchestrate (type 'exit' to quit, 'status' for worker status):");
     println!();
-    
+
     loop {
         print!("🎯 > ");
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        
+
         let input = input.trim();
-        
+
         if input.is_empty() {
             continue;
         }
-        
+
         match input.to_lowercase().as_str() {
             "exit" | "quit" => {
                 println!("\n🧹 Cleaning up workspaces...");
@@ -352,8 +368,8 @@ async fn run_orchestrate(
                 } else {
                     println!("📊 Worker Status:");
                     for status in statuses {
-                        println!("  - Task {}: {:?} ({:?})", 
-                            status.task_id, 
+                        println!("  - Task {}: {:?} ({:?})",
+                            status.task_id,
                             status.state,
                             status.kind
                         );
@@ -373,11 +389,11 @@ async fn run_orchestrate(
             }
             _ => {}
         }
-        
+
         // Process the request
         println!("\n📋 Planning task: {}", input);
         println!();
-        
+
         match orchestrator.process_request(input).await {
             Ok(response) => {
                 println!("\n{}", response.summary);
@@ -387,7 +403,7 @@ async fn run_orchestrate(
             }
         }
     }
-    
+
     Ok(())
 }
 
