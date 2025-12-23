@@ -8,58 +8,7 @@ pub struct Config {
     #[serde(default)]
     pub git: GitConfig,
     #[serde(default)]
-    pub tools: ToolConfig,
-}
-
-/// Configuration for tool execution limits and behavior
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolConfig {
-    /// Default timeout for bash commands in seconds (default: 120)
-    #[serde(default = "default_bash_timeout")]
-    pub bash_timeout_secs: u64,
-
-    /// Maximum output size in bytes before truncation (default: 1MB)
-    #[serde(default = "default_max_output_bytes")]
-    pub max_output_bytes: usize,
-
-    /// Enable dangerous command warnings (default: true)
-    #[serde(default = "default_true")]
-    pub warn_dangerous_commands: bool,
-
-    /// List of command patterns to warn about (regexes)
-    #[serde(default = "default_dangerous_patterns")]
-    pub dangerous_patterns: Vec<String>,
-}
-
-fn default_bash_timeout() -> u64 {
-    120
-}
-
-fn default_max_output_bytes() -> usize {
-    1_048_576 // 1MB
-}
-
-fn default_dangerous_patterns() -> Vec<String> {
-    vec![
-        r"rm\s+-rf\s+/".to_string(),
-        r"rm\s+-rf\s+~".to_string(),
-        r":()\s*\{\s*:\|\:&\s*\}".to_string(), // Fork bomb
-        r"dd\s+if=.*of=/dev/".to_string(),
-        r"mkfs\.".to_string(),
-        r">\s*/dev/sd".to_string(),
-        r"chmod\s+-R\s+777\s+/".to_string(),
-    ]
-}
-
-impl Default for ToolConfig {
-    fn default() -> Self {
-        Self {
-            bash_timeout_secs: default_bash_timeout(),
-            max_output_bytes: default_max_output_bytes(),
-            warn_dangerous_commands: true,
-            dangerous_patterns: default_dangerous_patterns(),
-        }
-    }
+    pub orchestrator: OrchestratorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +31,94 @@ pub struct LlmConfig {
     /// Base URL for API (optional, for Ollama or custom endpoints)
     #[serde(default)]
     pub base_url: Option<String>,
+}
+
+/// Configuration for the CLI orchestrator
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorConfig {
+    /// Path to Claude Code CLI executable
+    #[serde(default = "default_claude_cli")]
+    pub claude_cli_path: String,
+    /// Path to Gemini CLI executable
+    #[serde(default = "default_gemini_cli")]
+    pub gemini_cli_path: String,
+    /// Maximum number of concurrent workers
+    #[serde(default = "default_max_workers")]
+    pub max_workers: usize,
+    /// Default worker to use: "claude" or "gemini"
+    #[serde(default = "default_worker")]
+    pub default_worker: String,
+    /// Use git worktrees for task isolation
+    #[serde(default = "default_true")]
+    pub use_worktrees: bool,
+    /// Throttle limits for worker types
+    #[serde(default)]
+    pub throttle_limits: ThrottleLimitsConfig,
+}
+
+/// Throttle limits configuration for different worker types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThrottleLimitsConfig {
+    /// Maximum concurrent Claude Code workers
+    #[serde(default = "default_claude_max")]
+    pub claude_max_concurrent: usize,
+    /// Maximum concurrent Gemini CLI workers
+    #[serde(default = "default_gemini_max")]
+    pub gemini_max_concurrent: usize,
+    /// Delay between starting workers of the same type (milliseconds)
+    #[serde(default = "default_start_delay")]
+    pub start_delay_ms: u64,
+}
+
+fn default_claude_cli() -> String {
+    "claude".to_string()
+}
+
+fn default_gemini_cli() -> String {
+    "gemini".to_string()
+}
+
+fn default_max_workers() -> usize {
+    3
+}
+
+fn default_worker() -> String {
+    "claude".to_string()
+}
+
+fn default_claude_max() -> usize {
+    2
+}
+
+fn default_gemini_max() -> usize {
+    2
+}
+
+fn default_start_delay() -> u64 {
+    100
+}
+
+impl Default for ThrottleLimitsConfig {
+    fn default() -> Self {
+        Self {
+            claude_max_concurrent: default_claude_max(),
+            gemini_max_concurrent: default_gemini_max(),
+            start_delay_ms: default_start_delay(),
+        }
+    }
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            claude_cli_path: default_claude_cli(),
+            gemini_cli_path: default_gemini_cli(),
+            max_workers: default_max_workers(),
+            default_worker: default_worker(),
+            use_worktrees: true,
+            throttle_limits: ThrottleLimitsConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +229,7 @@ impl Default for Config {
                 base_url: None,
             },
             git: GitConfig::default(),
-            tools: ToolConfig::default(),
+            orchestrator: OrchestratorConfig::default(),
         }
     }
 }

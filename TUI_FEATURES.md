@@ -30,11 +30,11 @@ The TUI is divided into four main areas:
 
 #### Right Panel: Status & Tools (30% width)
 
-**VM Status (Top)**
-- 🟢/🔴 **Running indicator** with color-coded status
+**Session Status (Top)**
+- 🟢/🔴 **Active indicator** with color-coded status
 - ⏱️ **Uptime counter** in real-time
-- 💾 **Memory allocation** display
-- ⚙️ **vCPU count** information
+- 📁 **Active workspaces** count
+- 🔄 **Git tracking** status
 
 **Recent Tools (Bottom)**
 - 🔧 **Tool execution history**
@@ -97,7 +97,7 @@ The TUI uses visual indicators to show which panel is currently focused:
 
 The TUI updates in real-time:
 
-1. **VM Status**: Uptime counter updates every second
+1. **Session Status**: Uptime counter updates every second
 2. **Spinner**: Animated while AI is thinking (10 frames)
 3. **Messages**: Appear instantly as they're received
 4. **Tool Execution**: Live status updates
@@ -143,7 +143,7 @@ The TUI is highly optimized:
 1. **Quick Exit**: Press Ctrl+C at any time to exit
 2. **Review History**: Use arrow keys to scroll back through conversation
 3. **Monitor Tools**: Switch to Tools panel to see what the AI is executing
-4. **Check VM**: The VM status panel shows if something goes wrong
+4. **Check Session**: The session status panel shows if something goes wrong
 5. **Long Output**: For long AI responses, use PageUp/PageDown for faster scrolling
 
 ## Future TUI Enhancements

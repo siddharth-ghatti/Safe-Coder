@@ -7,6 +7,7 @@ mod custom_commands;
 mod git;
 mod llm;
 mod memory;
+mod orchestrator;
 mod persistence;
 mod session;
 mod tools;
@@ -20,11 +21,12 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::{CommandParser, CommandResult};
 use config::Config;
+use orchestrator::{Orchestrator, OrchestratorConfig, WorkerKind};
 use session::Session;
 
 #[derive(Parser)]
 #[command(name = "safe-coder")]
-#[command(about = "AI coding assistant with Firecracker VM isolation", long_about = None)]
+#[command(about = "AI coding orchestrator that delegates to Claude Code, Gemini CLI, and other AI agents", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -40,9 +42,36 @@ enum Commands {
         /// Use the TUI (Terminal User Interface) mode
         #[arg(long, default_value = "true")]
         tui: bool,
-        /// Run in demo mode (no VM required)
+        /// Run in demo mode (no LLM API required)
         #[arg(long, default_value = "false")]
         demo: bool,
+    },
+    /// Orchestrate a task by delegating to external AI CLIs
+    Orchestrate {
+        /// The task or request to execute
+        #[arg(short, long)]
+        task: Option<String>,
+        /// Path to the project directory (default: current directory)
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Preferred worker: claude, gemini (default: claude)
+        #[arg(short, long, default_value = "claude")]
+        worker: String,
+        /// Use git worktrees for isolation (default: true)
+        #[arg(long, default_value = "true")]
+        worktrees: bool,
+        /// Maximum concurrent workers
+        #[arg(long, default_value = "3")]
+        max_workers: usize,
+        /// Maximum concurrent Claude workers (overrides config)
+        #[arg(long)]
+        claude_max: Option<usize>,
+        /// Maximum concurrent Gemini workers (overrides config)
+        #[arg(long)]
+        gemini_max: Option<usize>,
+        /// Delay between starting workers in milliseconds (overrides config)
+        #[arg(long)]
+        start_delay_ms: Option<u64>,
     },
     /// Configure safe-coder
     Config {
@@ -85,6 +114,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Chat { path, tui, demo } => {
             run_chat(path, tui, demo).await?;
+        }
+        Commands::Orchestrate { task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms } => {
+            run_orchestrate(task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms).await?;
         }
         Commands::Config { show, api_key, model } => {
             handle_config(show, api_key, model)?;
@@ -195,6 +227,164 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()
     }
 
     Ok(())
+}
+
+/// Run the orchestrator to delegate tasks to external CLI agents
+async fn run_orchestrate(
+    task: Option<String>,
+    project_path: PathBuf,
+    worker: String,
+    use_worktrees: bool,
+    max_workers: usize,
+    claude_max: Option<usize>,
+    gemini_max: Option<usize>,
+    start_delay_ms: Option<u64>,
+) -> Result<()> {
+    let canonical_path = project_path.canonicalize()?;
+    
+    // Parse worker preference
+    let default_worker = match worker.to_lowercase().as_str() {
+        "claude" | "claude-code" => WorkerKind::ClaudeCode,
+        "gemini" | "gemini-cli" => WorkerKind::GeminiCli,
+        _ => {
+            eprintln!("Unknown worker '{}'. Using claude.", worker);
+            WorkerKind::ClaudeCode
+        }
+    };
+    
+    // Load config for throttle limits
+    let user_config = Config::load().unwrap_or_default();
+    
+    // Create orchestrator config (CLI args override config file)
+    let config = orchestrator::OrchestratorConfig {
+        claude_cli_path: Some(user_config.orchestrator.claude_cli_path.clone()),
+        gemini_cli_path: Some(user_config.orchestrator.gemini_cli_path.clone()),
+        max_workers,
+        default_worker,
+        use_worktrees,
+        throttle_limits: orchestrator::ThrottleLimits {
+            claude_max_concurrent: claude_max.unwrap_or(user_config.orchestrator.throttle_limits.claude_max_concurrent),
+            gemini_max_concurrent: gemini_max.unwrap_or(user_config.orchestrator.throttle_limits.gemini_max_concurrent),
+            start_delay_ms: start_delay_ms.unwrap_or(user_config.orchestrator.throttle_limits.start_delay_ms),
+        },
+    };
+    
+    // Create orchestrator
+    let mut orchestrator = Orchestrator::new(canonical_path.clone(), config).await?;
+    
+    println!("🎯 Safe Coder Orchestrator");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Project: {}", canonical_path.display());
+    println!("Default worker: {:?}", orchestrator.config.default_worker);
+    println!("Max concurrent workers: {}", orchestrator.config.max_workers);
+    println!("Using worktrees: {}", use_worktrees);
+    println!("Throttle limits:");
+    println!("  - Claude max concurrent: {}", orchestrator.config.throttle_limits.claude_max_concurrent);
+    println!("  - Gemini max concurrent: {}", orchestrator.config.throttle_limits.gemini_max_concurrent);
+    println!("  - Start delay: {}ms", orchestrator.config.throttle_limits.start_delay_ms);
+    println!();
+    
+    // If task provided via CLI, execute it directly
+    if let Some(task_text) = task {
+        println!("📋 Processing task: {}", task_text);
+        println!();
+        
+        match orchestrator.process_request(&task_text).await {
+            Ok(response) => {
+                println!("{}", response.summary);
+            }
+            Err(e) => {
+                eprintln!("❌ Orchestration failed: {}", e);
+            }
+        }
+        
+        // Cleanup
+        orchestrator.cleanup().await?;
+        return Ok(());
+    }
+    
+    // Interactive mode
+    println!("Enter tasks to orchestrate (type 'exit' to quit, 'status' for worker status):");
+    println!();
+    
+    loop {
+        print!("🎯 > ");
+        io::stdout().flush()?;
+        
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        
+        let input = input.trim();
+        
+        if input.is_empty() {
+            continue;
+        }
+        
+        match input.to_lowercase().as_str() {
+            "exit" | "quit" => {
+                println!("\n🧹 Cleaning up workspaces...");
+                orchestrator.cleanup().await?;
+                println!("✨ Orchestrator session ended. Goodbye!");
+                break;
+            }
+            "status" => {
+                let statuses = orchestrator.get_status().await;
+                if statuses.is_empty() {
+                    println!("No active workers.");
+                } else {
+                    println!("📊 Worker Status:");
+                    for status in statuses {
+                        println!("  - Task {}: {:?} ({:?})", 
+                            status.task_id, 
+                            status.state,
+                            status.kind
+                        );
+                    }
+                }
+                continue;
+            }
+            "cancel" => {
+                println!("🛑 Cancelling all workers...");
+                orchestrator.cancel_all().await?;
+                println!("All workers cancelled.");
+                continue;
+            }
+            "help" => {
+                print_orchestrator_help();
+                continue;
+            }
+            _ => {}
+        }
+        
+        // Process the request
+        println!("\n📋 Planning task: {}", input);
+        println!();
+        
+        match orchestrator.process_request(input).await {
+            Ok(response) => {
+                println!("\n{}", response.summary);
+            }
+            Err(e) => {
+                eprintln!("❌ Error: {}", e);
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+fn print_orchestrator_help() {
+    println!();
+    println!("🎯 Orchestrator Commands:");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("  exit/quit  - End the session and cleanup");
+    println!("  status     - Show status of all workers");
+    println!("  cancel     - Cancel all running workers");
+    println!("  help       - Show this help message");
+    println!();
+    println!("Enter any other text to orchestrate a task.");
+    println!("The task will be broken down and delegated to AI agents.");
+    println!();
 }
 
 fn handle_config(show: bool, api_key: Option<String>, model: Option<String>) -> Result<()> {

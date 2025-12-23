@@ -1,4 +1,4 @@
-use super::messages::{ChatMessage, ToolExecution};
+use super::messages::{ChatMessage, ToolExecution, BackgroundTask, BackgroundTaskStatus};
 use super::spinner::Spinner;
 use chrono::Local;
 
@@ -13,25 +13,26 @@ pub struct App {
     pub project_path: String,
     pub messages: Vec<ChatMessage>,
     pub tool_executions: Vec<ToolExecution>,
+    pub background_tasks: Vec<BackgroundTask>,
     pub input: String,
     pub status: String,
     pub is_thinking: bool,
+    pub is_orchestrating: bool,
     pub processing_message: String,
     pub animation_frame: usize,
     pub spinner: Spinner,
     pub scroll_offset: usize,
     pub focus: FocusPanel,
-    pub vm_status: VmStatus,
+    pub session_status: SessionStatus,
     pub start_time: chrono::DateTime<Local>,
 }
 
 #[derive(Debug, Clone)]
-pub struct VmStatus {
-    pub running: bool,
-    pub vm_id: Option<String>,
+pub struct SessionStatus {
+    pub active: bool,
+    pub session_id: Option<String>,
     pub uptime: String,
-    pub memory_mb: usize,
-    pub vcpus: u8,
+    pub active_workspaces: usize,
 }
 
 impl App {
@@ -40,26 +41,27 @@ impl App {
             project_path: project_path.clone(),
             messages: Vec::new(),
             tool_executions: Vec::new(),
+            background_tasks: Vec::new(),
             input: String::new(),
             status: "Ready".to_string(),
             is_thinking: false,
+            is_orchestrating: false,
             processing_message: String::new(),
             animation_frame: 0,
             spinner: Spinner::new(),
             scroll_offset: 0,
             focus: FocusPanel::Chat,
-            vm_status: VmStatus {
-                running: false,
-                vm_id: None,
+            session_status: SessionStatus {
+                active: false,
+                session_id: None,
                 uptime: "0s".to_string(),
-                memory_mb: 512,
-                vcpus: 2,
+                active_workspaces: 0,
             },
             start_time: Local::now(),
         };
 
         app.messages.push(ChatMessage::system(format!(
-            "🔥 Safe Coder initialized\nProject: {}\nType your request to begin...",
+            "🔥 Safe Coder initialized\nProject: {}\nType your request or use /orchestrate <task> to delegate to AI agents...",
             project_path
         )));
 
@@ -74,12 +76,12 @@ impl App {
         // Increment animation frame
         self.animation_frame = (self.animation_frame + 1) % 100;
 
-        // Update VM uptime
-        if self.vm_status.running {
+        // Update session uptime if session is active
+        if self.session_status.active {
             let elapsed = Local::now()
                 .signed_duration_since(self.start_time)
                 .num_seconds();
-            self.vm_status.uptime = if elapsed < 60 {
+            self.session_status.uptime = if elapsed < 60 {
                 format!("{}s", elapsed)
             } else if elapsed < 3600 {
                 format!("{}m {}s", elapsed / 60, elapsed % 60)
@@ -150,19 +152,23 @@ impl App {
         self.processing_message = message.to_string();
     }
 
-    pub fn start_vm(&mut self, vm_id: String) {
-        self.vm_status.running = true;
-        self.vm_status.vm_id = Some(vm_id.clone());
+    pub fn start_session(&mut self, session_id: String) {
+        self.session_status.active = true;
+        self.session_status.session_id = Some(session_id.clone());
         self.start_time = Local::now();
-        self.add_system_message(&format!("VM started: {}", vm_id));
+        self.add_system_message(&format!("Session started: {}", session_id));
     }
 
-    pub fn stop_vm(&mut self) {
-        if let Some(vm_id) = &self.vm_status.vm_id {
-            self.add_system_message(&format!("VM stopped: {}", vm_id));
+    pub fn stop_session(&mut self) {
+        if let Some(session_id) = &self.session_status.session_id {
+            self.add_system_message(&format!("Session ended: {}", session_id));
         }
-        self.vm_status.running = false;
-        self.vm_status.vm_id = None;
+        self.session_status.active = false;
+        self.session_status.session_id = None;
+    }
+
+    pub fn update_workspace_count(&mut self, count: usize) {
+        self.session_status.active_workspaces = count;
     }
 
     pub fn scroll_up(&mut self) {
@@ -197,5 +203,62 @@ impl App {
             FocusPanel::Tools => FocusPanel::Status,
             FocusPanel::Status => FocusPanel::Chat,
         };
+    }
+
+    // Background task management methods
+    pub fn add_background_task(&mut self, task: BackgroundTask) {
+        self.background_tasks.push(task);
+        self.is_orchestrating = true;
+    }
+
+    pub fn update_task_status(&mut self, task_id: &str, status: BackgroundTaskStatus) {
+        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+            task.status = status;
+        }
+        // Check if any tasks are still running
+        self.is_orchestrating = self.background_tasks.iter()
+            .any(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending));
+    }
+
+    pub fn complete_task(&mut self, task_id: &str, output: String) {
+        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+            task.complete(output);
+        }
+        self.check_orchestration_complete();
+    }
+
+    pub fn fail_task(&mut self, task_id: &str, error: String) {
+        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+            task.fail(error);
+        }
+        self.check_orchestration_complete();
+    }
+
+    fn check_orchestration_complete(&mut self) {
+        self.is_orchestrating = self.background_tasks.iter()
+            .any(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending));
+    }
+
+    pub fn add_orchestration_message(&mut self, content: &str) {
+        self.messages.push(ChatMessage::orchestration(content.to_string()));
+        self.scroll_to_bottom();
+    }
+
+    pub fn get_active_tasks_count(&self) -> usize {
+        self.background_tasks.iter()
+            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending))
+            .count()
+    }
+
+    pub fn get_completed_tasks_count(&self) -> usize {
+        self.background_tasks.iter()
+            .filter(|t| matches!(t.status, BackgroundTaskStatus::Completed))
+            .count()
+    }
+
+    pub fn get_failed_tasks_count(&self) -> usize {
+        self.background_tasks.iter()
+            .filter(|t| matches!(t.status, BackgroundTaskStatus::Failed(_)))
+            .count()
     }
 }

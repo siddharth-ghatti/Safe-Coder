@@ -1,6 +1,6 @@
 # Qwen Code CLI-Inspired Features
 
-This document describes all the new features added to Safe Coder to match the functionality of Qwen Code CLI while maintaining VM/Docker isolation security.
+This document describes all the new features added to Safe Coder to match the functionality of Qwen Code CLI while maintaining git-based workspace isolation.
 
 ## Overview
 
@@ -312,14 +312,14 @@ When conversations get long and consume too many tokens:
 
 This keeps the most recent messages and discards older context, saving tokens.
 
-## Integration with Isolation
+## Integration with Git Workspace Isolation
 
-All commands respect the VM/Docker isolation:
+All commands work with git-based change tracking:
 
-- **At-commands** read files from the sandbox
-- **Shell passthrough** executes in the sandbox
-- **File restoration** works on sandbox files
-- **All AI operations** happen within the isolated environment
+- **At-commands** read files from the project directory
+- **Shell passthrough** executes in the project directory
+- **File restoration** works with git checkpoints
+- **All AI operations** are tracked with automatic git commits
 
 ## Security Notes
 
@@ -397,8 +397,8 @@ All commands respect the VM/Docker isolation:
 | Statistics | ✅ | ✅ | Token tracking |
 | MCP Support | ✅ | ⏳ | Coming soon |
 | Extensions | ✅ | ⏳ | Coming soon |
-| VM Isolation | ❌ | ✅ | **Safe Coder exclusive** |
-| Git Tracking | Partial | ✅ | **Auto-commit in sandbox** |
+| Git Workspace Isolation | ❌ | ✅ | **Safe Coder exclusive** |
+| Git Tracking | Partial | ✅ | **Auto-commit after tools** |
 | File Restoration | Limited | ✅ | **Checkpoint system** |
 
 ## What's Next

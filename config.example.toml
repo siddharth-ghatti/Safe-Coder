@@ -67,3 +67,32 @@ max_tokens = 8192
 #
 # Set to false if you want to manage git commits manually
 auto_commit = true
+
+# Orchestrator configuration for multi-agent delegation
+[orchestrator]
+# Path to Claude Code CLI (install: npm install -g @anthropic-ai/claude-code)
+claude_cli_path = "claude"
+
+# Path to Gemini CLI (install from: https://github.com/google/gemini-cli)
+gemini_cli_path = "gemini"
+
+# Maximum number of concurrent workers (up to 3 recommended)
+max_workers = 3
+
+# Default worker to use: "claude" or "gemini"
+default_worker = "claude"
+
+# Use git worktrees for task isolation (recommended)
+use_worktrees = true
+
+# Throttle limits for controlling worker concurrency by type
+[orchestrator.throttle_limits]
+# Maximum concurrent Claude Code workers (to respect rate limits)
+claude_max_concurrent = 2
+
+# Maximum concurrent Gemini CLI workers (to respect rate limits)
+gemini_max_concurrent = 2
+
+# Delay between starting workers of the same type (milliseconds)
+# This helps prevent overwhelming the CLI agents or hitting rate limits
+start_delay_ms = 100

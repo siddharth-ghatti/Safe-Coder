@@ -102,8 +102,8 @@ mod tests {
         let test_file = sandbox.join("test.txt");
         fs::write(&test_file, "original content").await.unwrap();
 
-        // Create checkpoint with a label
-        manager.create_checkpoint("test checkpoint").await.unwrap();
+        // Create checkpoint
+        manager.create_checkpoint("test").await.unwrap();
 
         // Modify file
         fs::write(&test_file, "modified content").await.unwrap();
