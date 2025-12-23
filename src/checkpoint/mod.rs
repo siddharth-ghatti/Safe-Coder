@@ -91,27 +91,62 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
     use tokio::fs;
+    use tokio::process::Command;
 
     #[tokio::test]
     async fn test_checkpoint_restore() {
         let temp_dir = TempDir::new().unwrap();
         let sandbox = temp_dir.path().to_path_buf();
-        let mut manager = CheckpointManager::new(sandbox.clone());
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
+
+        // Configure git user for commits
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
 
         // Create a test file
         let test_file = sandbox.join("test.txt");
         fs::write(&test_file, "original content").await.unwrap();
 
-        // Create checkpoint
-        manager.create_checkpoint("test").await.unwrap();
+        // Add and commit the file (needed for git checkout to work)
+        Command::new("git")
+            .args(["add", "test.txt"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
+
+        let mut manager = CheckpointManager::new(sandbox.clone());
 
         // Modify file
         fs::write(&test_file, "modified content").await.unwrap();
 
-        // Restore
+        // Restore using git checkout HEAD
         manager.restore_file(&test_file).await.unwrap();
 
-        // Check content
+        // Check content is restored to original
         let content = fs::read_to_string(&test_file).await.unwrap();
         assert_eq!(content, "original content");
     }

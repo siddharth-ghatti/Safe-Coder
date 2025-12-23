@@ -9,6 +9,57 @@ pub struct Config {
     pub git: GitConfig,
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
+    #[serde(default)]
+    pub tools: ToolConfig,
+}
+
+/// Configuration for tool execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfig {
+    /// Timeout for bash commands in seconds
+    #[serde(default = "default_bash_timeout")]
+    pub bash_timeout_secs: u64,
+    /// Maximum output size in bytes
+    #[serde(default = "default_max_output")]
+    pub max_output_bytes: usize,
+    /// Warn before executing dangerous commands
+    #[serde(default = "default_true")]
+    pub warn_dangerous_commands: bool,
+    /// Regex patterns for dangerous commands to block
+    #[serde(default = "default_dangerous_patterns")]
+    pub dangerous_patterns: Vec<String>,
+}
+
+fn default_bash_timeout() -> u64 {
+    120
+}
+
+fn default_max_output() -> usize {
+    1_048_576 // 1 MB
+}
+
+fn default_dangerous_patterns() -> Vec<String> {
+    vec![
+        r"rm\s+(-[a-zA-Z]*)?-rf\s+[/~]".to_string(),        // rm -rf / or ~
+        r":\s*\(\s*\)\s*\{.*\}".to_string(),                // fork bomb :(){ :|:& };:
+        r">\s*/dev/sd[a-z]".to_string(),                    // overwrite disk
+        r"mkfs\.".to_string(),                              // format filesystem
+        r"dd\s+.*of=/dev/sd[a-z]".to_string(),              // dd to disk
+        r"chmod\s+(-[a-zA-Z]*\s+)?777\s+/".to_string(),     // chmod 777 /
+        r"curl\s+.*\|\s*bash".to_string(),                  // curl | bash (remote code exec)
+        r"wget\s+.*\|\s*bash".to_string(),                  // wget | bash
+    ]
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            bash_timeout_secs: default_bash_timeout(),
+            max_output_bytes: default_max_output(),
+            warn_dangerous_commands: true,
+            dangerous_patterns: default_dangerous_patterns(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,6 +281,7 @@ impl Default for Config {
             },
             git: GitConfig::default(),
             orchestrator: OrchestratorConfig::default(),
+            tools: ToolConfig::default(),
         }
     }
 }
