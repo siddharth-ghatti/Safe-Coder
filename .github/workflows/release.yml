@@ -115,17 +115,17 @@ jobs:
             
             ### Linux / macOS
             ```bash
-            # Download the binary for your platform (example for Linux x86_64)
-            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.tag }}/safe-coder-linux-x86_64
+            # Replace BINARY_NAME with your platform's binary from the Downloads table above
+            # Example: safe-coder-linux-x86_64, safe-coder-macos-x86_64, or safe-coder-macos-aarch64
             
-            # Make it executable
-            chmod +x safe-coder-linux-x86_64
-            
-            # Move to your PATH (optional)
-            sudo mv safe-coder-linux-x86_64 /usr/local/bin/safe-coder
+            curl -LO https://github.com/${{ github.repository }}/releases/download/${{ steps.get_version.outputs.tag }}/BINARY_NAME
+            chmod +x BINARY_NAME
+            sudo mv BINARY_NAME /usr/local/bin/safe-coder
             ```
             
             ### Windows
-            Download `safe-coder-windows-x86_64.exe` and run it directly, or add it to your PATH.
+            1. Download `safe-coder-windows-x86_64.exe` from the assets above
+            2. Run the executable directly, or move it to a directory in your PATH
+            3. (Optional) To add to PATH: Move to `C:\Program Files\safe-coder\` and add that directory to your system PATH
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
