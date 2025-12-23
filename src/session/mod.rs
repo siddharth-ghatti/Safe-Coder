@@ -10,7 +10,7 @@ use crate::git::GitManager;
 use crate::llm::{ContentBlock, LlmClient, Message, ToolDefinition, create_client};
 use crate::memory::MemoryManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolContext};
 
 pub struct Session {
     config: Config,
@@ -159,11 +159,12 @@ impl Session {
 
                     tracing::info!("🔧 Executing tool: {}", name);
 
-                    let working_dir = &self.project_path;
+                    // Create tool context with working directory and config
+                    let tool_ctx = ToolContext::new(&self.project_path, &self.config.tools);
 
                     let result = match self.tool_registry.get_tool(name) {
                         Some(tool) => {
-                            match tool.execute(input.clone(), working_dir).await {
+                            match tool.execute(input.clone(), &tool_ctx).await {
                                 Ok(output) => {
                                     tools_executed.push(name.clone());
                                     output
@@ -238,7 +239,8 @@ impl Session {
             "command": command
         });
 
-        bash_tool.execute(input, &self.project_path).await
+        let tool_ctx = ToolContext::new(&self.project_path, &self.config.tools);
+        bash_tool.execute(input, &tool_ctx).await
     }
 
     /// Get session statistics
@@ -390,6 +392,18 @@ impl Session {
         output.push_str(&format!("Max Tokens: {}\n", self.config.llm.max_tokens));
         output.push_str(&format!("Git Auto-Commit: {}\n", self.config.git.auto_commit));
         output.push_str(&format!("Project: {}\n", self.project_path.display()));
+
+        output.push_str("\n--- Tool Settings ---\n");
+        output.push_str(&format!("Bash Timeout: {}s\n", self.config.tools.bash_timeout_secs));
+        output.push_str(&format!(
+            "Max Output Size: {} bytes ({:.1} MB)\n",
+            self.config.tools.max_output_bytes,
+            self.config.tools.max_output_bytes as f64 / 1_048_576.0
+        ));
+        output.push_str(&format!(
+            "Dangerous Command Warnings: {}\n",
+            if self.config.tools.warn_dangerous_commands { "enabled" } else { "disabled" }
+        ));
 
         output
     }

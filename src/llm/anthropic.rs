@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
-use crate::auth::StoredToken;
+use crate::auth::{StoredToken, TokenManager};
 use crate::auth::anthropic::get_oauth_beta_headers;
 
 /// Authentication type for the Anthropic client
@@ -11,8 +12,13 @@ use crate::auth::anthropic::get_oauth_beta_headers;
 pub enum AuthType {
     /// API key authentication (x-api-key header)
     ApiKey(String),
-    /// OAuth Bearer token authentication
+    /// OAuth Bearer token with automatic refresh via TokenManager
     OAuth {
+        /// Token manager handles refresh automatically
+        token_manager: Arc<TokenManager>,
+    },
+    /// Legacy OAuth without token manager (for backwards compatibility)
+    OAuthLegacy {
         access_token: String,
         refresh_token: String,
     },
@@ -72,11 +78,11 @@ impl AnthropicClient {
         }
     }
 
-    /// Create a new Anthropic client from a stored token
+    /// Create a new Anthropic client from a stored token (legacy, no auto-refresh)
     pub fn from_token(token: &StoredToken, model: String, max_tokens: usize) -> Self {
         let auth = match token {
             StoredToken::Api { key } => AuthType::ApiKey(key.clone()),
-            StoredToken::OAuth { access_token, refresh_token, .. } => AuthType::OAuth {
+            StoredToken::OAuth { access_token, refresh_token, .. } => AuthType::OAuthLegacy {
                 access_token: access_token.clone(),
                 refresh_token: refresh_token.clone(),
             },
@@ -91,9 +97,35 @@ impl AnthropicClient {
         }
     }
 
+    /// Create a new Anthropic client with a token manager for automatic refresh
+    pub fn with_token_manager(
+        token_manager: Arc<TokenManager>,
+        model: String,
+        max_tokens: usize,
+    ) -> Self {
+        Self {
+            auth: AuthType::OAuth { token_manager },
+            model,
+            max_tokens,
+            client: reqwest::Client::new(),
+        }
+    }
+
     /// Check if using OAuth authentication
     pub fn is_oauth(&self) -> bool {
-        matches!(self.auth, AuthType::OAuth { .. })
+        matches!(self.auth, AuthType::OAuth { .. } | AuthType::OAuthLegacy { .. })
+    }
+
+    /// Get the current access token (refreshing if needed for managed OAuth)
+    async fn get_access_token(&self) -> Result<String> {
+        match &self.auth {
+            AuthType::ApiKey(key) => Ok(key.clone()),
+            AuthType::OAuth { token_manager } => {
+                // This will automatically refresh if needed
+                token_manager.get_valid_token().await
+            }
+            AuthType::OAuthLegacy { access_token, .. } => Ok(access_token.clone()),
+        }
     }
 
     fn convert_message_to_anthropic(msg: &Message) -> AnthropicMessage {
@@ -163,16 +195,20 @@ impl LlmClient for AnthropicClient {
             .header("content-type", "application/json");
 
         // Add authentication headers based on auth type
-        match &self.auth {
-            AuthType::ApiKey(api_key) => {
-                req_builder = req_builder.header("x-api-key", api_key);
-            }
-            AuthType::OAuth { access_token, .. } => {
-                // OAuth uses Bearer token and special beta headers
-                req_builder = req_builder
-                    .header("Authorization", format!("Bearer {}", access_token))
-                    .header("anthropic-beta", get_oauth_beta_headers());
-            }
+        let is_oauth = self.is_oauth();
+        if is_oauth {
+            // Get access token (may trigger automatic refresh)
+            let access_token = self.get_access_token().await
+                .context("Failed to get access token")?;
+
+            // OAuth uses Bearer token and special beta headers
+            req_builder = req_builder
+                .header("Authorization", format!("Bearer {}", access_token))
+                .header("anthropic-beta", get_oauth_beta_headers());
+        } else {
+            // API key auth
+            let api_key = self.get_access_token().await?;
+            req_builder = req_builder.header("x-api-key", api_key);
         }
 
         let response = req_builder
