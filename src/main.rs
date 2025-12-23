@@ -45,6 +45,9 @@ enum Commands {
         /// Run in demo mode (no LLM API required)
         #[arg(long, default_value = "false")]
         demo: bool,
+        /// Execution mode: plan (deep planning with approval) or act (auto-execute)
+        #[arg(short, long, default_value = "act")]
+        mode: String,
     },
     /// Orchestrate a task by delegating to external AI CLIs
     Orchestrate {
@@ -112,8 +115,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Chat { path, tui, demo } => {
-            run_chat(path, tui, demo).await?;
+        Commands::Chat { path, tui, demo, mode } => {
+            run_chat(path, tui, demo, mode).await?;
         }
         Commands::Orchestrate { task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms } => {
             run_orchestrate(task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms).await?;
@@ -132,8 +135,13 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()> {
+async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String) -> Result<()> {
+    use approval::ExecutionMode;
+
     let canonical_path = project_path.canonicalize()?;
+
+    // Parse execution mode
+    let execution_mode = ExecutionMode::from_str(&mode)?;
 
     // Demo mode - no API required
     if demo && use_tui {
@@ -145,8 +153,17 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()
     let config = Config::load()?;
     let mut session = Session::new(config, canonical_path.clone()).await?;
 
+    // Set execution mode
+    session.set_execution_mode(execution_mode);
+
     // Initialize session (git tracking, etc.)
     session.start().await?;
+
+    // Show mode on startup
+    let mode_desc = match execution_mode {
+        ExecutionMode::Plan => "PLAN mode - deep planning with approval before execution",
+        ExecutionMode::Act => "ACT mode - lightweight planning with auto-execution",
+    };
 
     if use_tui {
         // Use TUI mode
@@ -158,6 +175,7 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool) -> Result<()
     // Classic CLI mode
     println!("🤖 Safe Coder - AI Coding Assistant with Git Safety");
     println!("Project: {}", canonical_path.display());
+    println!("Mode: {}", mode_desc);
     println!("Type '/help' for commands or 'exit' to quit\n");
 
     // Interactive loop

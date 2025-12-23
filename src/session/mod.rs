@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::PathBuf;
+use std::io::{self, Write};
 
-use crate::approval::ApprovalMode;
+use crate::approval::{ApprovalMode, ExecutionMode, ExecutionPlan, PlannedTool};
 use crate::checkpoint::CheckpointManager;
 use crate::config::Config;
 use crate::custom_commands::CustomCommandManager;
@@ -25,6 +26,7 @@ pub struct Session {
     // Features
     persistence: SessionPersistence,
     approval_mode: ApprovalMode,
+    execution_mode: ExecutionMode,
     stats: SessionStats,
     memory: MemoryManager,
     checkpoints: CheckpointManager,
@@ -59,6 +61,7 @@ impl Session {
 
             persistence,
             approval_mode: ApprovalMode::default(),
+            execution_mode: ExecutionMode::default(),
             stats: SessionStats::new(),
             memory,
             checkpoints,
@@ -67,6 +70,17 @@ impl Session {
             current_session_id: None,
             last_output: String::new(),
         })
+    }
+
+    /// Set execution mode (Plan or Act)
+    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
+        self.execution_mode = mode;
+        tracing::info!("Execution mode set to: {}", mode);
+    }
+
+    /// Get current execution mode
+    pub fn execution_mode(&self) -> ExecutionMode {
+        self.execution_mode
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -132,6 +146,58 @@ impl Session {
             if !has_tool_calls {
                 // No tool calls, we're done
                 break;
+            }
+
+            // Build execution plan from tool calls
+            let execution_plan = self.build_execution_plan(&assistant_message);
+
+            // Handle based on execution mode
+            match self.execution_mode {
+                ExecutionMode::Plan => {
+                    // Show detailed plan and ask for approval
+                    let plan_output = execution_plan.format_detailed(true);
+                    response_text.push_str("\n");
+                    response_text.push_str(&plan_output);
+                    response_text.push_str("\n");
+
+                    // Check for high-risk operations
+                    if execution_plan.has_high_risk() {
+                        response_text.push_str("⚠️  WARNING: This plan contains high-risk operations!\n\n");
+                    }
+
+                    // Ask for user approval
+                    if !self.ask_user_approval().await? {
+                        // User declined - add a message asking for alternatives
+                        response_text.push_str("\n❌ Plan rejected. Please provide alternative instructions.\n");
+
+                        // Remove the assistant message with tool calls
+                        self.messages.pop();
+
+                        // Add a user message indicating rejection
+                        self.messages.push(Message::user(
+                            "The user rejected the execution plan. Please suggest an alternative approach or ask clarifying questions.".to_string()
+                        ));
+
+                        // Continue to get alternative from LLM
+                        continue;
+                    }
+
+                    response_text.push_str("\n✅ Plan approved. Executing...\n\n");
+                }
+                ExecutionMode::Act => {
+                    // Show brief plan summary (not detailed)
+                    if !execution_plan.tools.is_empty() {
+                        let brief = format!(
+                            "🔧 Executing {} tool(s): {}\n",
+                            execution_plan.tools.len(),
+                            execution_plan.tools.iter()
+                                .map(|t| t.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        response_text.push_str(&brief);
+                    }
+                }
             }
 
             // Execute tool calls
@@ -205,6 +271,107 @@ impl Session {
         self.last_output = final_response.clone();
 
         Ok(final_response)
+    }
+
+    /// Build an execution plan from an assistant message with tool calls
+    fn build_execution_plan(&self, assistant_message: &Message) -> ExecutionPlan {
+        let mut plan = ExecutionPlan::new();
+
+        // Extract summary from text content
+        for block in &assistant_message.content {
+            if let ContentBlock::Text { text } = block {
+                // Use first sentence as summary
+                if let Some(first_sentence) = text.split('.').next() {
+                    if plan.summary.is_empty() && first_sentence.len() < 200 {
+                        plan.summary = first_sentence.trim().to_string();
+                    }
+                }
+            }
+        }
+
+        // Add tools to plan
+        for block in &assistant_message.content {
+            if let ContentBlock::ToolUse { name, input, .. } = block {
+                let description = self.describe_tool_action(name, input);
+                let planned_tool = PlannedTool::new(name.clone(), description)
+                    .with_params(input.clone())
+                    .auto_risk();
+                plan.add_tool(planned_tool);
+            }
+        }
+
+        // Estimate complexity based on number of tools and risk levels
+        let complexity = match plan.tools.len() {
+            0 => 1,
+            1 => 2,
+            2..=3 => 3,
+            4..=5 => 4,
+            _ => 5,
+        };
+        plan.set_complexity(complexity);
+
+        // Add risks for high-risk operations
+        let high_risk_tools: Vec<_> = plan.tools.iter()
+            .filter(|t| t.risk_level == crate::approval::RiskLevel::High)
+            .map(|t| format!("High-risk operation: {} - {}", t.name, t.description))
+            .collect();
+        for risk in high_risk_tools {
+            plan.add_risk(risk);
+        }
+
+        plan
+    }
+
+    /// Generate a human-readable description of a tool action
+    fn describe_tool_action(&self, name: &str, params: &serde_json::Value) -> String {
+        match name {
+            "read_file" => {
+                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                    format!("Read file: {}", path)
+                } else {
+                    "Read a file".to_string()
+                }
+            }
+            "write_file" => {
+                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                    let content_preview = params.get("content")
+                        .and_then(|v| v.as_str())
+                        .map(|c| if c.len() > 50 { format!("{}...", &c[..50]) } else { c.to_string() })
+                        .unwrap_or_default();
+                    format!("Write to {}: {}", path, content_preview)
+                } else {
+                    "Write a file".to_string()
+                }
+            }
+            "edit_file" => {
+                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                    format!("Edit file: {}", path)
+                } else {
+                    "Edit a file".to_string()
+                }
+            }
+            "bash" => {
+                if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                    let cmd_preview = if cmd.len() > 60 { format!("{}...", &cmd[..60]) } else { cmd.to_string() };
+                    format!("Run command: {}", cmd_preview)
+                } else {
+                    "Execute bash command".to_string()
+                }
+            }
+            _ => format!("Execute {}", name),
+        }
+    }
+
+    /// Ask user for approval (for Plan mode)
+    async fn ask_user_approval(&self) -> Result<bool> {
+        print!("\n🔒 Execute this plan? [y/N]: ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+
+        let input = input.trim().to_lowercase();
+        Ok(input == "y" || input == "yes")
     }
 
     pub async fn stop(&mut self) -> Result<()> {

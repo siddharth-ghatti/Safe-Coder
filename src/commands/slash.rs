@@ -15,6 +15,7 @@ pub enum SlashCommand {
     Model(Option<String>),
     Restore(Option<String>),
     ApprovalMode(Option<String>),
+    ExecutionMode(Option<String>),
     Summary,
     Compress,
     Settings,
@@ -71,6 +72,7 @@ impl SlashCommand {
             "model" => SlashCommand::Model(args.get(0).map(|s| s.to_string())),
             "restore" => SlashCommand::Restore(args.get(0).map(|s| s.to_string())),
             "approval-mode" => SlashCommand::ApprovalMode(args.get(0).map(|s| s.to_string())),
+            "mode" => SlashCommand::ExecutionMode(args.get(0).map(|s| s.to_string())),
             "summary" => SlashCommand::Summary,
             "compress" => SlashCommand::Compress,
             "settings" => SlashCommand::Settings,
@@ -200,6 +202,28 @@ pub async fn execute_slash_command(cmd: SlashCommand, session: &mut Session) -> 
                 }
             }
         },
+        SlashCommand::ExecutionMode(mode) => {
+            use crate::approval::ExecutionMode;
+            match mode {
+                Some(m) => {
+                    let exec_mode = ExecutionMode::from_str(&m)?;
+                    session.set_execution_mode(exec_mode);
+                    let description = match exec_mode {
+                        ExecutionMode::Plan => "Deep planning with user approval before execution",
+                        ExecutionMode::Act => "Lightweight planning with auto-execution",
+                    };
+                    Ok(CommandResult::Message(format!("✓ Execution mode set to: {} ({})", m, description)))
+                },
+                None => {
+                    let current = session.execution_mode();
+                    let description = match current {
+                        ExecutionMode::Plan => "Deep planning with user approval before execution",
+                        ExecutionMode::Act => "Lightweight planning with auto-execution",
+                    };
+                    Ok(CommandResult::Message(format!("Current execution mode: {} ({})\n\nAvailable modes:\n  plan - Deep planning with user approval\n  act  - Auto-execution with brief summaries", current, description)))
+                }
+            }
+        },
         SlashCommand::Summary => {
             let summary = session.generate_project_summary().await?;
             Ok(CommandResult::Message(summary))
@@ -313,9 +337,14 @@ MEMORY & CONTEXT
   /memory refresh     Reload from SAFE_CODER.md
 
 CONFIGURATION
+  /mode [plan|act]    Set execution mode (plan/act)
   /model [name]       Switch model or show current
   /approval-mode [mode]  Set approval mode (plan/default/auto-edit/yolo)
   /settings           Show current settings
+
+EXECUTION MODES
+  plan - Deep planning with detailed analysis and user approval
+  act  - Lightweight planning with automatic execution (default)
 
 PROJECT TOOLS
   /summary            Generate project summary
