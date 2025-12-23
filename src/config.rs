@@ -7,6 +7,59 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub git: GitConfig,
+    #[serde(default)]
+    pub tools: ToolConfig,
+}
+
+/// Configuration for tool execution limits and behavior
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolConfig {
+    /// Default timeout for bash commands in seconds (default: 120)
+    #[serde(default = "default_bash_timeout")]
+    pub bash_timeout_secs: u64,
+
+    /// Maximum output size in bytes before truncation (default: 1MB)
+    #[serde(default = "default_max_output_bytes")]
+    pub max_output_bytes: usize,
+
+    /// Enable dangerous command warnings (default: true)
+    #[serde(default = "default_true")]
+    pub warn_dangerous_commands: bool,
+
+    /// List of command patterns to warn about (regexes)
+    #[serde(default = "default_dangerous_patterns")]
+    pub dangerous_patterns: Vec<String>,
+}
+
+fn default_bash_timeout() -> u64 {
+    120
+}
+
+fn default_max_output_bytes() -> usize {
+    1_048_576 // 1MB
+}
+
+fn default_dangerous_patterns() -> Vec<String> {
+    vec![
+        r"rm\s+-rf\s+/".to_string(),
+        r"rm\s+-rf\s+~".to_string(),
+        r":()\s*\{\s*:\|\:&\s*\}".to_string(), // Fork bomb
+        r"dd\s+if=.*of=/dev/".to_string(),
+        r"mkfs\.".to_string(),
+        r">\s*/dev/sd".to_string(),
+        r"chmod\s+-R\s+777\s+/".to_string(),
+    ]
+}
+
+impl Default for ToolConfig {
+    fn default() -> Self {
+        Self {
+            bash_timeout_secs: default_bash_timeout(),
+            max_output_bytes: default_max_output_bytes(),
+            warn_dangerous_commands: true,
+            dangerous_patterns: default_dangerous_patterns(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +192,7 @@ impl Default for Config {
                 base_url: None,
             },
             git: GitConfig::default(),
+            tools: ToolConfig::default(),
         }
     }
 }

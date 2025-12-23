@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+use crate::config::ToolConfig;
+
 pub mod read;
 pub mod write;
 pub mod edit;
@@ -13,12 +15,25 @@ pub use write::WriteTool;
 pub use edit::EditTool;
 pub use bash::BashTool;
 
+/// Context passed to tool execution containing working directory and configuration
+#[derive(Debug, Clone)]
+pub struct ToolContext<'a> {
+    pub working_dir: &'a Path,
+    pub config: &'a ToolConfig,
+}
+
+impl<'a> ToolContext<'a> {
+    pub fn new(working_dir: &'a Path, config: &'a ToolConfig) -> Self {
+        Self { working_dir, config }
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters_schema(&self) -> serde_json::Value;
-    async fn execute(&self, params: serde_json::Value, working_dir: &Path) -> Result<String>;
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext<'_>) -> Result<String>;
 }
 
 pub struct ToolRegistry {

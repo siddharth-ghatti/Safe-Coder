@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use super::Tool;
+use super::{Tool, ToolContext};
 
 pub struct ReadTool;
 
@@ -47,11 +47,11 @@ impl Tool for ReadTool {
         })
     }
 
-    async fn execute(&self, params: serde_json::Value, working_dir: &Path) -> Result<String> {
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext<'_>) -> Result<String> {
         let params: ReadParams = serde_json::from_value(params)
             .context("Invalid parameters for read_file")?;
 
-        let file_path = working_dir.join(&params.file_path);
+        let file_path = ctx.working_dir.join(&params.file_path);
 
         if !file_path.exists() {
             anyhow::bail!("File not found: {}", params.file_path);

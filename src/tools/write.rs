@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::Path;
 
-use super::Tool;
+use super::{Tool, ToolContext};
 
 pub struct WriteTool;
 
@@ -40,11 +40,11 @@ impl Tool for WriteTool {
         })
     }
 
-    async fn execute(&self, params: serde_json::Value, working_dir: &Path) -> Result<String> {
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext<'_>) -> Result<String> {
         let params: WriteParams = serde_json::from_value(params)
             .context("Invalid parameters for write_file")?;
 
-        let file_path = working_dir.join(&params.file_path);
+        let file_path = ctx.working_dir.join(&params.file_path);
 
         // Create parent directories if they don't exist
         if let Some(parent) = file_path.parent() {

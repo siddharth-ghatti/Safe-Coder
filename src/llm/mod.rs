@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
-use crate::config::{LlmConfig, LlmProvider};
+use crate::auth::{StoredToken, TokenManager, TokenProvider};
+use crate::config::{Config, LlmConfig, LlmProvider};
 
 pub mod anthropic;
 pub mod openai;
@@ -51,9 +53,42 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
         LlmProvider::Anthropic => {
             // Check if we have a stored token (could be OAuth or API key)
             if let Some(stored_token) = config.get_stored_token() {
+                // For OAuth tokens, use TokenManager for automatic refresh
+                if stored_token.is_oauth() {
+                    let token_path = Config::token_path(&LlmProvider::Anthropic)?;
+                    let token_manager = Arc::new(TokenManager::new(
+                        stored_token.clone(),
+                        token_path,
+                        TokenProvider::Anthropic,
+                    ));
+
+                    // Check if token needs immediate refresh
+                    if stored_token.needs_refresh() {
+                        tracing::info!("OAuth token expiring soon, refreshing...");
+                        if let Err(e) = token_manager.refresh().await {
+                            tracing::warn!("Failed to refresh token: {}. Will try with current token.", e);
+                        }
+                    }
+
+                    if let Some(secs) = token_manager.seconds_until_expiry().await {
+                        if secs > 0 {
+                            tracing::info!(
+                                "Using OAuth authentication for Anthropic (expires in {}m)",
+                                secs / 60
+                            );
+                        }
+                    }
+
+                    return Ok(Box::new(anthropic::AnthropicClient::with_token_manager(
+                        token_manager,
+                        config.llm.model.clone(),
+                        config.llm.max_tokens,
+                    )));
+                }
+
+                // For API key tokens, use the legacy path
                 if !stored_token.is_expired() {
-                    tracing::info!("Using stored {} authentication for Anthropic",
-                        if stored_token.is_oauth() { "OAuth" } else { "API key" });
+                    tracing::info!("Using stored API key authentication for Anthropic");
                     return Ok(Box::new(anthropic::AnthropicClient::from_token(
                         &stored_token,
                         config.llm.model.clone(),
