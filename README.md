@@ -2,6 +2,8 @@
 
 An **AI coding orchestrator** that delegates tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces. Safe Coder handles high-level planning and task decomposition, then coordinates multiple AI agents to execute the work in parallel.
 
+![Safe Coder CLI](assets/cli-screenshot.png)
+
 ## Features
 
 ### 🎯 **Orchestrator Mode (New!)**
