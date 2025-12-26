@@ -103,7 +103,12 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Start an interactive shell with optional AI assistance
+    /// Start an interactive shell with optional AI assistance.
+    ///
+    /// Run shell commands directly, or use AI commands for assistance:
+    ///   ai-connect      - Connect to AI
+    ///   ai <question>   - Ask AI for help
+    ///   chat            - Enter coding mode with tool execution
     Shell {
         /// Path to the project directory (default: current directory)
         #[arg(short, long, default_value = ".")]

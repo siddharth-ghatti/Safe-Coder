@@ -162,17 +162,30 @@ impl Shell {
             "\x1b[1;36m└─────────────────────────────────────────────────────────────┘\x1b[0m"
         );
         println!();
-        println!("  \x1b[33mCommands:\x1b[0m");
+        println!("  \x1b[33mShell Commands:\x1b[0m");
+        println!("    \x1b[32mcd <path>\x1b[0m        - Change directory (supports ~, relative, absolute)");
+        println!("    \x1b[32mpwd\x1b[0m              - Print current working directory");
+        println!("    \x1b[32mhistory\x1b[0m          - Show command history");
+        println!("    \x1b[32mclear\x1b[0m            - Clear the screen");
+        println!("    \x1b[32mexport KEY=VAL\x1b[0m   - Set environment variable");
+        println!("    \x1b[32menv\x1b[0m              - Show all environment variables");
         println!("    \x1b[32mexit\x1b[0m, \x1b[32mquit\x1b[0m       - Exit the shell");
-        println!("    \x1b[32mcd <path>\x1b[0m        - Change directory");
-        println!("    \x1b[32mai <question>\x1b[0m    - Ask AI for help (requires: ai-connect)");
+        println!();
+        println!("  \x1b[33mAI Commands:\x1b[0m");
         println!("    \x1b[32mai-connect\x1b[0m       - Connect to AI for coding assistance");
         println!("    \x1b[32mai-disconnect\x1b[0m    - Disconnect from AI session");
-        println!("    \x1b[32mchat\x1b[0m             - Switch to interactive coding mode");
-        println!("    \x1b[32mhistory\x1b[0m          - Show command history");
-        println!("    \x1b[32mhelp\x1b[0m             - Show this help message");
+        println!(
+            "    \x1b[32mai <question>\x1b[0m    - Ask AI for help (requires ai-connect first)"
+        );
+        println!("    \x1b[32mchat\x1b[0m             - Enter interactive coding mode with tool execution");
         println!();
-        println!("  \x1b[33mTip:\x1b[0m Run any shell command directly, or prefix with 'ai' for AI help.");
+        println!("  \x1b[33mChat Mode (after running 'chat'):\x1b[0m");
+        println!("    \x1b[32m!<command>\x1b[0m       - Run shell command without leaving chat");
+        println!("    \x1b[32mexit\x1b[0m, \x1b[32mshell\x1b[0m      - Return to shell mode");
+        println!();
+        println!("  \x1b[33mOther:\x1b[0m");
+        println!("    \x1b[32mhelp\x1b[0m, \x1b[32m?\x1b[0m          - Show this help message");
+        println!("    \x1b[32m<any command>\x1b[0m    - Run as shell command (ls, git, etc.)");
         println!();
     }
 
