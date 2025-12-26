@@ -7,9 +7,9 @@ use crate::auth::{StoredToken, TokenManager, TokenProvider};
 use crate::config::{Config, LlmConfig, LlmProvider};
 
 pub mod anthropic;
-pub mod openai;
-pub mod ollama;
 pub mod copilot;
+pub mod ollama;
+pub mod openai;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -27,9 +27,18 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,11 +50,8 @@ pub struct ToolDefinition {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn send_message(
-        &self,
-        messages: &[Message],
-        tools: &[ToolDefinition],
-    ) -> Result<Message>;
+    async fn send_message(&self, messages: &[Message], tools: &[ToolDefinition])
+        -> Result<Message>;
 }
 
 pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
@@ -66,7 +72,10 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
                     if stored_token.needs_refresh() {
                         tracing::info!("OAuth token expiring soon, refreshing...");
                         if let Err(e) = token_manager.refresh().await {
-                            tracing::warn!("Failed to refresh token: {}. Will try with current token.", e);
+                            tracing::warn!(
+                                "Failed to refresh token: {}. Will try with current token.",
+                                e
+                            );
                         }
                     }
 
@@ -79,10 +88,19 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
                         }
                     }
 
+                    // Log warning if using Claude Code OAuth compatibility mode
+                    if config.llm.claude_code_oauth_compat {
+                        tracing::warn!(
+                            "⚠️  BETA: Claude Code OAuth compatibility mode enabled. \
+                            This may violate Anthropic's Terms of Service."
+                        );
+                    }
+
                     return Ok(Box::new(anthropic::AnthropicClient::with_token_manager(
                         token_manager,
                         config.llm.model.clone(),
                         config.llm.max_tokens,
+                        config.llm.claude_code_oauth_compat,
                     )));
                 }
 
@@ -93,6 +111,7 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
                         &stored_token,
                         config.llm.model.clone(),
                         config.llm.max_tokens,
+                        config.llm.claude_code_oauth_compat,
                     )));
                 }
             }
@@ -107,7 +126,8 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
             )))
         }
         LlmProvider::OpenAI => {
-            let api_key = config.get_auth_token()
+            let api_key = config
+                .get_auth_token()
                 .context("OpenAI API key not set. Set OPENAI_API_KEY or configure API key")?;
             Ok(Box::new(openai::OpenAiClient::new(
                 api_key,

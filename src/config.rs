@@ -40,14 +40,14 @@ fn default_max_output() -> usize {
 
 fn default_dangerous_patterns() -> Vec<String> {
     vec![
-        r"rm\s+(-[a-zA-Z]*)?-rf\s+[/~]".to_string(),        // rm -rf / or ~
-        r":\s*\(\s*\)\s*\{.*\}".to_string(),                // fork bomb :(){ :|:& };:
-        r">\s*/dev/sd[a-z]".to_string(),                    // overwrite disk
-        r"mkfs\.".to_string(),                              // format filesystem
-        r"dd\s+.*of=/dev/sd[a-z]".to_string(),              // dd to disk
-        r"chmod\s+(-[a-zA-Z]*\s+)?777\s+/".to_string(),     // chmod 777 /
-        r"curl\s+.*\|\s*bash".to_string(),                  // curl | bash (remote code exec)
-        r"wget\s+.*\|\s*bash".to_string(),                  // wget | bash
+        r"rm\s+(-[a-zA-Z]*)?-rf\s+[/~]".to_string(), // rm -rf / or ~
+        r":\s*\(\s*\)\s*\{.*\}".to_string(),         // fork bomb :(){ :|:& };:
+        r">\s*/dev/sd[a-z]".to_string(),             // overwrite disk
+        r"mkfs\.".to_string(),                       // format filesystem
+        r"dd\s+.*of=/dev/sd[a-z]".to_string(),       // dd to disk
+        r"chmod\s+(-[a-zA-Z]*\s+)?777\s+/".to_string(), // chmod 777 /
+        r"curl\s+.*\|\s*bash".to_string(),           // curl | bash (remote code exec)
+        r"wget\s+.*\|\s*bash".to_string(),           // wget | bash
     ]
 }
 
@@ -82,6 +82,11 @@ pub struct LlmConfig {
     /// Base URL for API (optional, for Ollama or custom endpoints)
     #[serde(default)]
     pub base_url: Option<String>,
+    /// [BETA/DANGEROUS] Enable Claude Code OAuth compatibility mode.
+    /// This injects a system prompt to make OAuth tokens work with the API.
+    /// May violate Anthropic's Terms of Service. Use at your own risk.
+    #[serde(default)]
+    pub claude_code_oauth_compat: bool,
 }
 
 /// Configuration for the CLI orchestrator
@@ -182,7 +187,6 @@ pub enum LlmProvider {
     GitHubCopilot,
 }
 
-
 impl Config {
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
@@ -191,8 +195,8 @@ impl Config {
             return Ok(Self::default());
         }
 
-        let content = std::fs::read_to_string(&config_path)
-            .context("Failed to read config file")?;
+        let content =
+            std::fs::read_to_string(&config_path).context("Failed to read config file")?;
 
         toml::from_str(&content).context("Failed to parse config file")
     }
@@ -211,18 +215,20 @@ impl Config {
     }
 
     pub fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Could not determine config directory")?;
+        let config_dir = dirs::config_dir().context("Could not determine config directory")?;
         Ok(config_dir.join("safe-coder").join("config.toml"))
     }
 
     pub fn token_path(provider: &LlmProvider) -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Could not determine config directory")?;
+        let config_dir = dirs::config_dir().context("Could not determine config directory")?;
         let token_file = match provider {
             LlmProvider::Anthropic => "anthropic_token.json",
             LlmProvider::GitHubCopilot => "github_copilot_token.json",
-            _ => return Err(anyhow::anyhow!("Provider does not support device flow auth")),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Provider does not support device flow auth"
+                ))
+            }
         };
         Ok(config_dir.join("safe-coder").join(token_file))
     }
@@ -251,7 +257,8 @@ impl Config {
         }
 
         // Fall back to configured API key
-        self.llm.api_key
+        self.llm
+            .api_key
             .clone()
             .context("No API key or valid token found")
     }
@@ -261,14 +268,22 @@ impl Default for Config {
     fn default() -> Self {
         // Try to detect provider from environment variables
         let (provider, api_key, model) = if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-            (LlmProvider::Anthropic, Some(key), "claude-sonnet-4-20250514".to_string())
+            (
+                LlmProvider::Anthropic,
+                Some(key),
+                "claude-sonnet-4-20250514".to_string(),
+            )
         } else if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             (LlmProvider::OpenAI, Some(key), "gpt-4o".to_string())
         } else if let Ok(key) = std::env::var("GITHUB_COPILOT_TOKEN") {
             (LlmProvider::GitHubCopilot, Some(key), "gpt-4".to_string())
         } else {
             // Default to Anthropic even without key
-            (LlmProvider::Anthropic, None, "claude-sonnet-4-20250514".to_string())
+            (
+                LlmProvider::Anthropic,
+                None,
+                "claude-sonnet-4-20250514".to_string(),
+            )
         };
 
         Self {
@@ -278,6 +293,7 @@ impl Default for Config {
                 model,
                 max_tokens: 8192,
                 base_url: None,
+                claude_code_oauth_compat: false,
             },
             git: GitConfig::default(),
             orchestrator: OrchestratorConfig::default(),
