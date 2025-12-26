@@ -10,6 +10,7 @@ mod memory;
 mod orchestrator;
 mod persistence;
 mod session;
+mod shell;
 mod tools;
 mod tui;
 
@@ -102,6 +103,15 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Start an interactive shell with optional AI assistance
+    Shell {
+        /// Path to the project directory (default: current directory)
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Automatically connect to AI on startup
+        #[arg(long, default_value = "false")]
+        ai: bool,
+    },
 }
 
 #[tokio::main]
@@ -118,13 +128,43 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Chat { path, tui, demo, mode } => {
+        Commands::Chat {
+            path,
+            tui,
+            demo,
+            mode,
+        } => {
             run_chat(path, tui, demo, mode).await?;
         }
-        Commands::Orchestrate { task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms, mode } => {
-            run_orchestrate(task, path, worker, worktrees, max_workers, claude_max, gemini_max, start_delay_ms, mode).await?;
+        Commands::Orchestrate {
+            task,
+            path,
+            worker,
+            worktrees,
+            max_workers,
+            claude_max,
+            gemini_max,
+            start_delay_ms,
+            mode,
+        } => {
+            run_orchestrate(
+                task,
+                path,
+                worker,
+                worktrees,
+                max_workers,
+                claude_max,
+                gemini_max,
+                start_delay_ms,
+                mode,
+            )
+            .await?;
         }
-        Commands::Config { show, api_key, model } => {
+        Commands::Config {
+            show,
+            api_key,
+            model,
+        } => {
             handle_config(show, api_key, model)?;
         }
         Commands::Login { provider } => {
@@ -132,6 +172,9 @@ async fn main() -> Result<()> {
         }
         Commands::Init { path } => {
             init_project(path)?;
+        }
+        Commands::Shell { path, ai } => {
+            run_shell(path, ai).await?;
         }
     }
 
@@ -205,16 +248,16 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
                 session.stop().await?;
                 println!("✨ Session ended. All changes tracked in git. Goodbye!");
                 break;
-            },
+            }
             Ok(CommandResult::Clear) => {
                 // Clear screen
                 print!("\x1B[2J\x1B[1;1H");
                 continue;
-            },
+            }
             Ok(CommandResult::Message(msg)) => {
                 println!("\n{}", msg);
                 continue;
-            },
+            }
             Ok(CommandResult::ModifiedInput(modified_input)) => {
                 // Send the modified input to the AI
                 match session.send_message(modified_input).await {
@@ -227,7 +270,7 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
                         eprintln!("Error: {}", e);
                     }
                 }
-            },
+            }
             Ok(CommandResult::Continue) => {
                 // Continue normally - send to AI
                 match session.send_message(input.to_string()).await {
@@ -240,7 +283,7 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
                         eprintln!("Error: {}", e);
                     }
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("Error: {}", e);
             }
@@ -290,9 +333,20 @@ async fn run_orchestrate(
         default_worker,
         use_worktrees,
         throttle_limits: orchestrator::ThrottleLimits {
-            claude_max_concurrent: claude_max.unwrap_or(user_config.orchestrator.throttle_limits.claude_max_concurrent),
-            gemini_max_concurrent: gemini_max.unwrap_or(user_config.orchestrator.throttle_limits.gemini_max_concurrent),
-            start_delay_ms: start_delay_ms.unwrap_or(user_config.orchestrator.throttle_limits.start_delay_ms),
+            claude_max_concurrent: claude_max.unwrap_or(
+                user_config
+                    .orchestrator
+                    .throttle_limits
+                    .claude_max_concurrent,
+            ),
+            gemini_max_concurrent: gemini_max.unwrap_or(
+                user_config
+                    .orchestrator
+                    .throttle_limits
+                    .gemini_max_concurrent,
+            ),
+            start_delay_ms: start_delay_ms
+                .unwrap_or(user_config.orchestrator.throttle_limits.start_delay_ms),
         },
         execution_mode,
     };
@@ -310,12 +364,24 @@ async fn run_orchestrate(
     println!("Project: {}", canonical_path.display());
     println!("Mode: {}", mode_desc);
     println!("Default worker: {:?}", orchestrator.config.default_worker);
-    println!("Max concurrent workers: {}", orchestrator.config.max_workers);
+    println!(
+        "Max concurrent workers: {}",
+        orchestrator.config.max_workers
+    );
     println!("Using worktrees: {}", use_worktrees);
     println!("Throttle limits:");
-    println!("  - Claude max concurrent: {}", orchestrator.config.throttle_limits.claude_max_concurrent);
-    println!("  - Gemini max concurrent: {}", orchestrator.config.throttle_limits.gemini_max_concurrent);
-    println!("  - Start delay: {}ms", orchestrator.config.throttle_limits.start_delay_ms);
+    println!(
+        "  - Claude max concurrent: {}",
+        orchestrator.config.throttle_limits.claude_max_concurrent
+    );
+    println!(
+        "  - Gemini max concurrent: {}",
+        orchestrator.config.throttle_limits.gemini_max_concurrent
+    );
+    println!(
+        "  - Start delay: {}ms",
+        orchestrator.config.throttle_limits.start_delay_ms
+    );
     println!();
 
     // If task provided via CLI, execute it directly
@@ -368,10 +434,9 @@ async fn run_orchestrate(
                 } else {
                     println!("📊 Worker Status:");
                     for status in statuses {
-                        println!("  - Task {}: {:?} ({:?})",
-                            status.task_id,
-                            status.state,
-                            status.kind
+                        println!(
+                            "  - Task {}: {:?} ({:?})",
+                            status.task_id, status.state, status.kind
                         );
                     }
                 }
@@ -488,7 +553,10 @@ async fn handle_login(provider: &str) -> Result<()> {
     token.save(&token_path)?;
 
     println!("\nToken saved to: {:?}", token_path);
-    println!("\nYou can now use safe-coder with your {} account!", provider);
+    println!(
+        "\nYou can now use safe-coder with your {} account!",
+        provider
+    );
 
     Ok(())
 }
@@ -530,7 +598,9 @@ async fn handle_anthropic_login() -> Result<auth::StoredToken> {
             }
 
             println!("\nExchanging code for token...");
-            let token = auth.exchange_code(code, &pending.verifier, AuthMode::ClaudeMax).await?;
+            let token = auth
+                .exchange_code(code, &pending.verifier, AuthMode::ClaudeMax)
+                .await?;
             println!("Successfully authenticated with Claude Pro/Max!");
 
             Ok(token)
@@ -554,7 +624,9 @@ async fn handle_anthropic_login() -> Result<auth::StoredToken> {
             }
 
             println!("\nExchanging code for API key...");
-            let token = auth.exchange_code(code, &pending.verifier, AuthMode::Console).await?;
+            let token = auth
+                .exchange_code(code, &pending.verifier, AuthMode::Console)
+                .await?;
             println!("Successfully created API key!");
 
             Ok(token)
@@ -588,7 +660,16 @@ fn init_project(path: PathBuf) -> Result<()> {
     println!("\nNext steps:");
     println!("  1. Configure your API key: safe-coder config --api-key YOUR_API_KEY");
     println!("  2. Or login with device flow: safe-coder login github-copilot");
-    println!("  3. Start coding: safe-coder chat --path {}", path.display());
+    println!(
+        "  3. Start coding: safe-coder chat --path {}",
+        path.display()
+    );
 
     Ok(())
+}
+
+/// Run the interactive shell mode
+async fn run_shell(project_path: PathBuf, connect_ai: bool) -> Result<()> {
+    let canonical_path = project_path.canonicalize()?;
+    shell::run_shell(canonical_path, connect_ai).await
 }
