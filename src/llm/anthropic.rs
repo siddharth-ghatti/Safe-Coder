@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
-use crate::auth::{StoredToken, TokenManager};
 use crate::auth::anthropic::get_oauth_beta_headers;
+use crate::auth::{StoredToken, TokenManager};
 
 /// Authentication type for the Anthropic client
 #[derive(Debug, Clone)]
@@ -24,17 +24,25 @@ pub enum AuthType {
     },
 }
 
+/// The system prompt required for Claude Code OAuth compatibility
+/// This makes OAuth tokens work with the API by identifying as Claude Code
+const CLAUDE_CODE_SYSTEM_PROMPT: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+
 pub struct AnthropicClient {
     auth: AuthType,
     model: String,
     max_tokens: usize,
     client: reqwest::Client,
+    /// Enable Claude Code OAuth compatibility mode (injects system prompt)
+    claude_code_compat: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct AnthropicRequest {
     model: String,
     max_tokens: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
     messages: Vec<AnthropicMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<AnthropicTool>,
@@ -49,9 +57,18 @@ struct AnthropicMessage {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContent {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -75,14 +92,24 @@ impl AnthropicClient {
             model,
             max_tokens,
             client: reqwest::Client::new(),
+            claude_code_compat: false,
         }
     }
 
     /// Create a new Anthropic client from a stored token (legacy, no auto-refresh)
-    pub fn from_token(token: &StoredToken, model: String, max_tokens: usize) -> Self {
+    pub fn from_token(
+        token: &StoredToken,
+        model: String,
+        max_tokens: usize,
+        claude_code_compat: bool,
+    ) -> Self {
         let auth = match token {
             StoredToken::Api { key } => AuthType::ApiKey(key.clone()),
-            StoredToken::OAuth { access_token, refresh_token, .. } => AuthType::OAuthLegacy {
+            StoredToken::OAuth {
+                access_token,
+                refresh_token,
+                ..
+            } => AuthType::OAuthLegacy {
                 access_token: access_token.clone(),
                 refresh_token: refresh_token.clone(),
             },
@@ -94,6 +121,7 @@ impl AnthropicClient {
             model,
             max_tokens,
             client: reqwest::Client::new(),
+            claude_code_compat,
         }
     }
 
@@ -102,10 +130,12 @@ impl AnthropicClient {
         token_manager: Arc<TokenManager>,
         model: String,
         max_tokens: usize,
+        claude_code_compat: bool,
     ) -> Self {
         Self {
             auth: AuthType::OAuth { token_manager },
             model,
+            claude_code_compat,
             max_tokens,
             client: reqwest::Client::new(),
         }
@@ -113,7 +143,10 @@ impl AnthropicClient {
 
     /// Check if using OAuth authentication
     pub fn is_oauth(&self) -> bool {
-        matches!(self.auth, AuthType::OAuth { .. } | AuthType::OAuthLegacy { .. })
+        matches!(
+            self.auth,
+            AuthType::OAuth { .. } | AuthType::OAuthLegacy { .. }
+        )
     }
 
     /// Get the current access token (refreshing if needed for managed OAuth)
@@ -134,36 +167,47 @@ impl AnthropicClient {
                 Role::User => "user".to_string(),
                 Role::Assistant => "assistant".to_string(),
             },
-            content: msg.content.iter().map(|c| match c {
-                ContentBlock::Text { text } => AnthropicContent::Text { text: text.clone() },
-                ContentBlock::ToolUse { id, name, input } => AnthropicContent::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                },
-                ContentBlock::ToolResult { tool_use_id, content } => AnthropicContent::ToolResult {
-                    tool_use_id: tool_use_id.clone(),
-                    content: content.clone(),
-                },
-            }).collect(),
+            content: msg
+                .content
+                .iter()
+                .map(|c| match c {
+                    ContentBlock::Text { text } => AnthropicContent::Text { text: text.clone() },
+                    ContentBlock::ToolUse { id, name, input } => AnthropicContent::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                    } => AnthropicContent::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                    },
+                })
+                .collect(),
         }
     }
 
     fn convert_anthropic_to_message(content: Vec<AnthropicContent>) -> Message {
         Message {
             role: Role::Assistant,
-            content: content.into_iter().map(|c| match c {
-                AnthropicContent::Text { text } => ContentBlock::Text { text },
-                AnthropicContent::ToolUse { id, name, input } => ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input,
-                },
-                AnthropicContent::ToolResult { tool_use_id, content } => ContentBlock::ToolResult {
-                    tool_use_id,
-                    content,
-                },
-            }).collect(),
+            content: content
+                .into_iter()
+                .map(|c| match c {
+                    AnthropicContent::Text { text } => ContentBlock::Text { text },
+                    AnthropicContent::ToolUse { id, name, input } => {
+                        ContentBlock::ToolUse { id, name, input }
+                    }
+                    AnthropicContent::ToolResult {
+                        tool_use_id,
+                        content,
+                    } => ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                    },
+                })
+                .collect(),
         }
     }
 }
@@ -175,21 +219,35 @@ impl LlmClient for AnthropicClient {
         messages: &[Message],
         tools: &[ToolDefinition],
     ) -> Result<Message> {
+        // Determine if we should inject the Claude Code system prompt
+        // This is needed for OAuth tokens to work with the API
+        let system_prompt = if self.claude_code_compat && self.is_oauth() {
+            Some(CLAUDE_CODE_SYSTEM_PROMPT.to_string())
+        } else {
+            None
+        };
+
         let request = AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            messages: messages.iter()
+            system: system_prompt,
+            messages: messages
+                .iter()
                 .map(Self::convert_message_to_anthropic)
                 .collect(),
-            tools: tools.iter().map(|t| AnthropicTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
-            }).collect(),
+            tools: tools
+                .iter()
+                .map(|t| AnthropicTool {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    input_schema: t.input_schema.clone(),
+                })
+                .collect(),
         };
 
         // Build the request with appropriate auth headers
-        let mut req_builder = self.client
+        let mut req_builder = self
+            .client
             .post("https://api.anthropic.com/v1/messages")
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
@@ -198,7 +256,9 @@ impl LlmClient for AnthropicClient {
         let is_oauth = self.is_oauth();
         if is_oauth {
             // Get access token (may trigger automatic refresh)
-            let access_token = self.get_access_token().await
+            let access_token = self
+                .get_access_token()
+                .await
                 .context("Failed to get access token")?;
 
             // OAuth uses Bearer token and special beta headers
@@ -223,10 +283,13 @@ impl LlmClient for AnthropicClient {
             anyhow::bail!("Anthropic API error ({}): {}", status, text);
         }
 
-        let anthropic_response: AnthropicResponse = response.json()
+        let anthropic_response: AnthropicResponse = response
+            .json()
             .await
             .context("Failed to parse Anthropic response")?;
 
-        Ok(Self::convert_anthropic_to_message(anthropic_response.content))
+        Ok(Self::convert_anthropic_to_message(
+            anthropic_response.content,
+        ))
     }
 }
