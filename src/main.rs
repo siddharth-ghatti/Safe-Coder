@@ -121,16 +121,21 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "safe_coder=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let cli = Cli::parse();
+
+    // Only initialize tracing for non-TUI modes
+    // TUI mode uses its own rendering and tracing would interfere with the alternate screen
+    let use_tui = matches!(&cli.command, Commands::Chat { tui: true, .. });
+
+    if !use_tui {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "safe_coder=info".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     match cli.command {
         Commands::Chat {
@@ -207,9 +212,6 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
     // Set execution mode
     session.set_execution_mode(execution_mode);
 
-    // Initialize session (git tracking, etc.)
-    session.start().await?;
-
     // Show mode on startup
     let mode_desc = match execution_mode {
         ExecutionMode::Plan => "PLAN mode - deep planning with approval before execution",
@@ -217,11 +219,14 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
     };
 
     if use_tui {
-        // Use TUI mode
+        // Use TUI mode - skip session.start() as it outputs to stdout and interferes with TUI
         let mut tui_runner = tui::TuiRunner::new(canonical_path.display().to_string());
         tui_runner.run(session).await?;
         return Ok(());
     }
+
+    // Initialize session (git tracking, etc.) - only for non-TUI mode
+    session.start().await?;
 
     // Classic CLI mode
     println!("🤖 Safe Coder - AI Coding Assistant with Git Safety");

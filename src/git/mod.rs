@@ -47,7 +47,11 @@ impl GitManager {
                 .await?;
 
             Command::new("git")
-                .args(["commit", "-m", "Initial snapshot - Safe Coder session start"])
+                .args([
+                    "commit",
+                    "-m",
+                    "Initial snapshot - Safe Coder session start",
+                ])
                 .current_dir(&self.repo_path)
                 .output()
                 .await?;
@@ -101,8 +105,10 @@ impl GitManager {
             .await?;
 
         if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("nothing to commit") {
+            // Check both stdout and stderr for "nothing to commit" message
+            if stdout.contains("nothing to commit") || stderr.contains("nothing to commit") {
                 tracing::debug!("No changes to commit");
                 return Ok(());
             }
@@ -195,7 +201,8 @@ impl ChangeSummary {
         format!(
             "Changed {} file(s):\n{}",
             self.files.len(),
-            self.files.iter()
+            self.files
+                .iter()
                 .map(|f| format!("  - {}", f))
                 .collect::<Vec<_>>()
                 .join("\n")
