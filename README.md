@@ -1,12 +1,25 @@
 # Safe Coder
 
-An **AI coding orchestrator** that delegates tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces. Safe Coder handles high-level planning and task decomposition, then coordinates multiple AI agents to execute the work in parallel.
+A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, and can also delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces.
 
 ![Safe Coder CLI](assets/cli-screenshot.png)
 
 ## Features
 
-### 🎯 **Orchestrator Mode (New!)**
+### 🖥️ **Interactive Shell Mode (New!)**
+- **AI-Powered Shell**: Run commands with optional AI assistance
+- **Seamless Mode Switching**: Switch between shell and coding modes instantly
+- **Smart Prompt**: Shows git branch, exit status, and AI connection indicator
+- **Full Shell Features**: cd, pwd, history, export, env, and all standard commands
+
+### 💻 **Standalone Coding CLI**
+- **Direct AI Coding**: Use Safe Coder as your coding assistant without external CLIs
+- **Full Tool Suite**: Read, write, edit files, and execute bash commands
+- **Multiple LLM Providers**: Claude, OpenAI, or Ollama (local models)
+- **Privacy Option**: Run 100% locally with Ollama - no API costs, complete privacy
+- **Beautiful TUI**: Modern terminal UI with syntax highlighting
+
+### 🎯 **Orchestrator Mode**
 - **Multi-Agent Delegation**: Orchestrate Claude Code, Gemini CLI, and other AI agents
 - **Task Planning**: Automatically break down complex requests into manageable tasks
 - **Workspace Isolation**: Each task runs in its own git worktree/branch
@@ -25,12 +38,6 @@ An **AI coding orchestrator** that delegates tasks to specialized AI CLI agents 
 - **Multi-Panel Layout**: Conversation, status, and tool execution panels
 - **Real-time Updates**: Live monitoring of agent status
 - **Dynamic Processing**: Animated braille spinners and status messages
-
-### 🤖 **AI-Powered Coding**
-- **Multiple LLM Providers**: Claude, OpenAI, or Ollama (local models)
-- **Privacy Option**: Run 100% locally with Ollama - no API costs, complete privacy
-- **Full Tool Suite**: Read, write, edit files, and execute bash commands
-- **Contextual Awareness**: Agent understands your codebase and makes intelligent changes
 
 ## Architecture
 
@@ -66,11 +73,13 @@ An **AI coding orchestrator** that delegates tasks to specialized AI CLI agents 
 
 ### Prerequisites
 
-1. **External AI CLIs** (at least one):
-   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code): `npm install -g @anthropic-ai/claude-code` or via the official installer
+1. **For Orchestrator Mode** (optional - at least one external CLI):
+   - [Claude Code](https://docs.anthropic.com/en/docs/claude-code): `npm install -g @anthropic-ai/claude-code`
    - [Gemini CLI](https://github.com/google/gemini-cli): Install from official repository
 
-2. **Git**: Required for workspace isolation
+2. **Git**: Required for workspace isolation and change tracking
+
+3. **API Key**: For Claude, OpenAI, or run locally with Ollama
 
 ### Installation
 
@@ -88,7 +97,65 @@ sudo cp target/release/safe-coder /usr/local/bin/
 
 ### Usage
 
-#### Orchestrate Mode (Recommended)
+Safe Coder offers multiple modes to fit your workflow:
+
+#### Shell Mode (New!)
+
+Start an interactive shell with optional AI assistance:
+
+```bash
+# Start the shell
+safe-coder shell
+
+# Start with AI pre-connected
+safe-coder shell --ai
+
+# Start in a specific directory
+safe-coder shell --path /path/to/project
+```
+
+**Shell Commands:**
+
+| Command | Description |
+|---------|-------------|
+| `cd <path>` | Change directory (supports ~, relative, absolute) |
+| `pwd` | Print current working directory |
+| `history` | Show command history |
+| `clear` | Clear the screen |
+| `export KEY=VAL` | Set environment variable |
+| `env` | Show all environment variables |
+| `exit`, `quit` | Exit the shell |
+
+**AI Commands (in shell):**
+
+| Command | Description |
+|---------|-------------|
+| `ai-connect` | Connect to AI for coding assistance |
+| `ai-disconnect` | Disconnect from AI session |
+| `ai <question>` | Ask AI for help (requires ai-connect first) |
+| `chat` | Enter interactive coding mode with tool execution |
+
+**Chat Mode (after running `chat`):**
+
+| Command | Description |
+|---------|-------------|
+| `!<command>` | Run shell command without leaving chat |
+| `exit`, `shell` | Return to shell mode |
+
+#### Chat Mode (Direct AI Coding)
+
+```bash
+# Start a TUI chat session
+safe-coder chat
+
+# Classic CLI mode (no TUI)
+safe-coder chat --tui false
+
+# Use plan mode (requires approval before tool execution)
+safe-coder chat --mode plan
+```
+
+#### Orchestrate Mode (Multi-Agent)
 
 ```bash
 # Interactive orchestration
@@ -105,14 +172,109 @@ safe-coder orchestrate --worker gemini --task "Fix the typo in README.md"
 safe-coder orchestrate --worktrees false
 ```
 
-#### Direct Chat Mode
+## Example Sessions
 
-```bash
-# Start a TUI chat session (direct AI interaction, no delegation)
-safe-coder chat
+### Shell Mode with AI
 
-# Classic CLI mode
-safe-coder chat --tui false
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Safe Coder Shell - Interactive shell with AI assistance   │
+└─────────────────────────────────────────────────────────────┘
+
+  Shell Commands:
+    cd <path>        - Change directory (supports ~, relative, absolute)
+    pwd              - Print current working directory
+    ...
+
+my-project (main) ❯ ls -la
+total 24
+drwxr-xr-x  8 user  staff   256 Dec 26 10:00 .
+-rw-r--r--  1 user  staff  1234 Dec 26 10:00 Cargo.toml
+drwxr-xr-x  5 user  staff   160 Dec 26 10:00 src
+
+my-project (main) ❯ ai-connect
+Connecting to AI...
+✓ Connected to AI. Use 'ai <question>' for assistance.
+
+🤖 my-project (main) ❯ ai how do I add a new dependency to Cargo.toml?
+🤖 Thinking...
+
+To add a new dependency to Cargo.toml, you can either:
+
+1. Manually edit Cargo.toml and add under [dependencies]:
+   ```toml
+   [dependencies]
+   serde = "1.0"
+   ```
+
+2. Use cargo add (requires cargo-edit):
+   ```bash
+   cargo add serde
+   ```
+
+🤖 my-project (main) ❯ chat
+
+━━━ Entering Chat Mode ━━━
+Type your requests for AI coding assistance.
+Type 'exit' or 'shell' to return to shell mode.
+
+chat> Add serde with derive feature to my project
+🤖 Processing...
+
+I'll add serde with the derive feature to your Cargo.toml.
+
+🔧 Executing 1 tool(s): edit_file
+
+Done! I've added `serde = { version = "1.0", features = ["derive"] }` to your dependencies.
+
+chat> !cargo build
+   Compiling my-project v0.1.0
+    Finished dev [unoptimized + debuginfo] target(s) in 2.34s
+
+chat> shell
+
+━━━ Returning to Shell Mode ━━━
+
+🤖 my-project (main) ❯ exit
+Goodbye!
+```
+
+### Orchestrator Mode
+
+```
+🎯 Safe Coder Orchestrator
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Project: /home/user/my-project
+Default worker: ClaudeCode
+Using worktrees: true
+
+Enter tasks to orchestrate (type 'exit' to quit, 'status' for worker status):
+
+🎯 > Refactor the user service and add comprehensive tests
+
+📋 Planning task: Refactor the user service and add comprehensive tests
+
+Plan to address: "Refactor the user service and add comprehensive tests"
+
+Breaking down into 2 task(s):
+  1. Refactor the user service
+  2. Add comprehensive tests
+
+📊 Orchestration Complete
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Tasks: 2 total, 2 successful, 0 failed
+
+✓ Task task-1: Refactor the user service
+  Worker: ClaudeCode
+  Workspace: /project/.safe-coder-workspaces/task-1
+
+✓ Task task-2: Add comprehensive tests
+  Worker: ClaudeCode
+  Workspace: /project/.safe-coder-workspaces/task-2
+
+🎯 > exit
+🧹 Cleaning up workspaces...
+✨ Orchestrator session ended. Goodbye!
 ```
 
 ## TUI Orchestration
@@ -151,44 +313,6 @@ When in interactive orchestrate mode:
 | `help` | Show help message |
 | *any text* | Submit as a task to orchestrate |
 
-### Example Session
-
-```
-🎯 Safe Coder Orchestrator
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Project: /home/user/my-project
-Default worker: ClaudeCode
-Using worktrees: true
-
-Enter tasks to orchestrate (type 'exit' to quit, 'status' for worker status):
-
-🎯 > Refactor the user service and add comprehensive tests
-
-📋 Planning task: Refactor the user service and add comprehensive tests
-
-Plan to address: "Refactor the user service and add comprehensive tests"
-
-Breaking down into 2 task(s):
-  1. Refactor the user service
-  2. Add comprehensive tests
-
-📊 Orchestration Complete
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Tasks: 2 total, 2 successful, 0 failed
-
-✓ Task task-1: Refactor the user service
-  Worker: ClaudeCode
-  Workspace: /project/.safe-coder-workspaces/task-1
-
-✓ Task task-2: Add comprehensive tests
-  Worker: ClaudeCode
-  Workspace: /project/.safe-coder-workspaces/task-2
-
-🎯 > exit
-🧹 Cleaning up workspaces...
-✨ Orchestrator session ended. Goodbye!
-```
-
 ## Configuration
 
 The configuration is stored in `~/.config/safe-coder/config.toml`:
@@ -202,6 +326,12 @@ max_tokens = 8192
 
 [git]
 auto_commit = true
+
+# Tool settings
+[tools]
+bash_timeout_secs = 120
+max_output_bytes = 1048576
+warn_dangerous_commands = true
 
 # Orchestrator configuration
 [orchestrator]
@@ -220,6 +350,25 @@ start_delay_ms = 100            # Delay between starting workers (ms)
 
 ## How It Works
 
+### 💻 **Direct Coding Mode**
+
+Safe Coder functions as a complete AI coding assistant:
+
+1. **Tool Execution**: The AI can read, write, and edit files, plus run bash commands
+2. **Git Tracking**: All changes are automatically committed with descriptive messages
+3. **Approval Modes**: 
+   - **Act Mode** (default): AI executes tools automatically
+   - **Plan Mode**: Shows execution plan and asks for approval first
+
+### 🖥️ **Shell Mode**
+
+The shell provides a familiar command-line experience with AI integration:
+
+1. **Standard Shell**: Run any command (ls, git, cargo, npm, etc.)
+2. **AI Assistance**: Connect to AI and ask questions without leaving the shell
+3. **Coding Mode**: Switch to full coding mode for complex tasks requiring tool execution
+4. **Context Aware**: AI understands your current directory and project structure
+
 ### 🎯 **Orchestration Flow**
 
 1. **Request Analysis**: The planner analyzes your request and identifies distinct tasks
@@ -231,20 +380,11 @@ start_delay_ms = 100            # Delay between starting workers (ms)
 
 ### ⚡ **Parallel Execution with Throttling**
 
-Safe Coder can run up to 3 CLI agents in parallel, with intelligent throttling to prevent overwhelming the agents or hitting rate limits:
+Safe Coder can run up to 3 CLI agents in parallel, with intelligent throttling:
 
-- **Global Concurrency Limit**: Maximum of 3 workers running simultaneously (`max_workers`)
+- **Global Concurrency Limit**: Maximum of 3 workers running simultaneously
 - **Per-Worker-Type Limits**: Control how many Claude or Gemini workers can run at once
-  - `claude_max_concurrent`: Max concurrent Claude Code workers (default: 2)
-  - `gemini_max_concurrent`: Max concurrent Gemini CLI workers (default: 2)
-- **Start Delay**: Configurable delay between starting workers (`start_delay_ms`, default: 100ms)
-
-This ensures optimal performance while respecting API rate limits and preventing resource exhaustion.
-
-**Example**: With 5 tasks and `max_workers=3`, `claude_max_concurrent=2`:
-- Tasks 1, 2 (Claude), and 3 (Gemini) start immediately
-- As Task 1 completes, Task 4 starts (but only if <2 Claude workers are active)
-- Task 5 starts when another worker completes
+- **Start Delay**: Configurable delay between starting workers
 
 ### 📝 **Task Decomposition**
 
@@ -266,11 +406,7 @@ project/
 ├── .git/                          # Main repository
 ├── .safe-coder-workspaces/        # Worktree base
 │   ├── task-1/                    # Isolated workspace for task 1
-│   │   ├── src/
-│   │   └── ... (full project copy)
 │   └── task-2/                    # Isolated workspace for task 2
-│       ├── src/
-│       └── ...
 └── src/                           # Main project files
 ```
 
@@ -283,17 +419,19 @@ safe-coder/
 ├── src/
 │   ├── main.rs              # CLI entry point
 │   ├── config.rs            # Configuration management
-│   ├── orchestrator/        # NEW: Orchestration module
+│   ├── shell/               # Shell mode module
+│   │   └── mod.rs           # Interactive shell with AI
+│   ├── orchestrator/        # Orchestration module
 │   │   ├── mod.rs           # Orchestrator coordinator
 │   │   ├── planner.rs       # Task decomposition
 │   │   ├── worker.rs        # CLI worker management
 │   │   ├── workspace.rs     # Git worktree manager
 │   │   └── task.rs          # Task definitions
+│   ├── session/             # Chat session management
 │   ├── llm/                 # LLM client integrations
-│   ├── tools/               # Agent tools
+│   ├── tools/               # Agent tools (read, write, edit, bash)
 │   ├── tui/                 # Terminal UI
-│   ├── git/                 # Git change tracking
-│   └── session/             # Session management
+│   └── git/                 # Git change tracking
 ├── Cargo.toml
 └── README.md
 ```
@@ -342,14 +480,20 @@ Error: Failed to create worktree
 git init  # If not already a git repo
 ```
 
-### Merge Conflicts
+### API Key Issues
 
-When tasks modify the same files, you may encounter merge conflicts:
 ```
-Error: Merge conflict when integrating task-2. Manual resolution needed.
+Error: Failed to create LLM client
 ```
 
-**Solution**: Resolve conflicts manually in the main repository.
+**Solution**: Configure your API key:
+```bash
+# Set via config command
+safe-coder config --api-key YOUR_API_KEY
+
+# Or login with OAuth
+safe-coder login anthropic
+```
 
 ## Future Enhancements
 
@@ -357,6 +501,8 @@ Error: Merge conflict when integrating task-2. Manual resolution needed.
 - [x] Git worktree isolation for tasks
 - [x] Automatic task decomposition
 - [x] Parallel worker execution
+- [x] Interactive shell mode with AI
+- [x] Standalone coding CLI
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI
