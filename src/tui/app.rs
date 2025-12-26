@@ -1,4 +1,5 @@
-use super::messages::{ChatMessage, ToolExecution, BackgroundTask, BackgroundTaskStatus};
+use super::banner;
+use super::messages::{BackgroundTask, BackgroundTaskStatus, ChatMessage, ToolExecution};
 use super::spinner::Spinner;
 use chrono::Local;
 
@@ -25,6 +26,10 @@ pub struct App {
     pub focus: FocusPanel,
     pub session_status: SessionStatus,
     pub start_time: chrono::DateTime<Local>,
+    /// Dirty flag - set to true when UI needs redraw
+    pub needs_redraw: bool,
+    /// Track last input length for cursor blink optimization
+    last_input_len: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -58,87 +63,126 @@ impl App {
                 active_workspaces: 0,
             },
             start_time: Local::now(),
+            needs_redraw: true,
+            last_input_len: 0,
         };
 
-        app.messages.push(ChatMessage::system(format!(
-            "🔥 Safe Coder initialized\nProject: {}\nType your request or use /orchestrate <task> to delegate to AI agents...",
+        // Add the banner as a welcome message
+        let welcome = format!(
+            "{}\n\nWelcome to Safe Coder!\n\nProject: {}\n\nI'm an AI coding assistant. I can:\n  - Read and write files in your project\n  - Edit files with precise string replacements\n  - Execute bash commands\n  - Help with debugging, code review, refactoring, and more\n\nWhat would you like to work on today?",
+            banner::BANNER_SMALL.trim(),
             project_path
-        )));
+        );
+        app.messages.push(ChatMessage::system(welcome));
 
         app
     }
 
     pub fn tick(&mut self) {
+        let old_frame = self.animation_frame;
+
         if self.is_thinking {
             self.spinner.tick();
+            // Always redraw when thinking (for spinner animation)
+            self.needs_redraw = true;
         }
 
         // Increment animation frame
         self.animation_frame = (self.animation_frame + 1) % 100;
 
-        // Update session uptime if session is active
-        if self.session_status.active {
+        // Check if cursor blink state changed (every 10 frames)
+        let old_cursor_visible = (old_frame % 20) < 10;
+        let new_cursor_visible = (self.animation_frame % 20) < 10;
+        if old_cursor_visible != new_cursor_visible {
+            self.needs_redraw = true;
+        }
+
+        // Update session uptime if session is active (only every ~1 second worth of ticks)
+        if self.session_status.active && self.animation_frame % 10 == 0 {
             let elapsed = Local::now()
                 .signed_duration_since(self.start_time)
                 .num_seconds();
-            self.session_status.uptime = if elapsed < 60 {
+            let new_uptime = if elapsed < 60 {
                 format!("{}s", elapsed)
             } else if elapsed < 3600 {
                 format!("{}m {}s", elapsed / 60, elapsed % 60)
             } else {
                 format!("{}h {}m", elapsed / 3600, (elapsed % 3600) / 60)
             };
+            if new_uptime != self.session_status.uptime {
+                self.session_status.uptime = new_uptime;
+                self.needs_redraw = true;
+            }
         }
+    }
+
+    /// Mark the app as needing a redraw
+    pub fn mark_dirty(&mut self) {
+        self.needs_redraw = true;
+    }
+
+    /// Clear the dirty flag after drawing
+    pub fn clear_dirty(&mut self) {
+        self.needs_redraw = false;
     }
 
     pub fn input_push(&mut self, c: char) {
         self.input.push(c);
+        self.needs_redraw = true;
     }
 
     pub fn input_pop(&mut self) {
         self.input.pop();
+        self.needs_redraw = true;
     }
 
     pub fn input_submit(&mut self) -> String {
         let input = self.input.clone();
         self.input.clear();
         self.scroll_to_bottom();
+        self.needs_redraw = true;
         input
     }
 
     pub fn add_user_message(&mut self, content: &str) {
         self.messages.push(ChatMessage::user(content.to_string()));
         self.scroll_to_bottom();
+        self.needs_redraw = true;
     }
 
     pub fn add_assistant_message(&mut self, content: &str) {
         self.messages
             .push(ChatMessage::assistant(content.to_string()));
         self.scroll_to_bottom();
+        self.needs_redraw = true;
     }
 
     pub fn add_system_message(&mut self, content: &str) {
-        self.messages
-            .push(ChatMessage::system(content.to_string()));
+        self.messages.push(ChatMessage::system(content.to_string()));
         self.scroll_to_bottom();
+        self.needs_redraw = true;
     }
 
     pub fn add_error_message(&mut self, content: &str) {
         self.messages.push(ChatMessage::error(content.to_string()));
         self.scroll_to_bottom();
+        self.needs_redraw = true;
     }
 
     pub fn add_tool_message(&mut self, content: &str) {
         self.messages.push(ChatMessage::tool(content.to_string()));
         self.scroll_to_bottom();
+        self.needs_redraw = true;
     }
 
     pub fn add_tool_execution(&mut self, tool: ToolExecution) {
         self.tool_executions.push(tool);
+        self.needs_redraw = true;
     }
 
     pub fn set_status(&mut self, status: &str) {
         self.status = status.to_string();
+        self.needs_redraw = true;
     }
 
     pub fn set_thinking(&mut self, thinking: bool) {
@@ -146,10 +190,12 @@ impl App {
         if !thinking {
             self.processing_message.clear();
         }
+        self.needs_redraw = true;
     }
 
     pub fn set_processing_message(&mut self, message: &str) {
         self.processing_message = message.to_string();
+        self.needs_redraw = true;
     }
 
     pub fn start_session(&mut self, session_id: String) {
@@ -174,11 +220,13 @@ impl App {
     pub fn scroll_up(&mut self) {
         if self.scroll_offset > 0 {
             self.scroll_offset -= 1;
+            self.needs_redraw = true;
         }
     }
 
     pub fn scroll_down(&mut self) {
         self.scroll_offset += 1;
+        self.needs_redraw = true;
     }
 
     pub fn scroll_page_up(&mut self) {
@@ -187,10 +235,12 @@ impl App {
         } else {
             self.scroll_offset = 0;
         }
+        self.needs_redraw = true;
     }
 
     pub fn scroll_page_down(&mut self) {
         self.scroll_offset += 10;
+        self.needs_redraw = true;
     }
 
     pub fn scroll_to_bottom(&mut self) {
@@ -203,6 +253,7 @@ impl App {
             FocusPanel::Tools => FocusPanel::Status,
             FocusPanel::Status => FocusPanel::Chat,
         };
+        self.needs_redraw = true;
     }
 
     // Background task management methods
@@ -212,52 +263,81 @@ impl App {
     }
 
     pub fn update_task_status(&mut self, task_id: &str, status: BackgroundTaskStatus) {
-        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+        if let Some(task) = self
+            .background_tasks
+            .iter_mut()
+            .find(|t| t.task_id == task_id)
+        {
             task.status = status;
         }
         // Check if any tasks are still running
-        self.is_orchestrating = self.background_tasks.iter()
-            .any(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending));
+        self.is_orchestrating = self.background_tasks.iter().any(|t| {
+            matches!(
+                t.status,
+                BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending
+            )
+        });
     }
 
     pub fn complete_task(&mut self, task_id: &str, output: String) {
-        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+        if let Some(task) = self
+            .background_tasks
+            .iter_mut()
+            .find(|t| t.task_id == task_id)
+        {
             task.complete(output);
         }
         self.check_orchestration_complete();
     }
 
     pub fn fail_task(&mut self, task_id: &str, error: String) {
-        if let Some(task) = self.background_tasks.iter_mut().find(|t| t.task_id == task_id) {
+        if let Some(task) = self
+            .background_tasks
+            .iter_mut()
+            .find(|t| t.task_id == task_id)
+        {
             task.fail(error);
         }
         self.check_orchestration_complete();
     }
 
     fn check_orchestration_complete(&mut self) {
-        self.is_orchestrating = self.background_tasks.iter()
-            .any(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending));
+        self.is_orchestrating = self.background_tasks.iter().any(|t| {
+            matches!(
+                t.status,
+                BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending
+            )
+        });
     }
 
     pub fn add_orchestration_message(&mut self, content: &str) {
-        self.messages.push(ChatMessage::orchestration(content.to_string()));
+        self.messages
+            .push(ChatMessage::orchestration(content.to_string()));
         self.scroll_to_bottom();
     }
 
     pub fn get_active_tasks_count(&self) -> usize {
-        self.background_tasks.iter()
-            .filter(|t| matches!(t.status, BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending))
+        self.background_tasks
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    BackgroundTaskStatus::Running | BackgroundTaskStatus::Pending
+                )
+            })
             .count()
     }
 
     pub fn get_completed_tasks_count(&self) -> usize {
-        self.background_tasks.iter()
+        self.background_tasks
+            .iter()
             .filter(|t| matches!(t.status, BackgroundTaskStatus::Completed))
             .count()
     }
 
     pub fn get_failed_tasks_count(&self) -> usize {
-        self.background_tasks.iter()
+        self.background_tasks
+            .iter()
             .filter(|t| matches!(t.status, BackgroundTaskStatus::Failed(_)))
             .count()
     }

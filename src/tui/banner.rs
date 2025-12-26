@@ -15,11 +15,19 @@ pub const BANNER_SMALL: &str = r#"
  |___/\__,_|_| \___|  \___\___/\__,_\___|_|
 "#;
 
+// Crush-inspired banner with diagonal line pattern
+pub const BANNER_CRUSH: &str = r#"
+    ╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+   ╱╱  ___        __        ___         _           ╱╱
+  ╱╱  / __| __ _ / _|___   / __|___  __| |___ _ _  ╱╱
+ ╱╱   \__ \/ _` |  _/ -_) | (__/ _ \/ _` / -_) '_| ╱╱
+╱╱    |___/\__,_|_| \___|  \___\___/\__,_\___|_|  ╱╱
+╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+"#;
+
 pub fn get_processing_frames() -> Vec<&'static str> {
-    // Smooth spinner animation - more modern
-    vec![
-        "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
-    ]
+    // Smooth spinner animation - modern dots
+    vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 }
 
 pub fn get_loading_text(frame: usize) -> String {
@@ -29,5 +37,5 @@ pub fn get_loading_text(frame: usize) -> String {
         2 => "..",
         _ => "...",
     };
-    format!("Processing{}", dots)
+    format!("thinking{}", dots)
 }
