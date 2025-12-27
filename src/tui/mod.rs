@@ -15,6 +15,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
 mod app;
+mod autocomplete;
 mod banner;
 mod messages;
 mod spinner;

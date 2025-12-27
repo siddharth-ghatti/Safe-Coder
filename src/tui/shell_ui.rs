@@ -46,6 +46,11 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     draw_status_bar(f, app, main_layout[0]);
     draw_blocks(f, app, main_layout[1]);
     draw_input(f, app, main_layout[2]);
+
+    // Draw autocomplete popup on top if visible
+    if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
+        draw_autocomplete(f, app, main_layout[2]);
+    }
 }
 
 /// Draw the status bar at the top
@@ -409,4 +414,75 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     };
 
     f.render_widget(paragraph, input_area);
+}
+
+/// Draw the autocomplete popup above the input area
+fn draw_autocomplete(f: &mut Frame, app: &ShellTuiApp, input_area: Rect) {
+    let suggestions = &app.autocomplete.suggestions;
+    let selected = app.autocomplete.selected;
+
+    if suggestions.is_empty() {
+        return;
+    }
+
+    // Calculate popup dimensions
+    let max_width = suggestions.iter().map(|s| s.len()).max().unwrap_or(10) + 4;
+    let width = (max_width as u16)
+        .min(input_area.width.saturating_sub(4))
+        .max(15);
+    let height = (suggestions.len() as u16 + 2).min(12); // +2 for borders, max 12 lines
+
+    // Position popup above the input area
+    let x = input_area.x + 2;
+    let y = input_area.y.saturating_sub(height);
+
+    let popup_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    // Create popup block with border
+    let popup_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_CYAN))
+        .style(Style::default().bg(Color::Rgb(30, 30, 40)));
+
+    let inner = popup_block.inner(popup_area);
+
+    // Clear the area first
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+    f.render_widget(popup_block, popup_area);
+
+    // Render suggestions
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .enumerate()
+        .take(10) // Limit displayed items
+        .map(|(i, suggestion)| {
+            let style = if i == selected {
+                Style::default()
+                    .fg(Color::Rgb(30, 30, 40))
+                    .bg(ACCENT_CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+
+            // Add icon based on type
+            let icon = if suggestion.ends_with('/') {
+                "📁 "
+            } else if suggestion.contains('.') {
+                "📄 "
+            } else {
+                "⚡ "
+            };
+
+            ListItem::new(format!("{}{}", icon, suggestion)).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    f.render_widget(list, inner);
 }

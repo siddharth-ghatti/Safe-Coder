@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use super::autocomplete::Autocomplete;
 use super::spinner::Spinner;
 use crate::config::Config;
 use crate::session::Session;
@@ -311,6 +312,8 @@ pub struct ShellTuiApp {
     pub search_results: Vec<usize>,
     /// Current search result index
     pub search_result_pos: usize,
+    /// Autocomplete state
+    pub autocomplete: Autocomplete,
 
     // === Animation/Render State ===
     /// Whether UI needs to be redrawn
@@ -357,6 +360,7 @@ impl ShellTuiApp {
             search_query: String::new(),
             search_results: Vec::new(),
             search_result_pos: 0,
+            autocomplete: Autocomplete::new(),
 
             needs_redraw: true,
             animation_frame: 0,
@@ -453,6 +457,9 @@ impl ShellTuiApp {
 
         // Update input mode based on prefix
         self.update_input_mode();
+
+        // Hide autocomplete when typing (will show again on Tab)
+        self.autocomplete.hide();
     }
 
     /// Pop a character from input (backspace)
@@ -462,6 +469,9 @@ impl ShellTuiApp {
             self.input.remove(self.cursor_pos);
             self.needs_redraw = true;
             self.update_input_mode();
+
+            // Hide autocomplete when deleting
+            self.autocomplete.hide();
         }
     }
 
@@ -506,6 +516,7 @@ impl ShellTuiApp {
         self.input.clear();
         self.cursor_pos = 0;
         self.input_mode = InputMode::Normal;
+        self.autocomplete.hide();
         self.needs_redraw = true;
     }
 
@@ -515,6 +526,7 @@ impl ShellTuiApp {
         self.input.clear();
         self.cursor_pos = 0;
         self.input_mode = InputMode::Normal;
+        self.autocomplete.hide();
         self.scroll_to_bottom();
         self.needs_redraw = true;
 
@@ -530,6 +542,52 @@ impl ShellTuiApp {
         }
 
         input
+    }
+
+    // === Autocomplete ===
+
+    /// Trigger autocomplete for current input
+    pub fn trigger_autocomplete(&mut self) {
+        // Don't autocomplete AI commands
+        if self.input.starts_with('@') {
+            return;
+        }
+
+        self.autocomplete.complete(&self.input, &self.cwd);
+
+        // If there's exactly one match, apply it immediately
+        if self.autocomplete.single_match() {
+            self.apply_autocomplete();
+        }
+
+        self.needs_redraw = true;
+    }
+
+    /// Apply the currently selected autocomplete suggestion
+    pub fn apply_autocomplete(&mut self) {
+        if let Some(new_input) = self.autocomplete.apply(&self.input) {
+            self.input = new_input;
+            self.cursor_pos = self.input.len();
+            self.autocomplete.hide();
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Move to next autocomplete suggestion
+    pub fn autocomplete_next(&mut self) {
+        self.autocomplete.next();
+        self.needs_redraw = true;
+    }
+
+    /// Move to previous autocomplete suggestion
+    pub fn autocomplete_prev(&mut self) {
+        self.autocomplete.prev();
+        self.needs_redraw = true;
+    }
+
+    /// Check if autocomplete is currently visible
+    pub fn autocomplete_visible(&self) -> bool {
+        self.autocomplete.visible
     }
 
     /// Update input mode based on current input
