@@ -1,17 +1,40 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use std::path::PathBuf;
 use std::io::{self, Write};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use crate::approval::{ApprovalMode, ExecutionMode, ExecutionPlan, PlannedTool};
 use crate::checkpoint::CheckpointManager;
 use crate::config::Config;
 use crate::custom_commands::CustomCommandManager;
 use crate::git::GitManager;
-use crate::llm::{ContentBlock, LlmClient, Message, ToolDefinition, create_client};
+use crate::llm::{create_client, ContentBlock, LlmClient, Message, ToolDefinition};
 use crate::memory::MemoryManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
-use crate::tools::{ToolRegistry, ToolContext};
+use crate::tools::{ToolContext, ToolRegistry};
+
+/// Events emitted during AI message processing for real-time UI updates
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    /// AI is thinking/processing
+    Thinking(String),
+    /// Tool execution started
+    ToolStart { name: String, description: String },
+    /// Tool produced output
+    ToolOutput { name: String, output: String },
+    /// Tool execution completed
+    ToolComplete { name: String, success: bool },
+    /// File was edited - includes diff info
+    FileDiff {
+        path: String,
+        old_content: String,
+        new_content: String,
+    },
+    /// Text chunk from AI response
+    TextChunk(String),
+}
 
 pub struct Session {
     config: Config,
@@ -84,7 +107,10 @@ impl Session {
     }
 
     pub async fn start(&mut self) -> Result<()> {
-        tracing::info!("🔒 Starting Safe Coder session for project: {:?}", self.project_path);
+        tracing::info!(
+            "🔒 Starting Safe Coder session for project: {:?}",
+            self.project_path
+        );
 
         // Initialize git if needed and auto-commit is enabled
         if self.config.git.auto_commit {
@@ -109,7 +135,8 @@ impl Session {
 
         loop {
             // Get tools schema
-            let tools: Vec<ToolDefinition> = self.tool_registry
+            let tools: Vec<ToolDefinition> = self
+                .tool_registry
                 .get_tools_schema()
                 .into_iter()
                 .map(|schema| ToolDefinition {
@@ -120,16 +147,16 @@ impl Session {
                 .collect();
 
             // Send to LLM
-            let assistant_message = self.llm_client
-                .send_message(&self.messages, &tools)
-                .await?;
+            let assistant_message = self.llm_client.send_message(&self.messages, &tools).await?;
 
             // Track stats (approximate token counting)
             self.stats.total_tokens_sent += user_message.len() / 4; // Rough estimate
             self.stats.total_messages += 1;
 
             // Check if there are any tool calls
-            let has_tool_calls = assistant_message.content.iter()
+            let has_tool_calls = assistant_message
+                .content
+                .iter()
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
             // Extract text from response
@@ -162,13 +189,16 @@ impl Session {
 
                     // Check for high-risk operations
                     if execution_plan.has_high_risk() {
-                        response_text.push_str("⚠️  WARNING: This plan contains high-risk operations!\n\n");
+                        response_text
+                            .push_str("⚠️  WARNING: This plan contains high-risk operations!\n\n");
                     }
 
                     // Ask for user approval
                     if !self.ask_user_approval().await? {
                         // User declined - add a message asking for alternatives
-                        response_text.push_str("\n❌ Plan rejected. Please provide alternative instructions.\n");
+                        response_text.push_str(
+                            "\n❌ Plan rejected. Please provide alternative instructions.\n",
+                        );
 
                         // Remove the assistant message with tool calls
                         self.messages.pop();
@@ -190,7 +220,9 @@ impl Session {
                         let brief = format!(
                             "🔧 Executing {} tool(s): {}\n",
                             execution_plan.tools.len(),
-                            execution_plan.tools.iter()
+                            execution_plan
+                                .tools
+                                .iter()
                                 .map(|t| t.name.as_str())
                                 .collect::<Vec<_>>()
                                 .join(", ")
@@ -210,7 +242,9 @@ impl Session {
                     self.stats.total_tool_calls += 1;
 
                     // Update tool usage stats
-                    let tool_stat = self.stats.tools_used
+                    let tool_stat = self
+                        .stats
+                        .tools_used
                         .iter_mut()
                         .find(|t| t.tool_name == *name);
 
@@ -229,15 +263,13 @@ impl Session {
                     let tool_ctx = ToolContext::new(&self.project_path, &self.config.tools);
 
                     let result = match self.tool_registry.get_tool(name) {
-                        Some(tool) => {
-                            match tool.execute(input.clone(), &tool_ctx).await {
-                                Ok(output) => {
-                                    tools_executed.push(name.clone());
-                                    output
-                                }
-                                Err(e) => format!("Error: {}", e),
+                        Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
+                            Ok(output) => {
+                                tools_executed.push(name.clone());
+                                output
                             }
-                        }
+                            Err(e) => format!("Error: {}", e),
+                        },
                         None => format!("Error: Unknown tool '{}'", name),
                     };
 
@@ -255,6 +287,184 @@ impl Session {
                     tracing::warn!("Failed to auto-commit changes: {}", e);
                 } else {
                     tracing::debug!("✓ Auto-committed: {}", commit_message);
+                }
+            }
+
+            // Add tool results as a new user message
+            if !tool_results.is_empty() {
+                self.messages.push(Message {
+                    role: crate::llm::Role::User,
+                    content: tool_results,
+                });
+            }
+        }
+
+        let final_response = response_text.trim().to_string();
+        self.last_output = final_response.clone();
+
+        Ok(final_response)
+    }
+
+    /// Send a message with real-time progress updates via channel
+    /// This allows the UI to show tool executions as they happen
+    pub async fn send_message_with_progress(
+        &mut self,
+        user_message: String,
+        event_tx: mpsc::UnboundedSender<SessionEvent>,
+    ) -> Result<String> {
+        // Track stats
+        self.stats.total_messages += 1;
+
+        // Add user message to history
+        self.messages.push(Message::user(user_message.clone()));
+
+        let mut response_text = String::new();
+
+        loop {
+            // Notify UI that we're thinking
+            let _ = event_tx.send(SessionEvent::Thinking("Processing...".to_string()));
+
+            // Get tools schema
+            let tools: Vec<ToolDefinition> = self
+                .tool_registry
+                .get_tools_schema()
+                .into_iter()
+                .map(|schema| ToolDefinition {
+                    name: schema["name"].as_str().unwrap().to_string(),
+                    description: schema["description"].as_str().unwrap().to_string(),
+                    input_schema: schema["input_schema"].clone(),
+                })
+                .collect();
+
+            // Send to LLM
+            let assistant_message = self.llm_client.send_message(&self.messages, &tools).await?;
+
+            // Track stats
+            self.stats.total_tokens_sent += user_message.len() / 4;
+            self.stats.total_messages += 1;
+
+            // Check if there are any tool calls
+            let has_tool_calls = assistant_message
+                .content
+                .iter()
+                .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
+
+            // Extract text from response and send as chunks
+            for block in &assistant_message.content {
+                if let ContentBlock::Text { text } = block {
+                    response_text.push_str(text);
+                    response_text.push('\n');
+                    let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                }
+            }
+
+            // Add assistant message to history
+            self.messages.push(assistant_message.clone());
+
+            if !has_tool_calls {
+                break;
+            }
+
+            // Execute tool calls with progress updates
+            let mut tool_results = Vec::new();
+            let mut tools_executed = Vec::new();
+
+            for block in &assistant_message.content {
+                if let ContentBlock::ToolUse { id, name, input } = block {
+                    // Track stats
+                    self.stats.total_tool_calls += 1;
+
+                    // Update tool usage stats
+                    let tool_stat = self
+                        .stats
+                        .tools_used
+                        .iter_mut()
+                        .find(|t| t.tool_name == *name);
+
+                    if let Some(stat) = tool_stat {
+                        stat.count += 1;
+                    } else {
+                        self.stats.tools_used.push(ToolUsage {
+                            tool_name: name.clone(),
+                            count: 1,
+                        });
+                    }
+
+                    // Generate description for the tool action
+                    let description = self.describe_tool_action(name, input);
+
+                    // Notify UI that tool is starting
+                    let _ = event_tx.send(SessionEvent::ToolStart {
+                        name: name.clone(),
+                        description: description.clone(),
+                    });
+
+                    // For edit_file, capture old content for diff
+                    let old_content = if name == "edit_file" || name == "write_file" {
+                        if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                            let full_path = self.project_path.join(path);
+                            std::fs::read_to_string(&full_path).ok()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Create tool context and execute
+                    let tool_ctx = ToolContext::new(&self.project_path, &self.config.tools);
+
+                    let (result, success) = match self.tool_registry.get_tool(name) {
+                        Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
+                            Ok(output) => {
+                                tools_executed.push(name.clone());
+                                (output, true)
+                            }
+                            Err(e) => (format!("Error: {}", e), false),
+                        },
+                        None => (format!("Error: Unknown tool '{}'", name), false),
+                    };
+
+                    // For edit_file, send diff if we have old content
+                    if (name == "edit_file" || name == "write_file") && success {
+                        if let Some(old) = old_content {
+                            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                                let full_path = self.project_path.join(path);
+                                if let Ok(new_content) = std::fs::read_to_string(&full_path) {
+                                    let _ = event_tx.send(SessionEvent::FileDiff {
+                                        path: path.to_string(),
+                                        old_content: old,
+                                        new_content,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Send tool output
+                    let _ = event_tx.send(SessionEvent::ToolOutput {
+                        name: name.clone(),
+                        output: result.clone(),
+                    });
+
+                    // Notify UI that tool completed
+                    let _ = event_tx.send(SessionEvent::ToolComplete {
+                        name: name.clone(),
+                        success,
+                    });
+
+                    tool_results.push(ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: result,
+                    });
+                }
+            }
+
+            // Auto-commit if enabled
+            if !tools_executed.is_empty() && self.config.git.auto_commit {
+                let commit_message = format!("AI executed: {}", tools_executed.join(", "));
+                if let Err(e) = self.git_manager.auto_commit(&commit_message).await {
+                    tracing::warn!("Failed to auto-commit changes: {}", e);
                 }
             }
 
@@ -311,7 +521,9 @@ impl Session {
         plan.set_complexity(complexity);
 
         // Add risks for high-risk operations
-        let high_risk_tools: Vec<_> = plan.tools.iter()
+        let high_risk_tools: Vec<_> = plan
+            .tools
+            .iter()
             .filter(|t| t.risk_level == crate::approval::RiskLevel::High)
             .map(|t| format!("High-risk operation: {} - {}", t.name, t.description))
             .collect();
@@ -334,9 +546,16 @@ impl Session {
             }
             "write_file" => {
                 if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                    let content_preview = params.get("content")
+                    let content_preview = params
+                        .get("content")
                         .and_then(|v| v.as_str())
-                        .map(|c| if c.len() > 50 { format!("{}...", &c[..50]) } else { c.to_string() })
+                        .map(|c| {
+                            if c.len() > 50 {
+                                format!("{}...", &c[..50])
+                            } else {
+                                c.to_string()
+                            }
+                        })
                         .unwrap_or_default();
                     format!("Write to {}: {}", path, content_preview)
                 } else {
@@ -352,7 +571,11 @@ impl Session {
             }
             "bash" => {
                 if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                    let cmd_preview = if cmd.len() > 60 { format!("{}...", &cmd[..60]) } else { cmd.to_string() };
+                    let cmd_preview = if cmd.len() > 60 {
+                        format!("{}...", &cmd[..60])
+                    } else {
+                        cmd.to_string()
+                    };
                     format!("Run command: {}", cmd_preview)
                 } else {
                     "Execute bash command".to_string()
@@ -399,7 +622,9 @@ impl Session {
     /// Execute shell command in project directory
     pub async fn execute_shell_command(&self, command: &str) -> Result<String> {
         // Use bash tool to execute command
-        let bash_tool = self.tool_registry.get_tool("bash")
+        let bash_tool = self
+            .tool_registry
+            .get_tool("bash")
             .context("Bash tool not found")?;
 
         let input = serde_json::json!({
@@ -421,7 +646,8 @@ impl Session {
 
     /// Save current chat session
     pub async fn save_chat(&mut self, name: Option<String>) -> Result<String> {
-        let id = self.persistence
+        let id = self
+            .persistence
             .save_session(name, &self.project_path, &self.messages)
             .await?;
 
@@ -506,7 +732,7 @@ impl Session {
             Some(f) => {
                 let path = PathBuf::from(f);
                 self.checkpoints.restore_file(&path).await?;
-            },
+            }
             None => {
                 // Restore all files
                 self.checkpoints.restore_all().await?;
@@ -557,11 +783,17 @@ impl Session {
         output.push_str(&format!("Provider: {:?}\n", self.config.llm.provider));
         output.push_str(&format!("Approval Mode: {}\n", self.approval_mode));
         output.push_str(&format!("Max Tokens: {}\n", self.config.llm.max_tokens));
-        output.push_str(&format!("Git Auto-Commit: {}\n", self.config.git.auto_commit));
+        output.push_str(&format!(
+            "Git Auto-Commit: {}\n",
+            self.config.git.auto_commit
+        ));
         output.push_str(&format!("Project: {}\n", self.project_path.display()));
 
         output.push_str("\n--- Tool Settings ---\n");
-        output.push_str(&format!("Bash Timeout: {}s\n", self.config.tools.bash_timeout_secs));
+        output.push_str(&format!(
+            "Bash Timeout: {}s\n",
+            self.config.tools.bash_timeout_secs
+        ));
         output.push_str(&format!(
             "Max Output Size: {} bytes ({:.1} MB)\n",
             self.config.tools.max_output_bytes,
@@ -569,7 +801,11 @@ impl Session {
         ));
         output.push_str(&format!(
             "Dangerous Command Warnings: {}\n",
-            if self.config.tools.warn_dangerous_commands { "enabled" } else { "disabled" }
+            if self.config.tools.warn_dangerous_commands {
+                "enabled"
+            } else {
+                "disabled"
+            }
         ));
 
         output
@@ -628,6 +864,9 @@ impl Session {
 
     /// List workspace directories
     pub async fn list_directories(&self) -> Result<String> {
-        Ok(format!("Current directory: {}", self.project_path.display()))
+        Ok(format!(
+            "Current directory: {}",
+            self.project_path.display()
+        ))
     }
 }

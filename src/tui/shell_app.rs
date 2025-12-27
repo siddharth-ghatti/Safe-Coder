@@ -49,6 +49,17 @@ pub enum BlockOutput {
     Streaming { lines: Vec<String>, complete: bool },
 }
 
+/// File diff information for edit operations
+#[derive(Debug, Clone)]
+pub struct FileDiff {
+    /// Path to the file that was edited
+    pub path: String,
+    /// Content before the edit
+    pub old_content: String,
+    /// Content after the edit
+    pub new_content: String,
+}
+
 impl BlockOutput {
     pub fn is_pending(&self) -> bool {
         matches!(self, BlockOutput::Pending)
@@ -138,6 +149,8 @@ pub struct CommandBlock {
     pub collapsed: bool,
     /// Child blocks (for AI tool executions)
     pub children: Vec<CommandBlock>,
+    /// File diff for edit operations (tool blocks only)
+    pub diff: Option<FileDiff>,
 }
 
 impl CommandBlock {
@@ -154,6 +167,7 @@ impl CommandBlock {
             duration_ms: None,
             collapsed: false,
             children: Vec::new(),
+            diff: None,
         }
     }
 

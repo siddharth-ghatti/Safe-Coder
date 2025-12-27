@@ -21,11 +21,11 @@ use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, Mutex};
 
-use super::shell_app::{AiCommand, BlockOutput, BlockType, CommandBlock, ShellTuiApp};
+use super::shell_app::{AiCommand, BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp};
 use super::shell_ui;
 use crate::config::Config;
 use crate::orchestrator::{Orchestrator, OrchestratorConfig};
-use crate::session::Session;
+use crate::session::{Session, SessionEvent};
 
 /// Message types for async command execution
 #[derive(Debug)]
@@ -46,19 +46,36 @@ enum CommandUpdate {
 /// Message types for AI updates
 #[derive(Debug)]
 enum AiUpdate {
-    /// AI response text
+    /// AI is thinking/processing
+    Thinking { block_id: String, message: String },
+    /// AI response text chunk
+    TextChunk { block_id: String, text: String },
+    /// AI final response
     Response { block_id: String, text: String },
     /// AI started tool execution
     ToolStart {
-        parent_block_id: String,
+        block_id: String,
         tool_name: String,
         description: String,
     },
+    /// Tool produced output
+    ToolOutput {
+        block_id: String,
+        tool_name: String,
+        output: String,
+    },
     /// AI tool completed
     ToolComplete {
-        parent_block_id: String,
-        tool_id: String,
-        output: String,
+        block_id: String,
+        tool_name: String,
+        success: bool,
+    },
+    /// File diff from edit operation
+    FileDiff {
+        block_id: String,
+        path: String,
+        old_content: String,
+        new_content: String,
     },
     /// AI processing complete
     Complete { block_id: String },
@@ -187,6 +204,38 @@ impl ShellTuiRunner {
             // Process AI updates
             while let Ok(update) = ai_rx.try_recv() {
                 match update {
+                    AiUpdate::Thinking { block_id, message } => {
+                        if let Some(block) = self.app.get_block_mut(&block_id) {
+                            block.output = BlockOutput::Streaming {
+                                lines: vec![format!("💭 {}", message)],
+                                complete: false,
+                            };
+                        }
+                        self.app.mark_dirty();
+                    }
+                    AiUpdate::TextChunk { block_id, text } => {
+                        if let Some(block) = self.app.get_block_mut(&block_id) {
+                            match &mut block.output {
+                                BlockOutput::Streaming { lines, .. } => {
+                                    // Replace thinking message with actual text
+                                    if lines.len() == 1 && lines[0].starts_with("💭") {
+                                        lines.clear();
+                                    }
+                                    for line in text.lines() {
+                                        lines.push(line.to_string());
+                                    }
+                                }
+                                BlockOutput::Pending => {
+                                    block.output = BlockOutput::Streaming {
+                                        lines: text.lines().map(|s| s.to_string()).collect(),
+                                        complete: false,
+                                    };
+                                }
+                                _ => {}
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
                     AiUpdate::Response { block_id, text } => {
                         if let Some(block) = self.app.get_block_mut(&block_id) {
                             block.output = BlockOutput::Success(text);
@@ -194,7 +243,7 @@ impl ShellTuiRunner {
                         self.app.mark_dirty();
                     }
                     AiUpdate::ToolStart {
-                        parent_block_id,
+                        block_id,
                         tool_name,
                         description,
                     } => {
@@ -207,22 +256,71 @@ impl ShellTuiRunner {
                             },
                             prompt,
                         );
-                        if let Some(parent) = self.app.get_block_mut(&parent_block_id) {
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
                             parent.add_child(child);
                         }
                         self.app.mark_dirty();
                     }
-                    AiUpdate::ToolComplete {
-                        parent_block_id: _,
-                        tool_id: _,
-                        output: _,
+                    AiUpdate::ToolOutput {
+                        block_id,
+                        tool_name,
+                        output,
                     } => {
-                        // Tool completion handled - just mark dirty
+                        // Find the tool's child block and update its output
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.iter_mut().rev().find(|c| {
+                                matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
+                            }) {
+                                // Truncate output for display
+                                let display_output = if output.len() > 500 {
+                                    format!("{}...[truncated]", &output[..500])
+                                } else {
+                                    output
+                                };
+                                child.output = BlockOutput::Success(display_output);
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    AiUpdate::ToolComplete {
+                        block_id,
+                        tool_name,
+                        success,
+                    } => {
+                        // Mark the tool block as complete
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.iter_mut().rev().find(|c| {
+                                matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
+                            }) {
+                                child.exit_code = Some(if success { 0 } else { 1 });
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    AiUpdate::FileDiff {
+                        block_id,
+                        path,
+                        old_content,
+                        new_content,
+                    } => {
+                        // Store diff in the most recent tool child block
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.last_mut() {
+                                child.diff = Some(FileDiff {
+                                    path,
+                                    old_content,
+                                    new_content,
+                                });
+                            }
+                        }
                         self.app.mark_dirty();
                     }
                     AiUpdate::Complete { block_id } => {
                         if let Some(block) = self.app.get_block_mut(&block_id) {
-                            if matches!(block.output, BlockOutput::Pending) {
+                            // Convert streaming to success if needed
+                            if let BlockOutput::Streaming { lines, .. } = &block.output {
+                                block.output = BlockOutput::Success(lines.join("\n"));
+                            } else if matches!(block.output, BlockOutput::Pending) {
                                 block.output = BlockOutput::Success(String::new());
                             }
                             block.exit_code = Some(0);
@@ -624,7 +722,7 @@ Keyboard Shortcuts:
             AiCommand::Query(query) => {
                 if !self.app.ai_connected {
                     let prompt = self.app.current_prompt();
-                    let mut block = CommandBlock::system(
+                    let block = CommandBlock::system(
                         "AI not connected. Run @connect first.".to_string(),
                         prompt,
                     );
@@ -649,21 +747,86 @@ Keyboard Shortcuts:
                 // Clone session for async task
                 if let Some(session) = &self.app.session {
                     let session = Arc::clone(session);
-                    let tx = tx.clone();
+                    let ai_tx = tx.clone();
+                    let block_id_clone = block_id.clone();
 
                     tokio::spawn(async move {
                         let mut session = session.lock().await;
-                        match session.send_message(full_query).await {
+
+                        // Create channel for session events
+                        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+
+                        // Spawn a task to forward SessionEvents to AiUpdates
+                        let block_id_inner = block_id_clone.clone();
+                        let ai_tx_inner = ai_tx.clone();
+                        let forwarder = tokio::spawn(async move {
+                            while let Some(event) = event_rx.recv().await {
+                                let update = match event {
+                                    SessionEvent::Thinking(msg) => AiUpdate::Thinking {
+                                        block_id: block_id_inner.clone(),
+                                        message: msg,
+                                    },
+                                    SessionEvent::ToolStart { name, description } => {
+                                        AiUpdate::ToolStart {
+                                            block_id: block_id_inner.clone(),
+                                            tool_name: name,
+                                            description,
+                                        }
+                                    }
+                                    SessionEvent::ToolOutput { name, output } => {
+                                        AiUpdate::ToolOutput {
+                                            block_id: block_id_inner.clone(),
+                                            tool_name: name,
+                                            output,
+                                        }
+                                    }
+                                    SessionEvent::ToolComplete { name, success } => {
+                                        AiUpdate::ToolComplete {
+                                            block_id: block_id_inner.clone(),
+                                            tool_name: name,
+                                            success,
+                                        }
+                                    }
+                                    SessionEvent::FileDiff {
+                                        path,
+                                        old_content,
+                                        new_content,
+                                    } => AiUpdate::FileDiff {
+                                        block_id: block_id_inner.clone(),
+                                        path,
+                                        old_content,
+                                        new_content,
+                                    },
+                                    SessionEvent::TextChunk(text) => AiUpdate::TextChunk {
+                                        block_id: block_id_inner.clone(),
+                                        text,
+                                    },
+                                };
+                                let _ = ai_tx_inner.send(update);
+                            }
+                        });
+
+                        // Call the new progress-aware method
+                        match session
+                            .send_message_with_progress(full_query, event_tx)
+                            .await
+                        {
                             Ok(response) => {
-                                let _ = tx.send(AiUpdate::Response {
-                                    block_id: block_id.clone(),
+                                // Wait for forwarder to finish
+                                let _ = forwarder.await;
+
+                                let _ = ai_tx.send(AiUpdate::Response {
+                                    block_id: block_id_clone.clone(),
                                     text: response,
                                 });
-                                let _ = tx.send(AiUpdate::Complete { block_id });
+                                let _ = ai_tx.send(AiUpdate::Complete {
+                                    block_id: block_id_clone,
+                                });
                             }
                             Err(e) => {
-                                let _ = tx.send(AiUpdate::Error {
-                                    block_id,
+                                forwarder.abort();
+                                let _ = ai_tx.send(AiUpdate::Error {
+                                    block_id: block_id_clone,
                                     message: e.to_string(),
                                 });
                             }
