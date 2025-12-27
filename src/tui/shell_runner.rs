@@ -219,16 +219,21 @@ impl ShellTuiRunner {
                             continue;
                         }
 
-                        // Check if we should add as inline reasoning (if tools already exist)
-                        // or update the main output
+                        // Check if tools have been executed (any tool children exist)
+                        // If so, add text as inline reasoning between tools
+                        // If not, just show as streaming (will be replaced by final Response)
                         let has_tool_children = self
                             .app
                             .get_block_mut(&block_id)
-                            .map(|b| !b.children.is_empty())
+                            .map(|b| {
+                                b.children.iter().any(|c| {
+                                    matches!(c.block_type, BlockType::AiToolExecution { .. })
+                                })
+                            })
                             .unwrap_or(false);
 
                         if has_tool_children {
-                            // Add as reasoning child block (inline between tools)
+                            // Add as reasoning child block (inline between/after tools)
                             let prompt = self.app.current_prompt();
                             let mut reasoning_block =
                                 CommandBlock::new(String::new(), BlockType::AiReasoning, prompt);
@@ -239,7 +244,8 @@ impl ShellTuiRunner {
                                 parent.add_child(reasoning_block);
                             }
                         } else {
-                            // No tools yet, update main block output
+                            // No tools yet - show as streaming preview
+                            // This will be replaced by final Response
                             if let Some(block) = self.app.get_block_mut(&block_id) {
                                 match &mut block.output {
                                     BlockOutput::Streaming { lines, .. } => {
