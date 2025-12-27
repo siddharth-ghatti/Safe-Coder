@@ -94,8 +94,7 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     let full_status = format!("{}{}{}", left_text, padding, right_text);
 
-    let status = Paragraph::new(full_status)
-        .style(Style::default().fg(TEXT_DIM).bg(BG_DARK));
+    let status = Paragraph::new(full_status).style(Style::default().fg(TEXT_DIM).bg(BG_DARK));
 
     f.render_widget(status, area);
 }
@@ -246,14 +245,24 @@ fn colorize_line(s: &str) -> Line<'static> {
         // Shell command prompt
         let content = &s[2..];
         Line::from(vec![
-            Span::styled("> ", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(ACCENT_GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
         ])
     } else if s.starts_with("@ ") {
         // AI query prompt
         let content = &s[2..];
         Line::from(vec![
-            Span::styled("@ ", Style::default().fg(ACCENT_MAGENTA).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "@ ",
+                Style::default()
+                    .fg(ACCENT_MAGENTA)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
         ])
     } else {
@@ -321,10 +330,18 @@ fn render_block_to_strings(
             lines.push(header);
             lines.push(String::new());
 
-            // Render tool executions first (child blocks)
+            // Render child blocks (tools and reasoning) in order
             if !block.children.is_empty() {
                 for child in &block.children {
-                    render_tool_strings(child, width, lines, animation_frame);
+                    match &child.block_type {
+                        BlockType::AiToolExecution { .. } => {
+                            render_tool_strings(child, width, lines, animation_frame);
+                        }
+                        BlockType::AiReasoning => {
+                            render_reasoning_strings(child, width, lines);
+                        }
+                        _ => {}
+                    }
                     lines.push(String::new());
                 }
             }
@@ -332,7 +349,7 @@ fn render_block_to_strings(
             // Render final AI response (magenta border) - only if there's actual content
             let output = block.output.get_text();
             if !output.is_empty() && !block.is_running() {
-                // Add separator if there were tools
+                // Add separator if there were children
                 if !block.children.is_empty() {
                     lines.push("│M ─────────────────────────────────".to_string());
                 }
@@ -347,6 +364,10 @@ fn render_block_to_strings(
                 // Show thinking indicator only if no tools yet
                 lines.push("│M ...".to_string());
             }
+        }
+
+        BlockType::AiReasoning => {
+            render_reasoning_strings(block, width, lines);
         }
 
         BlockType::AiToolExecution { .. } => {
@@ -428,8 +449,27 @@ fn render_tool_strings(
                 lines.push(format!("│_ {}", truncated));
             }
             if output.lines().count() > 5 {
-                lines.push(format!("│_ ... ({} more lines)", output.lines().count() - 5));
+                lines.push(format!(
+                    "│_ ... ({} more lines)",
+                    output.lines().count() - 5
+                ));
             }
+        }
+    }
+}
+
+/// Render AI reasoning text (inline between tools)
+fn render_reasoning_strings(block: &CommandBlock, width: usize, lines: &mut Vec<String>) {
+    let output = block.output.get_text();
+    if output.is_empty() {
+        return;
+    }
+
+    // Render reasoning text with magenta border (same as AI response)
+    for line in output.lines() {
+        let wrapped = wrap(line, width.saturating_sub(4));
+        for wrapped_line in wrapped {
+            lines.push(format!("│M {}", wrapped_line));
         }
     }
 }
@@ -479,7 +519,12 @@ fn render_diff_strings(diff: &FileDiff, width: usize, lines: &mut Vec<String>) {
 
     if !has_changes {
         lines.push("│_ (no changes)".to_string());
-    } else if text_diff.iter_all_changes().filter(|c| c.tag() != ChangeTag::Equal).count() > 20 {
+    } else if text_diff
+        .iter_all_changes()
+        .filter(|c| c.tag() != ChangeTag::Equal)
+        .count()
+        > 20
+    {
         lines.push("│_ ... (more changes)".to_string());
     }
 }

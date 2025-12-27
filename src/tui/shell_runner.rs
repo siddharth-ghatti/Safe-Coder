@@ -214,24 +214,51 @@ impl ShellTuiRunner {
                         self.app.mark_dirty();
                     }
                     AiUpdate::TextChunk { block_id, text } => {
-                        if let Some(block) = self.app.get_block_mut(&block_id) {
-                            match &mut block.output {
-                                BlockOutput::Streaming { lines, .. } => {
-                                    // Replace thinking message with actual text
-                                    if lines.len() == 1 && lines[0].starts_with("💭") {
-                                        lines.clear();
+                        // Skip empty text
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+
+                        // Check if we should add as inline reasoning (if tools already exist)
+                        // or update the main output
+                        let has_tool_children = self
+                            .app
+                            .get_block_mut(&block_id)
+                            .map(|b| !b.children.is_empty())
+                            .unwrap_or(false);
+
+                        if has_tool_children {
+                            // Add as reasoning child block (inline between tools)
+                            let prompt = self.app.current_prompt();
+                            let mut reasoning_block =
+                                CommandBlock::new(String::new(), BlockType::AiReasoning, prompt);
+                            reasoning_block.output = BlockOutput::Success(text);
+                            reasoning_block.exit_code = Some(0);
+
+                            if let Some(parent) = self.app.get_block_mut(&block_id) {
+                                parent.add_child(reasoning_block);
+                            }
+                        } else {
+                            // No tools yet, update main block output
+                            if let Some(block) = self.app.get_block_mut(&block_id) {
+                                match &mut block.output {
+                                    BlockOutput::Streaming { lines, .. } => {
+                                        // Replace thinking message with actual text
+                                        if lines.len() == 1 && lines[0].starts_with("💭") {
+                                            lines.clear();
+                                        }
+                                        for line in text.lines() {
+                                            lines.push(line.to_string());
+                                        }
                                     }
-                                    for line in text.lines() {
-                                        lines.push(line.to_string());
+                                    BlockOutput::Pending => {
+                                        block.output = BlockOutput::Streaming {
+                                            lines: text.lines().map(|s| s.to_string()).collect(),
+                                            complete: false,
+                                        };
                                     }
+                                    _ => {}
                                 }
-                                BlockOutput::Pending => {
-                                    block.output = BlockOutput::Streaming {
-                                        lines: text.lines().map(|s| s.to_string()).collect(),
-                                        complete: false,
-                                    };
-                                }
-                                _ => {}
                             }
                         }
                         self.app.mark_dirty();
