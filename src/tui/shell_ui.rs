@@ -33,6 +33,12 @@ const TEXT_MUTED: Color = Color::Rgb(70, 70, 80); // Very dim text
 const BG_DARK: Color = Color::Rgb(20, 20, 25); // Dark background
 const BORDER_DIM: Color = Color::Rgb(50, 50, 55); // Subtle borders
 
+// Animated spinner frames
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const PROGRESS_CHARS: &[&str] = &["░", "▒", "▓", "█", "▓", "▒"];
+const PULSE_CHARS: &[&str] = &["◐", "◓", "◑", "◒"];
+const THINKING_FRAMES: &[&str] = &["🧠", "💭", "💡", "✨"];
+
 // Sidebar constraints
 const SIDEBAR_MIN_WIDTH: u16 = 28;
 const SIDEBAR_PREFERRED_WIDTH: u16 = 48; // Wide enough for full logo
@@ -186,7 +192,7 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         });
 
     // Draw logo (pass width to select appropriate logo)
-    draw_logo(f, sidebar_layout[0], area.width);
+    draw_logo(f, sidebar_layout[0], area.width, app.animation_frame);
 
     // Draw session info
     draw_session_info(f, app, sidebar_layout[1]);
@@ -194,8 +200,8 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Draw project path
     draw_project_path(f, app, sidebar_layout[2]);
 
-    // Draw model info
-    draw_model_info(f, app, sidebar_layout[3]);
+    // Draw model info with animation
+    draw_model_info(f, app, sidebar_layout[3], app.animation_frame);
 
     // Draw modified files
     draw_modified_files(f, app, sidebar_layout[4]);
@@ -205,14 +211,29 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 }
 
 /// Draw the ASCII logo (selects appropriate size based on width)
-fn draw_logo(f: &mut Frame, area: Rect, sidebar_width: u16) {
+fn draw_logo(f: &mut Frame, area: Rect, sidebar_width: u16, animation_frame: usize) {
     let logo = get_logo_for_width(sidebar_width);
+
+    // Subtle color cycling for the logo - creates a gentle shimmer effect
+    let cycle = animation_frame % 60;
+    let base_r = 200u8;
+    let base_g = 100u8;
+    let base_b = 200u8;
+
+    // Very subtle brightness variation
+    let brightness_offset = if cycle < 30 { cycle } else { 60 - cycle } as i16;
+    let r = (base_r as i16 + brightness_offset / 2).clamp(0, 255) as u8;
+    let g = (base_g as i16 + brightness_offset / 3).clamp(0, 255) as u8;
+    let b = (base_b as i16 + brightness_offset / 2).clamp(0, 255) as u8;
+
+    let logo_color = Color::Rgb(r, g, b);
+
     let logo_lines: Vec<Line> = logo
         .lines()
         .map(|line| {
             Line::from(Span::styled(
                 line.to_string(),
-                Style::default().fg(ACCENT_MAGENTA),
+                Style::default().fg(logo_color),
             ))
         })
         .collect();
@@ -257,36 +278,51 @@ fn draw_project_path(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     f.render_widget(para, area);
 }
 
-/// Draw model info section
-fn draw_model_info(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+/// Draw model info section with animated status
+fn draw_model_info(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_frame: usize) {
     let model_name = if app.ai_connected {
         "Claude Sonnet"
     } else {
         "Not connected"
     };
 
-    let status = if app.ai_thinking {
-        "Thinking"
+    // Animated status indicator
+    let (status, status_indicator) = if app.ai_thinking {
+        let thinking_icon = THINKING_FRAMES[(animation_frame / 3) % THINKING_FRAMES.len()];
+        let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
+        (
+            format!("{} Thinking {}", thinking_icon, spinner),
+            ACCENT_AMBER,
+        )
     } else if app.ai_connected {
-        "Ready"
+        // Gentle pulsing for ready state
+        let pulse = PULSE_CHARS[(animation_frame / 5) % PULSE_CHARS.len()];
+        (format!("{} Ready", pulse), ACCENT_GREEN)
     } else {
-        "Offline"
+        ("○ Offline".to_string(), TEXT_MUTED)
     };
 
-    let status_color = if app.ai_thinking {
-        ACCENT_AMBER
-    } else if app.ai_connected {
-        ACCENT_GREEN
+    // Animated model indicator when connected
+    let model_indicator = if app.ai_connected {
+        let cycle = animation_frame % 40;
+        if cycle < 20 {
+            "◆"
+        } else {
+            "◇"
+        }
     } else {
-        TEXT_MUTED
+        "◇"
     };
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("◇ ", Style::default().fg(ACCENT_MAGENTA)),
+            Span::styled(
+                format!("{} ", model_indicator),
+                Style::default().fg(ACCENT_MAGENTA),
+            ),
             Span::styled(model_name, Style::default().fg(TEXT_PRIMARY)),
         ]),
-        Line::from(Span::styled(status, Style::default().fg(status_color))),
+        Line::from(Span::styled(status, Style::default().fg(status_indicator))),
     ];
 
     let para = Paragraph::new(lines);
@@ -528,8 +564,8 @@ fn render_block_to_strings(
             let mut header = format!("> {}", block.input);
 
             if block.is_running() {
-                let dots = ".".repeat((animation_frame / 10) % 4);
-                header.push_str(&format!("  {}", dots));
+                let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
+                header.push_str(&format!("  {}", spinner));
             } else if let Some(code) = block.exit_code {
                 if code != 0 {
                     header.push_str(&format!(" ✗ {}", code));
@@ -556,8 +592,9 @@ fn render_block_to_strings(
             let mut header = format!("@ {}", block.input);
 
             if block.is_running() {
-                let dots = ".".repeat((animation_frame / 10) % 4);
-                header.push_str(&format!("  thinking{}", dots));
+                let thinking = THINKING_FRAMES[(animation_frame / 3) % THINKING_FRAMES.len()];
+                let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
+                header.push_str(&format!("  {} thinking {}", thinking, spinner));
             }
 
             lines.push(header);
@@ -609,8 +646,8 @@ fn render_block_to_strings(
             let mut header = format!("⚙ orchestrate {}", block.input);
 
             if block.is_running() {
-                let dots = ".".repeat((animation_frame / 10) % 4);
-                header.push_str(&format!("  {}", dots));
+                let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
+                header.push_str(&format!("  {}", spinner));
             }
 
             lines.push(header);
@@ -647,8 +684,21 @@ fn render_tool_strings(
     }
 
     if block.is_running() {
-        let dots = ".".repeat((animation_frame / 10) % 4);
-        header.push_str(&format!(" {}", dots));
+        // Animated progress bar
+        let progress_width = 8;
+        let pos = animation_frame % (progress_width * 2);
+        let mut bar = String::new();
+        for i in 0..progress_width {
+            if (pos < progress_width && i == pos)
+                || (pos >= progress_width && i == progress_width * 2 - pos - 1)
+            {
+                bar.push_str(PROGRESS_CHARS[3]); // Full block
+            } else {
+                bar.push_str(PROGRESS_CHARS[0]); // Empty
+            }
+        }
+        let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
+        header.push_str(&format!(" {} [{}]", spinner, bar));
     } else if let Some(exit_code) = block.exit_code {
         if exit_code == 0 {
             header.push_str(" ✓");
