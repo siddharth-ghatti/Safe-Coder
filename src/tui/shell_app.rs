@@ -30,6 +30,8 @@ pub enum BlockType {
     AiQuery,
     /// Tool executed by AI (nested in AI response)
     AiToolExecution { tool_name: String },
+    /// AI reasoning/explanation text (shown inline between tools)
+    AiReasoning,
     /// System message (welcome, errors, notifications)
     SystemMessage,
     /// Orchestration task
