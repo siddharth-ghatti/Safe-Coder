@@ -9,6 +9,8 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 ### 🖥️ **Interactive Shell Mode (New Warp-like TUI)**
 - **Command Block Interface**: Modern shell with visual command blocks (like Warp terminal)
 - **AI Integration**: Use `@connect` and `@ <query>` for inline AI assistance
+- **Real-time Tool Display**: See AI tool calls execute in real-time (like Claude Code)
+- **Diff Rendering**: File edits show compact diffs with +/- indicators for changes
 - **Smart Autocomplete**: Tab completion for commands and file paths with popup UI
 - **Scrolling Support**: Mouse scroll wheel and Shift+Up/Down for navigation
 - **Streaming Output**: Real-time command feedback with bordered output blocks
@@ -38,6 +40,8 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 
 ### 🎨 **Beautiful Interface**
 - **Shell-First TUI**: Modern Warp-like terminal with command blocks and bordered output
+- **Real-time Tool Execution**: Watch AI tools execute live with progress indicators and status
+- **Smart Diff Display**: File edits show compact diffs with +/- indicators for easy review
 - **Smart Autocomplete**: Tab completion popup with command and path suggestions  
 - **Scrolling Navigation**: Mouse wheel and keyboard shortcuts for smooth scrolling
 - **Cyberpunk Chat TUI**: Neon-themed terminal UI with pulsing borders and animations
@@ -152,6 +156,8 @@ safe-coder shell --no-tui
 **New Shell TUI Interface:**
 - **Command Blocks**: Each command gets its own visual block with bordered output
 - **Real-time Streaming**: See command output as it happens
+- **Real-time Tool Execution**: AI tool calls appear and execute live (like Claude Code)
+- **File Edit Diffs**: See exactly what changed with compact +/- diff display
 - **Smart Autocomplete**: Tab key cycles through command and path suggestions
 - **Scrolling**: Use mouse wheel or Shift+Up/Down to navigate history
 
@@ -235,14 +241,21 @@ safe-coder orchestrate --worktrees false
 ┌─ Command Block 3 ───────────────────────────────────────────┐
 │ 🤖 my-project (main) $ @ how do I add a new dependency?     │
 │ ┌─ AI Response ────────────────────────────────────────────┐ │
+│ │ 🤖 Thinking...                                          │ │
 │ │ Based on your Cargo.toml, you can add dependencies by:  │ │
 │ │                                                          │ │
-│ │ 1. Using cargo add:                                      │ │
-│ │    cargo add serde                                       │ │
+│ │ ✓ Tool: edit_file                                       │ │
+│ │ ┌─ File Diff: Cargo.toml ─┐                            │ │
+│ │ │ @@ -8,6 +8,7 @@           │                            │ │
+│ │ │  [dependencies]          │                            │ │
+│ │ │  tokio = "1.0"          │                            │ │
+│ │ │  serde = "1.0"          │                            │ │
+│ │ │ +clap = "4.0"           │                            │ │
+│ │ │  [dev-dependencies]      │                            │ │
+│ │ │  test = "0.1"           │                            │ │
+│ │ └──────────────────────────┘                            │ │
 │ │                                                          │ │
-│ │ 2. Manually editing Cargo.toml:                         │ │
-│ │    [dependencies]                                        │ │
-│ │    serde = "1.0"                                         │ │
+│ │ I've added the clap dependency to your Cargo.toml!      │ │
 │ └─────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 
@@ -451,10 +464,12 @@ The shell now features a modern Warp-like TUI interface with enhanced functional
 1. **Command Blocks**: Each command execution is visually contained in its own block
 2. **Smart Autocomplete**: Tab completion for commands and file paths with visual popup
 3. **AI Integration**: Use `@connect` and `@ <query>` for context-aware AI assistance  
-4. **Scrolling Navigation**: Mouse wheel and keyboard shortcuts for smooth navigation
-5. **Real-time Output**: Streaming command output with bordered visual containers
-6. **Context Awareness**: AI queries automatically include shell context (recent commands and outputs)
-7. **Git Auto-commit Control**: Shell mode disables git auto-commit to prevent unwanted repository changes
+4. **Real-time Tool Execution**: Watch AI tools execute live with progress indicators and checkmarks
+5. **Diff Rendering**: File edits show compact diffs with +/- indicators for easy change review
+6. **Scrolling Navigation**: Mouse wheel and keyboard shortcuts for smooth navigation
+7. **Real-time Output**: Streaming command output with bordered visual containers
+8. **Context Awareness**: AI queries automatically include shell context (recent commands and outputs)
+9. **Git Auto-commit Control**: Shell mode disables git auto-commit to prevent unwanted repository changes
 
 ### 🎯 **Orchestration Flow**
 
@@ -595,6 +610,7 @@ safe-coder login anthropic
 - [x] Scrolling support (mouse wheel + keyboard shortcuts)
 - [x] Context-aware AI integration in shell mode
 - [x] Git auto-commit control for shell mode
+- [x] Real-time tool call display with diff rendering
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI
@@ -614,4 +630,5 @@ MIT License - See LICENSE file for details
 
 - Orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Gemini CLI](https://github.com/google/gemini-cli)
 - TUI powered by [Ratatui](https://github.com/ratatui-org/ratatui)
+- Diff rendering powered by the [Similar](https://github.com/mitsuhiko/similar) crate
 - Built with Rust for performance and safety
