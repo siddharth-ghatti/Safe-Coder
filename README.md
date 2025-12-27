@@ -6,10 +6,13 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 
 ## Features
 
-### 🖥️ **Interactive Shell Mode**
-- **AI-Powered Shell**: Run commands with optional AI assistance
-- **Seamless Mode Switching**: Switch between shell and coding modes instantly
-- **Smart Prompt**: Shows git branch, exit status, and AI connection indicator
+### 🖥️ **Interactive Shell Mode (New Warp-like TUI)**
+- **Command Block Interface**: Modern shell with visual command blocks (like Warp terminal)
+- **AI Integration**: Use `@connect` and `@ <query>` for inline AI assistance
+- **Smart Autocomplete**: Tab completion for commands and file paths with popup UI
+- **Scrolling Support**: Mouse scroll wheel and Shift+Up/Down for navigation
+- **Streaming Output**: Real-time command feedback with bordered output blocks
+- **Context-Aware AI**: AI queries include shell context (last 10 commands + outputs)
 - **Full Shell Features**: cd, pwd, history, export, env, and all standard commands
 
 ### 💻 **Standalone Coding CLI**
@@ -34,7 +37,10 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **Rollback Support**: Undo any changes made by agents
 
 ### 🎨 **Beautiful Interface**
-- **Cyberpunk TUI**: Modern neon-themed terminal UI with pulsing borders and animations
+- **Shell-First TUI**: Modern Warp-like terminal with command blocks and bordered output
+- **Smart Autocomplete**: Tab completion popup with command and path suggestions  
+- **Scrolling Navigation**: Mouse wheel and keyboard shortcuts for smooth scrolling
+- **Cyberpunk Chat TUI**: Neon-themed terminal UI with pulsing borders and animations
 - **Multi-Panel Layout**: Conversation, status, and tool execution panels
 - **Real-time Updates**: Live monitoring of agent status
 - **Dynamic Processing**: Animated braille spinners and status messages
@@ -130,46 +136,45 @@ Safe Coder offers multiple modes to fit your workflow:
 
 ### Shell Mode
 
-Start an interactive shell with optional AI assistance:
+Start the modern shell-first TUI with Warp-like command blocks:
 
 ```bash
-# Start the shell
+# Start the new shell TUI (default)
 safe-coder shell
 
-# Start with AI pre-connected
-safe-coder shell --ai
-
-# Start in a specific directory
+# Start the shell TUI in a specific directory
 safe-coder shell --path /path/to/project
+
+# Use legacy text-based shell (no TUI)
+safe-coder shell --no-tui
 ```
 
-**Shell Commands:**
+**New Shell TUI Interface:**
+- **Command Blocks**: Each command gets its own visual block with bordered output
+- **Real-time Streaming**: See command output as it happens
+- **Smart Autocomplete**: Tab key cycles through command and path suggestions
+- **Scrolling**: Use mouse wheel or Shift+Up/Down to navigate history
+
+**AI Commands (in shell TUI):**
 
 | Command | Description |
 |---------|-------------|
-| `cd <path>` | Change directory (supports ~, relative, absolute) |
-| `pwd` | Print current working directory |
-| `history` | Show command history |
-| `clear` | Clear the screen |
-| `export KEY=VAL` | Set environment variable |
-| `env` | Show all environment variables |
-| `exit`, `quit` | Exit the shell |
+| `@connect` | Connect to AI for coding assistance |
+| `@ <question>` | Ask AI for help (includes shell context automatically) |
+| `@orchestrate <task>` | Delegate task to background AI agents |
 
-**AI Commands (in shell):**
+**Navigation & Controls:**
 
-| Command | Description |
-|---------|-------------|
-| `ai-connect` | Connect to AI for coding assistance |
-| `ai-disconnect` | Disconnect from AI session |
-| `ai <question>` | Ask AI for help (requires ai-connect first) |
-| `chat` | Enter interactive coding mode with tool execution |
-
-**Chat Mode (after running `chat`):**
-
-| Command | Description |
-|---------|-------------|
-| `!<command>` | Run shell command without leaving chat |
-| `exit`, `shell` | Return to shell mode |
+| Key | Action |
+|-----|--------|
+| `Tab` | Cycle through autocomplete suggestions |
+| `Shift+Tab` | Cycle backwards through suggestions |
+| `Enter` or `→` | Apply selected autocomplete suggestion |
+| `Shift+↑/↓` | Scroll through command history |
+| `Mouse Wheel` | Scroll up/down through output |
+| `PageUp/PageDown` | Fast scroll through output |
+| `↑/↓` | Navigate command history |
+| `^C` | Exit the shell |
 
 ### Chat Mode (Direct AI Coding)
 
@@ -203,17 +208,60 @@ safe-coder orchestrate --worktrees false
 
 ## Example Sessions
 
-### Shell Mode with AI
+### New Shell TUI Mode
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Safe Coder Shell - Interactive shell with AI assistance   │
+│  Safe Coder Shell - Modern TUI with command blocks         │
 └─────────────────────────────────────────────────────────────┘
 
-  Shell Commands:
-    cd <path>        - Change directory (supports ~, relative, absolute)
-    pwd              - Print current working directory
-    ...
+┌─ Command Block 1 ───────────────────────────────────────────┐
+│ my-project (main) $ ls -la                                  │
+│ ┌─ Output ─────────────────────────────────────────────────┐ │
+│ │ total 24                                                 │ │
+│ │ drwxr-xr-x  8 user  staff   256 Dec 26 10:00 .          │ │
+│ │ -rw-r--r--  1 user  staff  1234 Dec 26 10:00 Cargo.toml │ │
+│ │ drwxr-xr-x  5 user  staff   160 Dec 26 10:00 src        │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+┌─ Command Block 2 ───────────────────────────────────────────┐
+│ my-project (main) $ @connect                                │
+│ ┌─ Output ─────────────────────────────────────────────────┐ │
+│ │ ✓ Connected to AI. Use '@ <question>' for assistance.    │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+┌─ Command Block 3 ───────────────────────────────────────────┐
+│ 🤖 my-project (main) $ @ how do I add a new dependency?     │
+│ ┌─ AI Response ────────────────────────────────────────────┐ │
+│ │ Based on your Cargo.toml, you can add dependencies by:  │ │
+│ │                                                          │ │
+│ │ 1. Using cargo add:                                      │ │
+│ │    cargo add serde                                       │ │
+│ │                                                          │ │
+│ │ 2. Manually editing Cargo.toml:                         │ │
+│ │    [dependencies]                                        │ │
+│ │    serde = "1.0"                                         │ │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
+┌─ Input ─────────────────────────────────────────────────────┐
+│ my-project (main) $ cargo add ser[TAB]                      │
+│ ┌─ Autocomplete ─┐                                          │
+│ │ > serde        │                                          │ │
+│ │   serde_json   │                                          │ │
+│ │   serialize    │                                          │ │
+│ └────────────────┘                                          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Legacy Shell Mode
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Safe Coder Shell - Legacy text-based shell (--no-tui)     │
+└─────────────────────────────────────────────────────────────┘
 
 my-project (main) ❯ ls -la
 total 24
@@ -231,7 +279,6 @@ Connecting to AI...
 To add a new dependency to Cargo.toml, you can either:
 
 1. Manually edit Cargo.toml and add under [dependencies]:
-   toml
    [dependencies]
    serde = "1.0"
 
@@ -252,10 +299,6 @@ I'll add serde with the derive feature to your Cargo.toml.
 🔧 Executing 1 tool(s): edit_file
 
 Done! I've added `serde = { version = "1.0", features = ["derive"] }` to your dependencies.
-
-chat> !cargo build
-   Compiling my-project v0.1.0
-    Finished dev [unoptimized + debuginfo] target(s) in 2.34s
 
 chat> shell
 
@@ -319,6 +362,21 @@ The TUI will:
 - Update status in real-time as workers complete
 
 ### TUI Keyboard Shortcuts
+
+**Shell TUI Mode:**
+
+| Key | Action |
+|-----|--------|
+| `^C` | Exit the shell |
+| `Tab` | Cycle through autocomplete suggestions |
+| `Shift+Tab` | Cycle backwards through autocomplete suggestions |
+| `Enter` or `→` | Apply selected autocomplete suggestion |
+| `Shift+↑/↓` | Scroll through command history/output |
+| `Mouse Wheel` | Scroll up/down through output |
+| `PageUp/PageDown` | Fast scroll through output |
+| `↑/↓` | Navigate command history |
+
+**Chat TUI Mode:**
 
 | Key | Action |
 |-----|--------|
@@ -388,12 +446,15 @@ Safe Coder functions as a complete AI coding assistant:
 
 ### 🖥️ **Shell Mode**
 
-The shell provides a familiar command-line experience with AI integration:
+The shell now features a modern Warp-like TUI interface with enhanced functionality:
 
-1. **Standard Shell**: Run any command (ls, git, cargo, npm, etc.)
-2. **AI Assistance**: Connect to AI and ask questions without leaving the shell
-3. **Coding Mode**: Switch to full coding mode for complex tasks requiring tool execution
-4. **Context Aware**: AI understands your current directory and project structure
+1. **Command Blocks**: Each command execution is visually contained in its own block
+2. **Smart Autocomplete**: Tab completion for commands and file paths with visual popup
+3. **AI Integration**: Use `@connect` and `@ <query>` for context-aware AI assistance  
+4. **Scrolling Navigation**: Mouse wheel and keyboard shortcuts for smooth navigation
+5. **Real-time Output**: Streaming command output with bordered visual containers
+6. **Context Awareness**: AI queries automatically include shell context (recent commands and outputs)
+7. **Git Auto-commit Control**: Shell mode disables git auto-commit to prevent unwanted repository changes
 
 ### 🎯 **Orchestration Flow**
 
@@ -529,6 +590,11 @@ safe-coder login anthropic
 - [x] Parallel worker execution
 - [x] Interactive shell mode with AI
 - [x] Standalone coding CLI
+- [x] Modern Warp-like shell TUI with command blocks
+- [x] Smart autocomplete with Tab completion
+- [x] Scrolling support (mouse wheel + keyboard shortcuts)
+- [x] Context-aware AI integration in shell mode
+- [x] Git auto-commit control for shell mode
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI
