@@ -318,9 +318,8 @@ impl Shell {
         println!("\x1b[36mConnecting to AI...\x1b[0m");
         match self.init_ai_session().await {
             Ok(()) => {
-                if let Some(ref mut session) = self.session {
-                    session.start().await?;
-                }
+                // Note: We don't call session.start() here to avoid git auto-commits
+                // in shell mode. The session is ready to use after init.
                 println!("\x1b[32m✓ Connected to AI. Use 'ai <question>' for assistance.\x1b[0m");
             }
             Err(e) => {
