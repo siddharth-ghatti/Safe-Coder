@@ -5,7 +5,9 @@
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -126,20 +128,32 @@ impl ShellTuiRunner {
 
             // Poll for events
             if event::poll(Duration::from_millis(30))? {
-                if let Event::Key(key) = event::read()? {
-                    match self
-                        .handle_key_event(key.code, key.modifiers, &cmd_tx, &ai_tx)
-                        .await
-                    {
-                        Ok(true) => break, // Exit requested
-                        Ok(false) => {}
-                        Err(e) => {
-                            // Show error in UI
-                            let prompt = self.app.current_prompt();
-                            let mut block = CommandBlock::system(format!("Error: {}", e), prompt);
-                            self.app.add_block(block);
+                match event::read()? {
+                    Event::Key(key) => {
+                        match self
+                            .handle_key_event(key.code, key.modifiers, &cmd_tx, &ai_tx)
+                            .await
+                        {
+                            Ok(true) => break, // Exit requested
+                            Ok(false) => {}
+                            Err(e) => {
+                                // Show error in UI
+                                let prompt = self.app.current_prompt();
+                                let block = CommandBlock::system(format!("Error: {}", e), prompt);
+                                self.app.add_block(block);
+                            }
                         }
                     }
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            self.app.scroll_up();
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.app.scroll_down();
+                        }
+                        _ => {}
+                    },
+                    _ => {}
                 }
             }
 
@@ -323,14 +337,20 @@ impl ShellTuiRunner {
                 }
             }
             KeyCode::Up => {
-                if self.app.autocomplete_visible() {
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    // Shift+Up scrolls up
+                    self.app.scroll_up();
+                } else if self.app.autocomplete_visible() {
                     self.app.autocomplete_prev();
                 } else {
                     self.app.history_up();
                 }
             }
             KeyCode::Down => {
-                if self.app.autocomplete_visible() {
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    // Shift+Down scrolls down
+                    self.app.scroll_down();
+                } else if self.app.autocomplete_visible() {
                     self.app.autocomplete_next();
                 } else {
                     self.app.history_down();
@@ -530,7 +550,9 @@ Keyboard Shortcuts:
   Ctrl+A/E          Move to start/end of line
   Ctrl+U            Clear input line
   Up/Down           Navigate command history
-  PageUp/PageDown   Scroll output"#;
+  Shift+Up/Down     Scroll output
+  PageUp/PageDown   Scroll output (faster)
+  Mouse scroll      Scroll output"#;
                 block.complete(help_text.to_string(), 0);
                 self.app.add_block(block);
             }
