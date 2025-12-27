@@ -12,9 +12,10 @@ use ratatui::{
     },
     Frame,
 };
+use similar::{ChangeTag, TextDiff};
 use textwrap::wrap;
 
-use super::shell_app::{BlockType, CommandBlock, InputMode, ShellTuiApp};
+use super::shell_app::{BlockType, CommandBlock, FileDiff, InputMode, ShellTuiApp};
 
 // Color scheme - consistent with existing TUI
 const ACCENT_BLUE: Color = Color::Rgb(100, 149, 237); // Cornflower blue for shell
@@ -297,19 +298,112 @@ fn render_tool_strings(
     if block.is_running() {
         let dots = ".".repeat((animation_frame / 10) % 4);
         header.push_str(&format!(" running{}", dots));
+    } else if let Some(exit_code) = block.exit_code {
+        if exit_code == 0 {
+            header.push_str(" ✓");
+        } else {
+            header.push_str(" ✗");
+        }
     }
 
     lines.push(header);
 
-    let output = block.output.get_text();
-    if !output.is_empty() {
-        let inner_width = width.saturating_sub(8);
-        for line in output.lines().take(10) {
-            let wrapped = wrap(line, inner_width);
-            for wrapped_line in wrapped {
-                lines.push(format!("      {}", wrapped_line));
+    // Render diff if present (for edit_file/write_file tools)
+    if let Some(diff) = &block.diff {
+        render_diff_strings(diff, width, lines);
+    } else {
+        // Render regular output
+        let output = block.output.get_text();
+        if !output.is_empty() {
+            let inner_width = width.saturating_sub(8);
+            for line in output.lines().take(10) {
+                let wrapped = wrap(line, inner_width);
+                for wrapped_line in wrapped {
+                    lines.push(format!("      {}", wrapped_line));
+                }
             }
         }
+    }
+}
+
+/// Render a file diff with color-coded additions and deletions
+fn render_diff_strings(diff: &FileDiff, width: usize, lines: &mut Vec<String>) {
+    // File path header
+    lines.push(format!("      📝 {}", diff.path));
+
+    // Compute the diff
+    let text_diff = TextDiff::from_lines(&diff.old_content, &diff.new_content);
+
+    let inner_width = width.saturating_sub(10);
+    let mut diff_lines: Vec<String> = Vec::new();
+    let mut has_changes = false;
+
+    for change in text_diff.iter_all_changes() {
+        let line_content = change.value().trim_end();
+
+        // Truncate long lines
+        let display_content = if line_content.len() > inner_width {
+            format!("{}...", &line_content[..inner_width.saturating_sub(3)])
+        } else {
+            line_content.to_string()
+        };
+
+        match change.tag() {
+            ChangeTag::Delete => {
+                has_changes = true;
+                diff_lines.push(format!("      │ - {}", display_content));
+            }
+            ChangeTag::Insert => {
+                has_changes = true;
+                diff_lines.push(format!("      │ + {}", display_content));
+            }
+            ChangeTag::Equal => {
+                // Only show context lines near changes (limit to avoid huge outputs)
+                if diff_lines.len() < 30 {
+                    diff_lines.push(format!("      │   {}", display_content));
+                }
+            }
+        }
+
+        // Limit total diff output
+        if diff_lines.len() >= 30 {
+            break;
+        }
+    }
+
+    if has_changes {
+        // Show a compact diff with just changes and minimal context
+        let mut context_lines: Vec<String> = Vec::new();
+        let mut in_change_block = false;
+        let mut lines_since_change = 0;
+
+        for line in &diff_lines {
+            let is_change = line.contains(" - ") || line.contains(" + ");
+
+            if is_change {
+                // If we skipped context, add indicator
+                if lines_since_change > 3 && !context_lines.is_empty() {
+                    context_lines.push("      │ ...".to_string());
+                }
+                context_lines.push(line.clone());
+                in_change_block = true;
+                lines_since_change = 0;
+            } else if in_change_block {
+                lines_since_change += 1;
+                if lines_since_change <= 2 {
+                    context_lines.push(line.clone());
+                } else {
+                    in_change_block = false;
+                }
+            }
+        }
+
+        // Limit output and add to lines
+        for line in context_lines.into_iter().take(20) {
+            lines.push(line);
+        }
+    } else {
+        lines.push("      │ (no changes)".to_string());
     }
 }
 
