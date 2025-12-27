@@ -400,7 +400,15 @@ impl Session {
                     });
 
                     // For edit_file, capture old content for diff
-                    let old_content = if name == "edit_file" || name == "write_file" {
+                    // Note: edit_file uses "file_path", write_file uses "path"
+                    let old_content = if name == "edit_file" {
+                        if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                            let full_path = self.project_path.join(path);
+                            std::fs::read_to_string(&full_path).ok()
+                        } else {
+                            None
+                        }
+                    } else if name == "write_file" {
                         if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
                             let full_path = self.project_path.join(path);
                             std::fs::read_to_string(&full_path).ok()
@@ -426,9 +434,15 @@ impl Session {
                     };
 
                     // For edit_file, send diff if we have old content
+                    // Note: edit_file uses "file_path", write_file uses "path"
                     if (name == "edit_file" || name == "write_file") && success {
                         if let Some(old) = old_content {
-                            if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
+                            let path_key = if name == "edit_file" {
+                                "file_path"
+                            } else {
+                                "path"
+                            };
+                            if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
                                 let full_path = self.project_path.join(path);
                                 if let Ok(new_content) = std::fs::read_to_string(&full_path) {
                                     let _ = event_tx.send(SessionEvent::FileDiff {
@@ -563,7 +577,7 @@ impl Session {
                 }
             }
             "edit_file" => {
-                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                if let Some(path) = params.get("file_path").and_then(|v| v.as_str()) {
                     format!("Edit file: {}", path)
                 } else {
                     "Edit a file".to_string()
