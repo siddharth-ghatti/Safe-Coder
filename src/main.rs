@@ -35,7 +35,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start an interactive coding session
+    /// Start an interactive shell with AI assistance (Warp-like experience)
+    ///
+    /// This is the default mode. Run shell commands directly with visual blocks.
+    /// Use @ prefix for AI assistance:
+    ///   @connect        - Connect to AI
+    ///   @ <query>       - Ask AI for help (with shell context)
+    ///   @orchestrate    - Run multi-agent task
+    #[command(alias = "sh")]
+    Shell {
+        /// Path to the project directory (default: current directory)
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Automatically connect to AI on startup
+        #[arg(long)]
+        ai: bool,
+        /// Use legacy text-based shell (no TUI)
+        #[arg(long)]
+        no_tui: bool,
+    },
+    /// Start an interactive coding session (legacy chat mode)
     Chat {
         /// Path to the project directory (default: current directory)
         #[arg(short, long, default_value = ".")]
@@ -103,20 +122,6 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Start an interactive shell with optional AI assistance.
-    ///
-    /// Run shell commands directly, or use AI commands for assistance:
-    ///   ai-connect      - Connect to AI
-    ///   ai <question>   - Ask AI for help
-    ///   chat            - Enter coding mode with tool execution
-    Shell {
-        /// Path to the project directory (default: current directory)
-        #[arg(short, long, default_value = ".")]
-        path: PathBuf,
-        /// Automatically connect to AI on startup
-        #[arg(long, default_value = "false")]
-        ai: bool,
-    },
 }
 
 #[tokio::main]
@@ -125,7 +130,10 @@ async fn main() -> Result<()> {
 
     // Only initialize tracing for non-TUI modes
     // TUI mode uses its own rendering and tracing would interfere with the alternate screen
-    let use_tui = matches!(&cli.command, Commands::Chat { tui: true, .. });
+    let use_tui = matches!(
+        &cli.command,
+        Commands::Chat { tui: true, .. } | Commands::Shell { no_tui: false, .. }
+    );
 
     if !use_tui {
         tracing_subscriber::registry()
@@ -138,6 +146,15 @@ async fn main() -> Result<()> {
     }
 
     match cli.command {
+        Commands::Shell { path, ai, no_tui } => {
+            if no_tui {
+                // Legacy text-based shell
+                run_shell_legacy(path, ai).await?;
+            } else {
+                // New shell-first TUI (Warp-like)
+                run_shell_tui(path, ai).await?;
+            }
+        }
         Commands::Chat {
             path,
             tui,
@@ -182,9 +199,6 @@ async fn main() -> Result<()> {
         }
         Commands::Init { path } => {
             init_project(path)?;
-        }
-        Commands::Shell { path, ai } => {
-            run_shell(path, ai).await?;
         }
     }
 
@@ -678,8 +692,14 @@ fn init_project(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Run the interactive shell mode
-async fn run_shell(project_path: PathBuf, connect_ai: bool) -> Result<()> {
+/// Run the new shell-first TUI mode (Warp-like)
+async fn run_shell_tui(project_path: PathBuf, connect_ai: bool) -> Result<()> {
+    let canonical_path = project_path.canonicalize()?;
+    tui::run_shell_tui(canonical_path, connect_ai).await
+}
+
+/// Run the legacy text-based shell mode
+async fn run_shell_legacy(project_path: PathBuf, connect_ai: bool) -> Result<()> {
     let canonical_path = project_path.canonicalize()?;
     shell::run_shell(canonical_path, connect_ai).await
 }

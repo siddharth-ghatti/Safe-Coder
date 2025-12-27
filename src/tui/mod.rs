@@ -20,8 +20,17 @@ mod messages;
 mod spinner;
 mod ui;
 
+// New shell-first TUI modules
+mod shell_app;
+mod shell_runner;
+mod shell_ui;
+
 pub use app::App;
 pub use messages::{BackgroundTask, BackgroundTaskStatus, ChatMessage, MessageType, ToolExecution};
+
+// Export shell-first TUI components
+pub use shell_app::{AiCommand, BlockOutput, BlockType, CommandBlock, ShellPrompt, ShellTuiApp};
+pub use shell_runner::{run_shell_tui, ShellTuiRunner};
 
 use crate::orchestrator::{Orchestrator, OrchestratorConfig};
 use crate::session::Session;
