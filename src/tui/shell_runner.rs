@@ -697,7 +697,11 @@ Keyboard Shortcuts:
         let prompt = self.app.current_prompt();
         let mut block = CommandBlock::new("connect".to_string(), BlockType::AiQuery, prompt);
 
-        match Session::new(self.config.clone(), self.app.cwd.clone()).await {
+        // Disable git auto-commit for shell TUI mode to prevent unwanted commits
+        let mut config = self.config.clone();
+        config.git.auto_commit = false;
+
+        match Session::new(config, self.app.cwd.clone()).await {
             Ok(session) => {
                 self.app.session = Some(Arc::new(Mutex::new(session)));
                 self.app.set_ai_connected(true);
