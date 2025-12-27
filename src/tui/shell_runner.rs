@@ -292,18 +292,49 @@ impl ShellTuiRunner {
                 self.app.input_delete();
             }
 
+            // Tab - autocomplete
+            KeyCode::Tab => {
+                if self.app.autocomplete_visible() {
+                    // Cycle through suggestions or apply
+                    if modifiers.contains(KeyModifiers::SHIFT) {
+                        self.app.autocomplete_prev();
+                    } else {
+                        self.app.autocomplete_next();
+                    }
+                } else {
+                    // Trigger autocomplete
+                    self.app.trigger_autocomplete();
+                }
+            }
+
             // Arrow keys
             KeyCode::Left => {
+                if self.app.autocomplete_visible() {
+                    self.app.autocomplete.hide();
+                }
                 self.app.cursor_left();
             }
             KeyCode::Right => {
-                self.app.cursor_right();
+                // Right arrow applies autocomplete if visible
+                if self.app.autocomplete_visible() {
+                    self.app.apply_autocomplete();
+                } else {
+                    self.app.cursor_right();
+                }
             }
             KeyCode::Up => {
-                self.app.history_up();
+                if self.app.autocomplete_visible() {
+                    self.app.autocomplete_prev();
+                } else {
+                    self.app.history_up();
+                }
             }
             KeyCode::Down => {
-                self.app.history_down();
+                if self.app.autocomplete_visible() {
+                    self.app.autocomplete_next();
+                } else {
+                    self.app.history_down();
+                }
             }
 
             // Home/End
@@ -322,18 +353,28 @@ impl ShellTuiRunner {
                 self.app.scroll_page_down();
             }
 
-            // Enter - submit command
+            // Enter - submit command or apply autocomplete
             KeyCode::Enter => {
-                let input = self.app.input_submit();
-                if !input.is_empty() {
-                    self.execute_input(&input, cmd_tx.clone(), ai_tx.clone())
-                        .await?;
+                if self.app.autocomplete_visible() {
+                    // Apply autocomplete selection
+                    self.app.apply_autocomplete();
+                } else {
+                    let input = self.app.input_submit();
+                    if !input.is_empty() {
+                        self.execute_input(&input, cmd_tx.clone(), ai_tx.clone())
+                            .await?;
+                    }
                 }
             }
 
-            // Escape - cancel/clear
+            // Escape - cancel autocomplete or clear input
             KeyCode::Esc => {
-                self.app.input_clear();
+                if self.app.autocomplete_visible() {
+                    self.app.autocomplete.hide();
+                    self.app.mark_dirty();
+                } else {
+                    self.app.input_clear();
+                }
             }
 
             _ => {}
@@ -656,7 +697,11 @@ Keyboard Shortcuts:
         let prompt = self.app.current_prompt();
         let mut block = CommandBlock::new("connect".to_string(), BlockType::AiQuery, prompt);
 
-        match Session::new(self.config.clone(), self.app.cwd.clone()).await {
+        // Disable git auto-commit for shell TUI mode to prevent unwanted commits
+        let mut config = self.config.clone();
+        config.git.auto_commit = false;
+
+        match Session::new(config, self.app.cwd.clone()).await {
             Ok(session) => {
                 self.app.session = Some(Arc::new(Mutex::new(session)));
                 self.app.set_ai_connected(true);
