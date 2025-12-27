@@ -33,33 +33,90 @@ const TEXT_MUTED: Color = Color::Rgb(70, 70, 80); // Very dim text
 const BG_DARK: Color = Color::Rgb(20, 20, 25); // Dark background
 const BORDER_DIM: Color = Color::Rgb(50, 50, 55); // Subtle borders
 
-// Sidebar width
-const SIDEBAR_WIDTH: u16 = 32;
+// Sidebar constraints
+const SIDEBAR_MIN_WIDTH: u16 = 28;
+const SIDEBAR_PREFERRED_WIDTH: u16 = 48; // Wide enough for full logo
+const MIN_MAIN_WIDTH: u16 = 50; // Minimum main content area
 
-/// ASCII art logo for sidebar (compact version)
-const LOGO: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
- ___        __        ___
-/ __| __ _ / _|___   / __|___
-\__ \/ _` |  _/ -_) | (__/ _ \
-|___/\__,_|_| \___|  \___\___/
-   ██████╗ ██████╗ ██████╗ ███████╗██████╗
-  ██╔════╝██╔═══██╗██╔══██╗██╔════╝██╔══██╗
-  ██║     ██║   ██║██║  ██║█████╗  ██████╔╝
-  ██║     ██║   ██║██║  ██║██╔══╝  ██╔══██╗
-  ╚██████╗╚██████╔╝██████╔╝███████╗██║  ██║
-   ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
-╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱"#;
+/// Full ASCII art logo (needs ~45 chars width)
+const LOGO_FULL: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+ ___        __         ___          _
+/ __| __ _ / _|___    / __|___   __| |___ _ _
+\__ \/ _` |  _/ -_)  | (__/ _ \ / _` / -_) '_|
+|___/\__,_|_| \___|   \___\___/ \__,_\___|_|
+╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱"#;
+
+/// Compact logo for narrow terminals
+const LOGO_COMPACT: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+  ___        __
+ / __| __ _ / _|___
+ \__ \/ _` |  _/ -_)
+ |___/\__,_|_| \___|
+    ___         _
+   / __|___  __| |___ _ _
+  | (__/ _ \/ _` / -_) '_|
+   \___\___/\__,_\___|_|
+╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱"#;
+
+/// Minimal logo for very narrow terminals
+const LOGO_MINIMAL: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
+ Safe Coder
+╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱"#;
+
+/// Calculate sidebar width based on terminal size
+fn calculate_sidebar_width(total_width: u16) -> u16 {
+    // If terminal is too narrow, hide sidebar entirely
+    if total_width < MIN_MAIN_WIDTH + SIDEBAR_MIN_WIDTH {
+        return 0;
+    }
+
+    // Calculate available space for sidebar
+    let available = total_width.saturating_sub(MIN_MAIN_WIDTH);
+
+    // Use preferred width if we have space, otherwise use what's available
+    available
+        .min(SIDEBAR_PREFERRED_WIDTH)
+        .max(SIDEBAR_MIN_WIDTH)
+}
+
+/// Get the appropriate logo based on sidebar width
+fn get_logo_for_width(width: u16) -> &'static str {
+    if width >= 46 {
+        LOGO_FULL
+    } else if width >= 26 {
+        LOGO_COMPACT
+    } else {
+        LOGO_MINIMAL
+    }
+}
 
 /// Draw the complete shell TUI with sidebar
 pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     let size = f.area();
 
+    // Calculate dynamic sidebar width
+    let sidebar_width = calculate_sidebar_width(size.width);
+
+    // If sidebar width is 0, just draw main content (narrow terminal)
+    if sidebar_width == 0 {
+        draw_main_content(f, app, size);
+
+        if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
+            let main_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(3)])
+                .split(size);
+            draw_autocomplete(f, app, main_layout[1]);
+        }
+        return;
+    }
+
     // Main horizontal layout: content (left) | sidebar (right)
     let horizontal_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(40),               // Main content area
-            Constraint::Length(SIDEBAR_WIDTH), // Right sidebar
+            Constraint::Min(MIN_MAIN_WIDTH),   // Main content area
+            Constraint::Length(sidebar_width), // Right sidebar (dynamic)
         ])
         .split(size);
 
@@ -71,7 +128,6 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
 
     // Draw autocomplete popup on top if visible
     if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
-        // Calculate input area position for autocomplete
         let main_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(3)])
@@ -105,17 +161,21 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     f.render_widget(sidebar_block, area);
 
+    // Calculate logo height based on which logo we'll use
+    let logo = get_logo_for_width(area.width);
+    let logo_height = logo.lines().count() as u16 + 1;
+
     // Sidebar content layout
     let sidebar_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(13), // Logo
-            Constraint::Length(3),  // Session info
-            Constraint::Length(3),  // Project path
-            Constraint::Length(4),  // Model info
-            Constraint::Length(5),  // Modified files section
-            Constraint::Min(1),     // Spacer
-            Constraint::Length(2),  // Help hints
+            Constraint::Length(logo_height), // Logo (dynamic height)
+            Constraint::Length(2),           // Session info
+            Constraint::Length(2),           // Project path
+            Constraint::Length(3),           // Model info
+            Constraint::Length(5),           // Modified files section
+            Constraint::Min(1),              // Spacer
+            Constraint::Length(2),           // Help hints
         ])
         .margin(1)
         .split(Rect {
@@ -125,8 +185,8 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             height: area.height,
         });
 
-    // Draw logo
-    draw_logo(f, sidebar_layout[0]);
+    // Draw logo (pass width to select appropriate logo)
+    draw_logo(f, sidebar_layout[0], area.width);
 
     // Draw session info
     draw_session_info(f, app, sidebar_layout[1]);
@@ -144,9 +204,10 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     draw_help_hints(f, sidebar_layout[6]);
 }
 
-/// Draw the ASCII logo
-fn draw_logo(f: &mut Frame, area: Rect) {
-    let logo_lines: Vec<Line> = LOGO
+/// Draw the ASCII logo (selects appropriate size based on width)
+fn draw_logo(f: &mut Frame, area: Rect, sidebar_width: u16) {
+    let logo = get_logo_for_width(sidebar_width);
+    let logo_lines: Vec<Line> = logo
         .lines()
         .map(|line| {
             Line::from(Span::styled(
