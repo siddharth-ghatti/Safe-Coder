@@ -83,14 +83,14 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     let left_text = status_parts.join("");
     let right_text = "safe-coder";
-    let padding = area.width as usize - left_text.len() - right_text.len();
-    let padding_str = if padding > 0 {
-        " ".repeat(padding)
+    let total_len = left_text.len() + right_text.len();
+    let padding = if (area.width as usize) > total_len {
+        " ".repeat(area.width as usize - total_len)
     } else {
         String::new()
     };
 
-    let full_status = format!("{}{}{}", left_text, padding_str, right_text);
+    let full_status = format!("{}{}{}", left_text, padding, right_text);
 
     let status = Paragraph::new(full_status)
         .style(Style::default().fg(TEXT_PRIMARY).bg(Color::Rgb(25, 25, 30)));
