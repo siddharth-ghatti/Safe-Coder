@@ -15,20 +15,21 @@ use ratatui::{
 use similar::{ChangeTag, TextDiff};
 use textwrap::wrap;
 
-use super::shell_app::{BlockType, CommandBlock, FileDiff, InputMode, ShellTuiApp};
+use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, InputMode, ShellTuiApp};
 
-// Color scheme - consistent with existing TUI
-const ACCENT_BLUE: Color = Color::Rgb(100, 149, 237); // Cornflower blue for shell
-const ACCENT_PURPLE: Color = Color::Rgb(180, 120, 200); // Purple for AI
-const ACCENT_GREEN: Color = Color::Rgb(120, 200, 140); // Green for success
+// Crush-inspired color scheme
+const ACCENT_MAGENTA: Color = Color::Rgb(200, 100, 200); // Magenta for AI responses
+const ACCENT_GREEN: Color = Color::Rgb(100, 200, 140); // Green for success/user input
 const ACCENT_AMBER: Color = Color::Rgb(220, 180, 100); // Amber for tools/warnings
-const ACCENT_RED: Color = Color::Rgb(220, 100, 100); // Red for errors
-const ACCENT_CYAN: Color = Color::Rgb(100, 200, 200); // Cyan for info
+const ACCENT_RED: Color = Color::Rgb(220, 100, 100); // Red for errors/deletions
+const ACCENT_CYAN: Color = Color::Rgb(100, 200, 200); // Cyan for info/paths
 
 const TEXT_PRIMARY: Color = Color::Rgb(220, 220, 220); // Main text
-const TEXT_DIM: Color = Color::Rgb(120, 120, 120); // Dimmed text
+const TEXT_DIM: Color = Color::Rgb(100, 100, 110); // Dimmed text
+const TEXT_MUTED: Color = Color::Rgb(70, 70, 80); // Very dim text
 
-const BORDER_DIM: Color = Color::Rgb(60, 60, 65); // Subtle borders
+const BG_DARK: Color = Color::Rgb(20, 20, 25); // Dark background
+const BORDER_DIM: Color = Color::Rgb(50, 50, 55); // Subtle borders
 
 /// Draw the complete shell TUI
 pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
@@ -63,7 +64,7 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| app.cwd.display().to_string());
 
-    // Git branch - get it first to avoid lifetime issues
+    // Git branch
     let git_branch = app.get_git_branch();
 
     let mut status_parts = vec![format!(" {} ", cwd_display)];
@@ -73,13 +74,13 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     }
 
     if app.ai_connected {
-        status_parts.push("[AI] ".to_string());
+        status_parts.push("◇ AI ".to_string());
     }
 
     let running_count = app.blocks.iter().filter(|b| b.is_running()).count();
     if running_count > 0 {
         let dots = ".".repeat((app.animation_frame / 10) % 4);
-        status_parts.push(format!("running{} ", dots));
+        status_parts.push(format!("working{} ", dots));
     }
 
     let left_text = status_parts.join("");
@@ -94,7 +95,7 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let full_status = format!("{}{}{}", left_text, padding, right_text);
 
     let status = Paragraph::new(full_status)
-        .style(Style::default().fg(TEXT_PRIMARY).bg(Color::Rgb(25, 25, 30)));
+        .style(Style::default().fg(TEXT_DIM).bg(BG_DARK));
 
     f.render_widget(status, area);
 }
@@ -133,7 +134,11 @@ fn draw_blocks(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         .get(visible_start..visible_end)
         .unwrap_or(&[])
         .iter()
-        .map(|s| ListItem::new(Line::from(s.clone())))
+        .map(|s| {
+            // Apply colors based on line prefix markers
+            let line = colorize_line(s);
+            ListItem::new(line)
+        })
         .collect();
 
     let list = List::new(visible_items);
@@ -165,7 +170,98 @@ fn draw_blocks(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     }
 }
 
-/// Render a single command block to plain strings (avoids lifetime issues)
+/// Colorize a line based on embedded markers
+fn colorize_line(s: &str) -> Line<'static> {
+    // Parse marker prefix and apply appropriate styling
+    if s.starts_with("│M ") {
+        // Magenta left border for AI content
+        let content = &s[4..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_MAGENTA)),
+            Span::raw(" "),
+            Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
+        ])
+    } else if s.starts_with("│G ") {
+        // Green left border for user/success
+        let content = &s[4..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_GREEN)),
+            Span::raw(" "),
+            Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
+        ])
+    } else if s.starts_with("│A ") {
+        // Amber left border for tools
+        let content = &s[4..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_AMBER)),
+            Span::raw(" "),
+            Span::styled(content.to_string(), Style::default().fg(TEXT_DIM)),
+        ])
+    } else if s.starts_with("│R ") {
+        // Red left border for errors
+        let content = &s[4..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_RED)),
+            Span::raw(" "),
+            Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
+        ])
+    } else if s.starts_with("│D-") {
+        // Diff deletion (red)
+        let content = &s[3..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_AMBER)),
+            Span::styled(format!(" - {}", content), Style::default().fg(ACCENT_RED)),
+        ])
+    } else if s.starts_with("│D+") {
+        // Diff addition (green)
+        let content = &s[3..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_AMBER)),
+            Span::styled(format!(" + {}", content), Style::default().fg(ACCENT_GREEN)),
+        ])
+    } else if s.starts_with("│D ") {
+        // Diff context
+        let content = &s[3..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_AMBER)),
+            Span::styled(format!("   {}", content), Style::default().fg(TEXT_MUTED)),
+        ])
+    } else if s.starts_with("│T ") {
+        // Tool header
+        let content = &s[4..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(ACCENT_AMBER)),
+            Span::raw(" "),
+            Span::styled(content.to_string(), Style::default().fg(ACCENT_AMBER)),
+        ])
+    } else if s.starts_with("│_ ") {
+        // Dim/muted content
+        let content = &s[4..];
+        Line::from(vec![
+            Span::styled("│", Style::default().fg(TEXT_MUTED)),
+            Span::raw(" "),
+            Span::styled(content.to_string(), Style::default().fg(TEXT_MUTED)),
+        ])
+    } else if s.starts_with("> ") {
+        // Shell command prompt
+        let content = &s[2..];
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)),
+            Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
+        ])
+    } else if s.starts_with("@ ") {
+        // AI query prompt
+        let content = &s[2..];
+        Line::from(vec![
+            Span::styled("@ ", Style::default().fg(ACCENT_MAGENTA).add_modifier(Modifier::BOLD)),
+            Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
+        ])
+    } else {
+        Line::from(s.to_string())
+    }
+}
+
+/// Render a single command block to plain strings with marker prefixes
 fn render_block_to_strings(
     block: &CommandBlock,
     width: usize,
@@ -176,50 +272,80 @@ fn render_block_to_strings(
         BlockType::SystemMessage => {
             let output = block.output.get_text();
             for line in output.lines() {
-                let wrapped = wrap(line, width);
+                let wrapped = wrap(line, width.saturating_sub(4));
                 for wrapped_line in wrapped {
-                    lines.push(format!("  {}", wrapped_line));
+                    lines.push(format!("│_ {}", wrapped_line));
                 }
             }
         }
 
         BlockType::ShellCommand => {
+            // Shell command header
             let mut header = format!("> {}", block.input);
 
             if block.is_running() {
                 let dots = ".".repeat((animation_frame / 10) % 4);
-                header.push_str(&format!("  running{}", dots));
-            } else if let Some(duration) = block.duration_display() {
-                header.push_str(&format!("  [{}]", duration));
-            }
-
-            if let Some(code) = block.exit_code {
+                header.push_str(&format!("  {}", dots));
+            } else if let Some(code) = block.exit_code {
                 if code != 0 {
-                    header.push_str(&format!(" ✗{}", code));
+                    header.push_str(&format!(" ✗ {}", code));
                 }
             }
 
             lines.push(header);
-            render_output_strings(block, width, lines);
+
+            // Output with green border
+            let output = block.output.get_text();
+            if !output.is_empty() {
+                for line in output.lines().take(50) {
+                    let wrapped = wrap(line, width.saturating_sub(4));
+                    for wrapped_line in wrapped {
+                        lines.push(format!("│G {}", wrapped_line));
+                    }
+                }
+                if output.lines().count() > 50 {
+                    lines.push("│G ... [truncated]".to_string());
+                }
+            }
         }
 
         BlockType::AiQuery => {
+            // AI query header
             let mut header = format!("@ {}", block.input);
 
             if block.is_running() {
                 let dots = ".".repeat((animation_frame / 10) % 4);
                 header.push_str(&format!("  thinking{}", dots));
-            } else {
-                header.push_str("  [AI]");
             }
 
             lines.push(header);
-            render_output_strings(block, width, lines);
+            lines.push(String::new());
 
-            // Render child blocks (tool executions)
-            for child in &block.children {
-                lines.push(String::new());
-                render_tool_strings(child, width, lines, animation_frame);
+            // Render tool executions first (child blocks)
+            if !block.children.is_empty() {
+                for child in &block.children {
+                    render_tool_strings(child, width, lines, animation_frame);
+                    lines.push(String::new());
+                }
+            }
+
+            // Render final AI response (magenta border) - only if there's actual content
+            let output = block.output.get_text();
+            if !output.is_empty() && !block.is_running() {
+                // Add separator if there were tools
+                if !block.children.is_empty() {
+                    lines.push("│M ─────────────────────────────────".to_string());
+                }
+
+                for line in output.lines() {
+                    let wrapped = wrap(line, width.saturating_sub(4));
+                    for wrapped_line in wrapped {
+                        lines.push(format!("│M {}", wrapped_line));
+                    }
+                }
+            } else if block.is_running() && output.is_empty() && block.children.is_empty() {
+                // Show thinking indicator only if no tools yet
+                lines.push("│M ...".to_string());
             }
         }
 
@@ -232,49 +358,22 @@ fn render_block_to_strings(
 
             if block.is_running() {
                 let dots = ".".repeat((animation_frame / 10) % 4);
-                header.push_str(&format!("  running{}", dots));
+                header.push_str(&format!("  {}", dots));
             }
 
             lines.push(header);
-            render_output_strings(block, width, lines);
-        }
-    }
-}
 
-/// Render output as bordered block strings
-fn render_output_strings(block: &CommandBlock, width: usize, lines: &mut Vec<String>) {
-    let output = block.output.get_text();
-    if output.is_empty() && !block.is_running() {
-        return;
-    }
-
-    let inner_width = width.saturating_sub(4);
-
-    // Top border
-    lines.push(format!("  ┌{}┐", "─".repeat(inner_width)));
-
-    if output.is_empty() && block.is_running() {
-        let padding = inner_width.saturating_sub(4);
-        lines.push(format!("  │ ...{}│", " ".repeat(padding)));
-    } else {
-        for line in output.lines().take(50) {
-            let wrapped = wrap(line, inner_width.saturating_sub(2));
-            for wrapped_line in wrapped {
-                let content = wrapped_line.to_string();
-                let padding = inner_width.saturating_sub(content.len() + 1);
-                lines.push(format!("  │ {}{}│", content, " ".repeat(padding)));
+            let output = block.output.get_text();
+            if !output.is_empty() {
+                for line in output.lines() {
+                    let wrapped = wrap(line, width.saturating_sub(4));
+                    for wrapped_line in wrapped {
+                        lines.push(format!("│A {}", wrapped_line));
+                    }
+                }
             }
         }
-
-        if output.lines().count() > 50 {
-            let msg = "... [output truncated]";
-            let padding = inner_width.saturating_sub(msg.len() + 1);
-            lines.push(format!("  │ {}{}│", msg, " ".repeat(padding)));
-        }
     }
-
-    // Bottom border
-    lines.push(format!("  └{}┘", "─".repeat(inner_width)));
 }
 
 /// Render tool execution block strings
@@ -289,15 +388,18 @@ fn render_tool_strings(
         _ => "tool".to_string(),
     };
 
-    let mut header = format!("    ⚡ {}", tool_name);
+    // Tool header with amber color
+    let mut header = format!("⚡ {}", tool_name);
 
+    // Add file path or description from input
     if !block.input.is_empty() {
         header.push_str(&format!(" {}", block.input));
     }
 
+    // Status indicator
     if block.is_running() {
         let dots = ".".repeat((animation_frame / 10) % 4);
-        header.push_str(&format!(" running{}", dots));
+        header.push_str(&format!(" {}", dots));
     } else if let Some(exit_code) = block.exit_code {
         if exit_code == 0 {
             header.push_str(" ✓");
@@ -306,21 +408,27 @@ fn render_tool_strings(
         }
     }
 
-    lines.push(header);
+    lines.push(format!("│T {}", header));
 
     // Render diff if present (for edit_file/write_file tools)
     if let Some(diff) = &block.diff {
         render_diff_strings(diff, width, lines);
     } else {
-        // Render regular output
+        // Render regular output (truncated)
         let output = block.output.get_text();
         if !output.is_empty() {
-            let inner_width = width.saturating_sub(8);
-            for line in output.lines().take(10) {
-                let wrapped = wrap(line, inner_width);
-                for wrapped_line in wrapped {
-                    lines.push(format!("      {}", wrapped_line));
-                }
+            // Show compact output
+            let output_lines: Vec<&str> = output.lines().take(5).collect();
+            for line in output_lines {
+                let truncated = if line.len() > width.saturating_sub(6) {
+                    format!("{}...", &line[..width.saturating_sub(9)])
+                } else {
+                    line.to_string()
+                };
+                lines.push(format!("│_ {}", truncated));
+            }
+            if output.lines().count() > 5 {
+                lines.push(format!("│_ ... ({} more lines)", output.lines().count() - 5));
             }
         }
     }
@@ -329,16 +437,20 @@ fn render_tool_strings(
 /// Render a file diff with color-coded additions and deletions
 fn render_diff_strings(diff: &FileDiff, width: usize, lines: &mut Vec<String>) {
     // File path header
-    lines.push(format!("      📝 {}", diff.path));
+    lines.push(format!("│A 📝 {}", diff.path));
 
     // Compute the diff
     let text_diff = TextDiff::from_lines(&diff.old_content, &diff.new_content);
 
-    let inner_width = width.saturating_sub(10);
-    let mut diff_lines: Vec<String> = Vec::new();
+    let inner_width = width.saturating_sub(8);
     let mut has_changes = false;
+    let mut change_count = 0;
 
     for change in text_diff.iter_all_changes() {
+        if change_count >= 20 {
+            break;
+        }
+
         let line_content = change.value().trim_end();
 
         // Truncate long lines
@@ -351,59 +463,24 @@ fn render_diff_strings(diff: &FileDiff, width: usize, lines: &mut Vec<String>) {
         match change.tag() {
             ChangeTag::Delete => {
                 has_changes = true;
-                diff_lines.push(format!("      │ - {}", display_content));
+                lines.push(format!("│D-{}", display_content));
+                change_count += 1;
             }
             ChangeTag::Insert => {
                 has_changes = true;
-                diff_lines.push(format!("      │ + {}", display_content));
+                lines.push(format!("│D+{}", display_content));
+                change_count += 1;
             }
             ChangeTag::Equal => {
-                // Only show context lines near changes (limit to avoid huge outputs)
-                if diff_lines.len() < 30 {
-                    diff_lines.push(format!("      │   {}", display_content));
-                }
+                // Skip context lines for cleaner output
             }
-        }
-
-        // Limit total diff output
-        if diff_lines.len() >= 30 {
-            break;
         }
     }
 
-    if has_changes {
-        // Show a compact diff with just changes and minimal context
-        let mut context_lines: Vec<String> = Vec::new();
-        let mut in_change_block = false;
-        let mut lines_since_change = 0;
-
-        for line in &diff_lines {
-            let is_change = line.contains(" - ") || line.contains(" + ");
-
-            if is_change {
-                // If we skipped context, add indicator
-                if lines_since_change > 3 && !context_lines.is_empty() {
-                    context_lines.push("      │ ...".to_string());
-                }
-                context_lines.push(line.clone());
-                in_change_block = true;
-                lines_since_change = 0;
-            } else if in_change_block {
-                lines_since_change += 1;
-                if lines_since_change <= 2 {
-                    context_lines.push(line.clone());
-                } else {
-                    in_change_block = false;
-                }
-            }
-        }
-
-        // Limit output and add to lines
-        for line in context_lines.into_iter().take(20) {
-            lines.push(line);
-        }
-    } else {
-        lines.push("      │ (no changes)".to_string());
+    if !has_changes {
+        lines.push("│_ (no changes)".to_string());
+    } else if text_diff.iter_all_changes().filter(|c| c.tag() != ChangeTag::Equal).count() > 20 {
+        lines.push("│_ ... (more changes)".to_string());
     }
 }
 
@@ -424,7 +501,6 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "~".to_string());
 
-    // Get git branch to avoid lifetime issues
     let git_branch = app.get_git_branch();
 
     let branch_part = if let Some(ref branch) = git_branch {
@@ -433,15 +509,13 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         String::new()
     };
 
-    let prompt_symbol = if app.last_exit_code == 0 { ">" } else { ">" };
-
     // Build spans for prompt
     let mut spans = Vec::new();
 
     spans.push(Span::styled(cwd_display, Style::default().fg(ACCENT_CYAN)));
 
     if !branch_part.is_empty() {
-        spans.push(Span::styled(branch_part, Style::default().fg(ACCENT_AMBER)));
+        spans.push(Span::styled(branch_part, Style::default().fg(TEXT_DIM)));
     }
 
     let prompt_color = if app.last_exit_code == 0 {
@@ -449,8 +523,15 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     } else {
         ACCENT_RED
     };
+
+    let prompt_char = if matches!(app.input_mode, InputMode::AiPrefix) {
+        "@"
+    } else {
+        ">"
+    };
+
     spans.push(Span::styled(
-        format!(" {} ", prompt_symbol),
+        format!(" {} ", prompt_char),
         Style::default()
             .fg(prompt_color)
             .add_modifier(Modifier::BOLD),
@@ -460,7 +541,7 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let (before_cursor, after_cursor) = app.input.split_at(app.cursor_pos.min(app.input.len()));
 
     let input_color = match app.input_mode {
-        InputMode::AiPrefix => ACCENT_PURPLE,
+        InputMode::AiPrefix => ACCENT_MAGENTA,
         _ => TEXT_PRIMARY,
     };
 
@@ -524,7 +605,7 @@ fn draw_autocomplete(f: &mut Frame, app: &ShellTuiApp, input_area: Rect) {
     let width = (max_width as u16)
         .min(input_area.width.saturating_sub(4))
         .max(15);
-    let height = (suggestions.len() as u16 + 2).min(12); // +2 for borders, max 12 lines
+    let height = (suggestions.len() as u16 + 2).min(12);
 
     // Position popup above the input area
     let x = input_area.x + 2;
@@ -541,7 +622,7 @@ fn draw_autocomplete(f: &mut Frame, app: &ShellTuiApp, input_area: Rect) {
     let popup_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT_CYAN))
-        .style(Style::default().bg(Color::Rgb(30, 30, 40)));
+        .style(Style::default().bg(BG_DARK));
 
     let inner = popup_block.inner(popup_area);
 
@@ -553,11 +634,11 @@ fn draw_autocomplete(f: &mut Frame, app: &ShellTuiApp, input_area: Rect) {
     let items: Vec<ListItem> = suggestions
         .iter()
         .enumerate()
-        .take(10) // Limit displayed items
+        .take(10)
         .map(|(i, suggestion)| {
             let style = if i == selected {
                 Style::default()
-                    .fg(Color::Rgb(30, 30, 40))
+                    .fg(BG_DARK)
                     .bg(ACCENT_CYAN)
                     .add_modifier(Modifier::BOLD)
             } else {
