@@ -3,7 +3,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
     },
     Frame,
 };
@@ -26,18 +26,43 @@ const BORDER_DIM: Color = Color::Rgb(60, 60, 65); // Subtle borders
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
+    // Calculate dynamic input height based on wrapped content
+    let input_height = calculate_input_height(app, size.width);
+
     // Simple layout: chat area takes most space, input at bottom
     // No header, no sidebar - just like Claude Code
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),    // Chat area (fills available space)
-            Constraint::Length(3), // Input area
+            Constraint::Min(3),                          // Chat area (fills available space)
+            Constraint::Length(input_height.max(3)),     // Input area (dynamic, min 3)
         ])
         .split(size);
 
     draw_chat(f, app, main_layout[0]);
     draw_input(f, app, main_layout[1]);
+}
+
+/// Calculate the required height for the input area based on wrapped content
+fn calculate_input_height(app: &App, terminal_width: u16) -> u16 {
+    // Account for borders and padding, then be more aggressive with wrapping
+    // Use 65% of available width to account for send button and UI elements
+    let available_width = terminal_width.saturating_sub(6); // 6 for borders and padding
+    let effective_width = (available_width as usize * 65) / 100; // Use only 65% of width
+    let effective_width = effective_width.max(10); // Minimum usable width
+    
+    // Calculate input character count including prompt
+    let input_char_count = app.input.chars().count() + 2; // +2 for "> " prompt
+    
+    // Calculate required lines
+    let input_lines = if effective_width > 0 {
+        ((input_char_count / effective_width) + 1).max(1).min(5) as u16 // max 5 lines
+    } else {
+        1
+    };
+    
+    // Add 2 for border and padding, ensure minimum height
+    input_lines + 2 
 }
 
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
@@ -178,25 +203,64 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Input prompt and content
-    let cursor = if app.animation_frame % 20 < 10 {
-        "█"
-    } else {
-        " "
-    };
+    // Calculate available width for input text (use same logic as height calculation)
+    let available_width = inner.width.saturating_sub(2); // Account for padding
+    let effective_width = (available_width as usize * 65) / 100; // Use only 65% of width for more aggressive wrapping
+    let effective_width = effective_width.max(10); // Ensure minimum width
+    
+    // Create the full input string
+    let full_input = format!("> {}", app.input);
+    
+    // Wrap the text
+    let wrapped_lines = wrap(&full_input, effective_width);
+    
+    // Convert wrapped lines to styled lines
+    let mut styled_lines: Vec<Line> = Vec::new();
+    
+    for (i, line) in wrapped_lines.iter().enumerate() {
+        if i == 0 {
+            // First line - style the prompt differently
+            if line.len() > 2 {
+                styled_lines.push(Line::from(vec![
+                    Span::styled(
+                        "> ",
+                        Style::default()
+                            .fg(ACCENT_BLUE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(line[2..].to_string(), Style::default().fg(TEXT_PRIMARY)),
+                ]));
+            } else {
+                styled_lines.push(Line::from(vec![
+                    Span::styled(
+                        line.to_string(),
+                        Style::default()
+                            .fg(ACCENT_BLUE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
+        } else {
+            // Continuation lines - just the content without prompt
+            styled_lines.push(Line::from(vec![
+                Span::styled(line.to_string(), Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        }
+    }
+    
+    // Add cursor to the last line
+    if let Some(last_line) = styled_lines.last_mut() {
+        let cursor = if app.animation_frame % 20 < 10 {
+            "█"
+        } else {
+            " "
+        };
+        
+        last_line.spans.push(Span::styled(cursor, Style::default().fg(ACCENT_BLUE)));
+    }
 
-    let input_spans = vec![
-        Span::styled(
-            "> ",
-            Style::default()
-                .fg(ACCENT_BLUE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(&app.input, Style::default().fg(TEXT_PRIMARY)),
-        Span::styled(cursor, Style::default().fg(ACCENT_BLUE)),
-    ];
-
-    let paragraph = Paragraph::new(Line::from(input_spans));
+    let paragraph = Paragraph::new(styled_lines)
+        .wrap(Wrap { trim: false });
 
     // Add some left padding
     let input_area = Rect {

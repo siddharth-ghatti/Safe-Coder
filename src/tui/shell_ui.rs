@@ -877,7 +877,10 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     // Build full input string for manual wrapping
     let full_input = format!("> {}", app.input);
-    let wrap_width = inner.width.saturating_sub(1) as usize; // leave 1 char margin
+    
+    // Calculate wrap width, accounting for send hint space if input is not empty
+    let hint_space = if app.input.is_empty() { 0 } else { 8 }; // "↵ send" + padding
+    let wrap_width = inner.width.saturating_sub(1 + hint_space) as usize; // leave margin + hint space
     let wrap_width = wrap_width.max(5);
 
     // Manually wrap the text into lines
