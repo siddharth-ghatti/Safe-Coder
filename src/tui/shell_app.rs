@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Local};
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -14,6 +15,80 @@ use super::autocomplete::Autocomplete;
 use super::spinner::Spinner;
 use crate::config::Config;
 use crate::session::Session;
+
+/// Permission mode for tool execution
+/// Controls how much user approval is required
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionMode {
+    /// YOLO: Bypass ALL permissions - auto-approve everything
+    Yolo,
+    /// EDIT: Auto-approve file edits, ask for bash/other actions
+    Edit,
+    /// ASK: Ask permission for every action (safest)
+    Ask,
+}
+
+impl PermissionMode {
+    /// Cycle to next mode
+    pub fn next(self) -> Self {
+        match self {
+            PermissionMode::Ask => PermissionMode::Edit,
+            PermissionMode::Edit => PermissionMode::Yolo,
+            PermissionMode::Yolo => PermissionMode::Ask,
+        }
+    }
+
+    /// Get short display name
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            PermissionMode::Yolo => "YOLO",
+            PermissionMode::Edit => "EDIT",
+            PermissionMode::Ask => "ASK",
+        }
+    }
+
+    /// Get description
+    pub fn description(&self) -> &'static str {
+        match self {
+            PermissionMode::Yolo => "Auto-approve ALL actions",
+            PermissionMode::Edit => "Auto-approve edits only",
+            PermissionMode::Ask => "Ask for all actions",
+        }
+    }
+
+    /// Get color hint (for UI)
+    pub fn color_hint(&self) -> &'static str {
+        match self {
+            PermissionMode::Yolo => "red",
+            PermissionMode::Edit => "amber",
+            PermissionMode::Ask => "green",
+        }
+    }
+
+    /// Check if a tool needs approval in this mode
+    pub fn needs_approval(&self, tool_name: &str) -> bool {
+        match self {
+            PermissionMode::Yolo => false,
+            PermissionMode::Edit => {
+                // Auto-approve read, write, edit; ask for bash and others
+                !matches!(tool_name, "read_file" | "write_file" | "edit_file")
+            }
+            PermissionMode::Ask => true,
+        }
+    }
+}
+
+impl Default for PermissionMode {
+    fn default() -> Self {
+        PermissionMode::Ask
+    }
+}
+
+impl fmt::Display for PermissionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.short_name())
+    }
+}
 
 /// Maximum number of commands to keep in history
 const MAX_HISTORY_SIZE: usize = 1000;
@@ -308,6 +383,8 @@ pub struct ShellTuiApp {
     pub ai_context_commands: usize,
     /// Configuration
     pub config: Config,
+    /// Permission mode for tool execution (YOLO/EDIT/ASK)
+    pub permission_mode: PermissionMode,
 
     // === UI State ===
     /// Current input text
@@ -366,6 +443,7 @@ impl ShellTuiApp {
             ai_thinking: false,
             ai_context_commands: DEFAULT_AI_CONTEXT_COMMANDS,
             config,
+            permission_mode: PermissionMode::default(),
 
             input: String::new(),
             cursor_pos: 0,
@@ -729,6 +807,18 @@ impl ShellTuiApp {
     /// Set AI connected state
     pub fn set_ai_connected(&mut self, connected: bool) {
         self.ai_connected = connected;
+        self.needs_redraw = true;
+    }
+
+    /// Cycle to next permission mode
+    pub fn cycle_permission_mode(&mut self) {
+        self.permission_mode = self.permission_mode.next();
+        self.needs_redraw = true;
+    }
+
+    /// Set permission mode directly
+    pub fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.permission_mode = mode;
         self.needs_redraw = true;
     }
 

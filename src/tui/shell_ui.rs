@@ -17,7 +17,7 @@ use ratatui::{
 use similar::{ChangeTag, TextDiff};
 use textwrap::wrap;
 
-use super::shell_app::{BlockType, CommandBlock, FileDiff, InputMode, ShellTuiApp};
+use super::shell_app::{BlockType, CommandBlock, FileDiff, InputMode, PermissionMode, ShellTuiApp};
 
 // Crush-inspired color scheme
 const ACCENT_MAGENTA: Color = Color::Rgb(200, 100, 200); // Magenta for AI/logo
@@ -179,6 +179,7 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             Constraint::Length(2),           // Session info
             Constraint::Length(2),           // Project path
             Constraint::Length(3),           // Model info
+            Constraint::Length(4),           // Permission mode section
             Constraint::Length(5),           // Modified files section
             Constraint::Min(1),              // Spacer
             Constraint::Length(2),           // Help hints
@@ -203,11 +204,14 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Draw model info with animation
     draw_model_info(f, app, sidebar_layout[3], app.animation_frame);
 
+    // Draw permission mode
+    draw_permission_mode(f, app, sidebar_layout[4], app.animation_frame);
+
     // Draw modified files
-    draw_modified_files(f, app, sidebar_layout[4]);
+    draw_modified_files(f, app, sidebar_layout[5]);
 
     // Draw help hints
-    draw_help_hints(f, sidebar_layout[6]);
+    draw_help_hints(f, sidebar_layout[7]);
 }
 
 /// Draw the ASCII logo (selects appropriate size based on width)
@@ -323,6 +327,47 @@ fn draw_model_info(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_frame
             Span::styled(model_name, Style::default().fg(TEXT_PRIMARY)),
         ]),
         Line::from(Span::styled(status, Style::default().fg(status_indicator))),
+    ];
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+/// Draw permission mode section with animated indicator
+fn draw_permission_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_frame: usize) {
+    let mode = app.permission_mode;
+
+    // Mode-specific colors and icons
+    let (mode_color, mode_icon) = match mode {
+        PermissionMode::Yolo => (ACCENT_RED, "👹"),
+        PermissionMode::Edit => (ACCENT_AMBER, "✏"),
+        PermissionMode::Ask => (ACCENT_GREEN, "🛡"),
+    };
+
+    // Subtle pulsing animation for the mode indicator
+    let pulse = if animation_frame % 30 < 15 {
+        "●"
+    } else {
+        "○"
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Mode ", Style::default().fg(TEXT_DIM)),
+            Span::styled("───────────", Style::default().fg(BORDER_DIM)),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("{} ", mode_icon), Style::default().fg(mode_color)),
+            Span::styled(
+                mode.short_name(),
+                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" {}", pulse), Style::default().fg(mode_color)),
+        ]),
+        Line::from(Span::styled(
+            format!("ctrl+p: {}", mode.description()),
+            Style::default().fg(TEXT_MUTED),
+        )),
     ];
 
     let para = Paragraph::new(lines);
