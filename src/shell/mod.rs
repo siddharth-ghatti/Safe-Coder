@@ -425,22 +425,88 @@ impl Shell {
         Ok(())
     }
 
-    /// Execute a shell command
+    /// Execute a shell command with real-time output
     async fn execute_shell_command(&mut self, command: &str) -> Result<()> {
-        // Handle pipes and redirects by using sh -c
-        let mut child = Command::new("sh")
+        // Show the command being executed
+        println!("\x1b[33m❯ {}\x1b[0m", command);
+        
+        // Use tokio Command for async execution with piped output
+        let mut child = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(command)
             .current_dir(&self.cwd)
             .envs(&self.env_vars)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .stdin(Stdio::inherit())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::inherit()) // Keep stdin interactive
             .spawn()
             .context("Failed to execute command")?;
-
+        
+        // Get handles to stdout and stderr
+        let stdout = child.stdout.take().context("Failed to capture stdout")?;
+        let stderr = child.stderr.take().context("Failed to capture stderr")?;
+        
+        // Create async readers
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut stdout_reader = BufReader::new(stdout);
+        let mut stderr_reader = BufReader::new(stderr);
+        
+        let mut stdout_line = String::new();
+        let mut stderr_line = String::new();
+        
+        // Stream output in real-time using select! to handle both streams
+        loop {
+            tokio::select! {
+                result = stdout_reader.read_line(&mut stdout_line) => {
+                    match result {
+                        Ok(0) => break, // EOF
+                        Ok(_) => {
+                            print!("{}", stdout_line);
+                            io::stdout().flush()?;
+                            stdout_line.clear();
+                        }
+                        Err(_) => break,
+                    }
+                }
+                result = stderr_reader.read_line(&mut stderr_line) => {
+                    match result {
+                        Ok(0) => {}, // EOF on stderr, continue
+                        Ok(_) => {
+                            // Print stderr in red
+                            print!("\x1b[31m{}\x1b[0m", stderr_line);
+                            io::stdout().flush()?;
+                            stderr_line.clear();
+                        }
+                        Err(_) => {},
+                    }
+                }
+                _ = child.wait() => {
+                    // Process has completed, read any remaining output
+                    while let Ok(n) = stdout_reader.read_line(&mut stdout_line).await {
+                        if n == 0 { break; }
+                        print!("{}", stdout_line);
+                        io::stdout().flush()?;
+                        stdout_line.clear();
+                    }
+                    while let Ok(n) = stderr_reader.read_line(&mut stderr_line).await {
+                        if n == 0 { break; }
+                        print!("\x1b[31m{}\x1b[0m", stderr_line);
+                        io::stdout().flush()?;
+                        stderr_line.clear();
+                    }
+                    break;
+                }
+            }
+        }
+        
+        // Get the final exit status
         let status = child.wait().await?;
         self.last_exit_code = status.code().unwrap_or(1);
+
+        // Show exit status if command failed
+        if !status.success() {
+            println!("\x1b[31m[Exit status: {}]\x1b[0m", self.last_exit_code);
+        }
 
         Ok(())
     }

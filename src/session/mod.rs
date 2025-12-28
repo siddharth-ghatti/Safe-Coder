@@ -24,6 +24,8 @@ pub enum SessionEvent {
     ToolStart { name: String, description: String },
     /// Tool produced output
     ToolOutput { name: String, output: String },
+    /// Streaming output line from bash command (for inline display)
+    BashOutputLine { name: String, line: String },
     /// Tool execution completed
     ToolComplete { name: String, success: bool },
     /// File was edited - includes diff info
@@ -419,8 +421,26 @@ impl Session {
                         None
                     };
 
-                    // Create tool context and execute
-                    let tool_ctx = ToolContext::new(&self.project_path, &self.config.tools);
+                    // Create tool context - use streaming callback for bash commands
+                    let tool_ctx = if name == "bash" {
+                        // Create a streaming callback for bash output
+                        let event_tx_clone = event_tx.clone();
+                        let tool_name = name.clone();
+                        let callback: crate::tools::OutputCallback =
+                            Arc::new(move |line: String| {
+                                let _ = event_tx_clone.send(SessionEvent::BashOutputLine {
+                                    name: tool_name.clone(),
+                                    line,
+                                });
+                            });
+                        ToolContext::with_output_callback(
+                            &self.project_path,
+                            &self.config.tools,
+                            callback,
+                        )
+                    } else {
+                        ToolContext::new(&self.project_path, &self.config.tools)
+                    };
 
                     let (result, success) = match self.tool_registry.get_tool(name) {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
@@ -646,6 +666,34 @@ impl Session {
         });
 
         let tool_ctx = ToolContext::new(&self.project_path, &self.config.tools);
+        bash_tool.execute(input, &tool_ctx).await
+    }
+
+    /// Execute shell command in project directory with streaming output
+    pub async fn execute_shell_command_streaming<F>(
+        &self,
+        command: &str,
+        output_callback: F,
+    ) -> Result<String>
+    where
+        F: Fn(String) + Send + Sync + 'static,
+    {
+        use crate::tools::OutputCallback;
+        use std::sync::Arc;
+
+        // Use bash tool to execute command
+        let bash_tool = self
+            .tool_registry
+            .get_tool("bash")
+            .context("Bash tool not found")?;
+
+        let input = serde_json::json!({
+            "command": command
+        });
+
+        let callback: OutputCallback = Arc::new(output_callback);
+        let tool_ctx =
+            ToolContext::with_output_callback(&self.project_path, &self.config.tools, callback);
         bash_tool.execute(input, &tool_ctx).await
     }
 

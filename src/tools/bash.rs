@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Stdio;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::{Tool, ToolContext};
@@ -152,85 +152,212 @@ impl Tool for BashTool {
         let mut stdout = child.stdout.take().context("Failed to capture stdout")?;
         let mut stderr = child.stderr.take().context("Failed to capture stderr")?;
 
-        // Read output with timeout
-        let result = tokio::time::timeout(timeout, async {
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
+        let mut combined_output = String::new();
 
-            // Read both streams concurrently
-            let (stdout_result, stderr_result) = tokio::join!(
-                stdout.read_to_end(&mut stdout_buf),
-                stderr.read_to_end(&mut stderr_buf)
-            );
-
-            stdout_result.context("Failed to read stdout")?;
-            stderr_result.context("Failed to read stderr")?;
-
-            // Wait for the process to complete
-            let status = child.wait().await.context("Failed to wait for process")?;
-
-            Ok::<_, anyhow::Error>((stdout_buf, stderr_buf, status))
-        })
-        .await;
-
-        match result {
-            Ok(Ok((stdout_buf, stderr_buf, status))) => {
-                // Process completed within timeout
-                let stdout_str = String::from_utf8_lossy(&stdout_buf);
-                let stderr_str = String::from_utf8_lossy(&stderr_buf);
-
-                let mut output = String::new();
-
-                if !stdout_str.is_empty() {
-                    output.push_str(&stdout_str);
-                }
-                if !stderr_str.is_empty() {
-                    if !output.is_empty() {
-                        output.push('\n');
+        // Check if we have a callback for streaming output
+        let use_streaming = ctx.output_callback.is_some();
+        
+        if use_streaming {
+            // Stream output in real-time
+            let callback = ctx.output_callback.as_ref().unwrap();
+            
+            let mut stdout_reader = BufReader::new(stdout);
+            let mut stderr_reader = BufReader::new(stderr);
+            
+            let mut stdout_line = String::new();
+            let mut stderr_line = String::new();
+            
+            let result = tokio::time::timeout(timeout, async {
+                loop {
+                    tokio::select! {
+                        result = stdout_reader.read_line(&mut stdout_line) => {
+                            match result {
+                                Ok(0) => break, // EOF
+                                Ok(_) => {
+                                    let line = stdout_line.trim_end_matches('\n').to_string();
+                                    if !line.is_empty() {
+                                        combined_output.push_str(&stdout_line);
+                                        callback(line);
+                                    }
+                                    stdout_line.clear();
+                                }
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                        result = stderr_reader.read_line(&mut stderr_line) => {
+                            match result {
+                                Ok(0) => {}, // EOF on stderr, continue
+                                Ok(_) => {
+                                    let line = format!("stderr: {}", stderr_line.trim_end_matches('\n'));
+                                    if !line.trim().is_empty() {
+                                        combined_output.push_str(&stderr_line);
+                                        callback(line);
+                                    }
+                                    stderr_line.clear();
+                                }
+                                Err(e) => return Err(e.into()),
+                            }
+                        }
+                        _ = child.wait() => {
+                            // Process has completed, read any remaining output
+                            while let Ok(n) = stdout_reader.read_line(&mut stdout_line).await {
+                                if n == 0 { break; }
+                                let line = stdout_line.trim_end_matches('\n').to_string();
+                                if !line.is_empty() {
+                                    combined_output.push_str(&stdout_line);
+                                    callback(line);
+                                }
+                                stdout_line.clear();
+                            }
+                            while let Ok(n) = stderr_reader.read_line(&mut stderr_line).await {
+                                if n == 0 { break; }
+                                let line = format!("stderr: {}", stderr_line.trim_end_matches('\n'));
+                                if !line.trim().is_empty() {
+                                    combined_output.push_str(&stderr_line);
+                                    callback(line);
+                                }
+                                stderr_line.clear();
+                            }
+                            break;
+                        }
                     }
-                    output.push_str(&stderr_str);
                 }
-
-                if !status.success() {
-                    output.push_str(&format!("\n[Exit status: {}]", status));
+                
+                let status = child.wait().await.context("Failed to wait for process")?;
+                Ok::<_, anyhow::Error>(status)
+            }).await;
+            
+            match result {
+                Ok(Ok(status)) => {
+                    if !status.success() {
+                        let exit_msg = format!("[Exit status: {}]", status);
+                        combined_output.push_str(&exit_msg);
+                        if let Some(ref callback) = ctx.output_callback {
+                            callback(exit_msg);
+                        }
+                    }
+                    
+                    // Truncate if necessary
+                    Ok(Self::truncate_output(combined_output, ctx.config.max_output_bytes))
                 }
+                Ok(Err(e)) => Err(e),
+                Err(_) => {
+                    // Timeout occurred
+                    tracing::warn!(
+                        "Command timed out after {}s, attempting to kill process: {}",
+                        timeout_secs,
+                        &params.command
+                    );
 
-                // Truncate if necessary
-                Ok(Self::truncate_output(output, ctx.config.max_output_bytes))
+                    if let Err(kill_err) = child.kill().await {
+                        tracing::error!("Failed to kill timed-out process: {}", kill_err);
+                    }
+
+                    let timeout_msg = format!(
+                        "⏱️  COMMAND TIMED OUT\n\n\
+                        The command '{}' exceeded the timeout of {} seconds and was terminated.\n\n\
+                        Possible reasons:\n\
+                        - The command is taking longer than expected\n\
+                        - The command is waiting for input\n\
+                        - The command entered an infinite loop\n\n\
+                        You can:\n\
+                        1. Increase the timeout by passing a 'timeout' parameter (e.g., timeout: 300)\n\
+                        2. Modify the default timeout in config:\n\
+                           [tools]\n\
+                           bash_timeout_secs = 300\n\
+                        3. Break the command into smaller operations",
+                        params.command,
+                        timeout_secs
+                    );
+                    
+                    if let Some(ref callback) = ctx.output_callback {
+                        callback(timeout_msg.clone());
+                    }
+                    
+                    Ok(timeout_msg)
+                }
             }
-            Ok(Err(e)) => {
-                // Process completed but had an error reading output
-                Err(e)
-            }
-            Err(_) => {
-                // Timeout occurred - try to kill the process
-                tracing::warn!(
-                    "Command timed out after {}s, attempting to kill process: {}",
-                    timeout_secs,
-                    &params.command
+        } else {
+            // Original non-streaming behavior for backward compatibility
+            let result = tokio::time::timeout(timeout, async {
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+
+                // Read both streams concurrently
+                let (stdout_result, stderr_result) = tokio::join!(
+                    tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut stdout_buf),
+                    tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut stderr_buf)
                 );
 
-                // Try to kill the child process
-                if let Err(kill_err) = child.kill().await {
-                    tracing::error!("Failed to kill timed-out process: {}", kill_err);
-                }
+                stdout_result.context("Failed to read stdout")?;
+                stderr_result.context("Failed to read stderr")?;
 
-                Ok(format!(
-                    "⏱️  COMMAND TIMED OUT\n\n\
-                    The command '{}' exceeded the timeout of {} seconds and was terminated.\n\n\
-                    Possible reasons:\n\
-                    - The command is taking longer than expected\n\
-                    - The command is waiting for input\n\
-                    - The command entered an infinite loop\n\n\
-                    You can:\n\
-                    1. Increase the timeout by passing a 'timeout' parameter (e.g., timeout: 300)\n\
-                    2. Modify the default timeout in config:\n\
-                       [tools]\n\
-                       bash_timeout_secs = 300\n\
-                    3. Break the command into smaller operations",
-                    params.command,
-                    timeout_secs
-                ))
+                // Wait for the process to complete
+                let status = child.wait().await.context("Failed to wait for process")?;
+
+                Ok::<_, anyhow::Error>((stdout_buf, stderr_buf, status))
+            })
+            .await;
+
+            match result {
+                Ok(Ok((stdout_buf, stderr_buf, status))) => {
+                    // Process completed within timeout
+                    let stdout_str = String::from_utf8_lossy(&stdout_buf);
+                    let stderr_str = String::from_utf8_lossy(&stderr_buf);
+
+                    let mut output = String::new();
+
+                    if !stdout_str.is_empty() {
+                        output.push_str(&stdout_str);
+                    }
+                    if !stderr_str.is_empty() {
+                        if !output.is_empty() {
+                            output.push('\n');
+                        }
+                        output.push_str(&stderr_str);
+                    }
+
+                    if !status.success() {
+                        output.push_str(&format!("\n[Exit status: {}]", status));
+                    }
+
+                    // Truncate if necessary
+                    Ok(Self::truncate_output(output, ctx.config.max_output_bytes))
+                }
+                Ok(Err(e)) => {
+                    // Process completed but had an error reading output
+                    Err(e)
+                }
+                Err(_) => {
+                    // Timeout occurred - try to kill the process
+                    tracing::warn!(
+                        "Command timed out after {}s, attempting to kill process: {}",
+                        timeout_secs,
+                        &params.command
+                    );
+
+                    // Try to kill the child process
+                    if let Err(kill_err) = child.kill().await {
+                        tracing::error!("Failed to kill timed-out process: {}", kill_err);
+                    }
+
+                    Ok(format!(
+                        "⏱️  COMMAND TIMED OUT\n\n\
+                        The command '{}' exceeded the timeout of {} seconds and was terminated.\n\n\
+                        Possible reasons:\n\
+                        - The command is taking longer than expected\n\
+                        - The command is waiting for input\n\
+                        - The command entered an infinite loop\n\n\
+                        You can:\n\
+                        1. Increase the timeout by passing a 'timeout' parameter (e.g., timeout: 300)\n\
+                        2. Modify the default timeout in config:\n\
+                           [tools]\n\
+                           bash_timeout_secs = 300\n\
+                        3. Break the command into smaller operations",
+                        params.command,
+                        timeout_secs
+                    ))
+                }
             }
         }
     }
