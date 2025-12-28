@@ -1,19 +1,28 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::config::ToolConfig;
 
-pub mod read;
-pub mod write;
-pub mod edit;
 pub mod bash;
+pub mod edit;
+pub mod glob;
+pub mod grep;
+pub mod list;
+pub mod read;
+pub mod todo;
+pub mod webfetch;
+pub mod write;
 
-pub use read::ReadTool;
-pub use write::WriteTool;
-pub use edit::EditTool;
 pub use bash::BashTool;
+pub use edit::EditTool;
+pub use glob::GlobTool;
+pub use grep::GrepTool;
+pub use list::ListTool;
+pub use read::ReadTool;
+pub use todo::{TodoReadTool, TodoWriteTool};
+pub use webfetch::WebFetchTool;
+pub use write::WriteTool;
 
 /// Context passed to tool execution containing working directory and configuration
 #[derive(Debug, Clone)]
@@ -24,7 +33,10 @@ pub struct ToolContext<'a> {
 
 impl<'a> ToolContext<'a> {
     pub fn new(working_dir: &'a Path, config: &'a ToolConfig) -> Self {
-        Self { working_dir, config }
+        Self {
+            working_dir,
+            config,
+        }
     }
 }
 
@@ -43,10 +55,21 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self { tools: vec![] };
+        // File operations
         registry.register(Box::new(ReadTool));
         registry.register(Box::new(WriteTool));
         registry.register(Box::new(EditTool));
+        registry.register(Box::new(ListTool));
+        // Search tools
+        registry.register(Box::new(GlobTool));
+        registry.register(Box::new(GrepTool));
+        // Shell execution
         registry.register(Box::new(BashTool));
+        // Web access
+        registry.register(Box::new(WebFetchTool));
+        // Task tracking
+        registry.register(Box::new(TodoWriteTool));
+        registry.register(Box::new(TodoReadTool));
         registry
     }
 
@@ -55,13 +78,15 @@ impl ToolRegistry {
     }
 
     pub fn get_tool(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.iter()
+        self.tools
+            .iter()
             .find(|t| t.name() == name)
             .map(|t| t.as_ref())
     }
 
     pub fn get_tools_schema(&self) -> Vec<serde_json::Value> {
-        self.tools.iter()
+        self.tools
+            .iter()
             .map(|tool| {
                 serde_json::json!({
                     "name": tool.name(),
