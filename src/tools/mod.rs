@@ -1,6 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::Path;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use crate::config::ToolConfig;
 
@@ -24,11 +26,16 @@ pub use todo::{TodoReadTool, TodoWriteTool};
 pub use webfetch::WebFetchTool;
 pub use write::WriteTool;
 
+/// Callback type for streaming output updates
+pub type OutputCallback = Arc<dyn Fn(String) + Send + Sync>;
+
 /// Context passed to tool execution containing working directory and configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolContext<'a> {
     pub working_dir: &'a Path,
     pub config: &'a ToolConfig,
+    /// Optional callback for streaming output (used by bash tool)
+    pub output_callback: Option<OutputCallback>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -36,6 +43,15 @@ impl<'a> ToolContext<'a> {
         Self {
             working_dir,
             config,
+            output_callback: None,
+        }
+    }
+
+    pub fn with_output_callback(working_dir: &'a Path, config: &'a ToolConfig, callback: OutputCallback) -> Self {
+        Self {
+            working_dir,
+            config,
+            output_callback: Some(callback),
         }
     }
 }

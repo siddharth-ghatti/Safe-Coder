@@ -18,7 +18,9 @@ use similar::{ChangeTag, TextDiff};
 use textwrap::wrap;
 
 use super::file_picker::FilePicker;
-use super::shell_app::{BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp};
+use super::shell_app::{
+    BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
+};
 
 // Crush-inspired color scheme
 const ACCENT_MAGENTA: Color = Color::Rgb(200, 100, 200); // Magenta for AI/logo
@@ -751,8 +753,50 @@ fn render_tool_strings(
     // Show diff if present
     if let Some(diff) = &block.diff {
         render_diff_strings(diff, width, lines);
+    } else if tool_name == "bash" {
+        // For bash commands, show streaming output inline (like Zed)
+        match &block.output {
+            BlockOutput::Streaming {
+                lines: output_lines,
+                ..
+            } => {
+                // Show last N lines of streaming output for compact view
+                let max_lines = 8;
+                let start = output_lines.len().saturating_sub(max_lines);
+                for line in output_lines.iter().skip(start) {
+                    let wrapped = wrap(line, width.saturating_sub(4));
+                    for wrapped_line in wrapped {
+                        lines.push(format!("  │ {}", wrapped_line));
+                    }
+                }
+                if output_lines.len() > max_lines {
+                    lines.push(format!(
+                        "  │ ... ({} more lines)",
+                        output_lines.len() - max_lines
+                    ));
+                }
+            }
+            BlockOutput::Success(output) if !output.is_empty() => {
+                // Show completed output (truncated)
+                let output_lines: Vec<&str> = output.lines().take(8).collect();
+                for line in output_lines {
+                    let wrapped = wrap(line, width.saturating_sub(4));
+                    for wrapped_line in wrapped {
+                        lines.push(format!("  │ {}", wrapped_line));
+                    }
+                }
+                let total_lines = output.lines().count();
+                if total_lines > 8 {
+                    lines.push(format!("  │ ... ({} more lines)", total_lines - 8));
+                }
+            }
+            BlockOutput::Error { message, .. } => {
+                lines.push(format!("  │ ✗ {}", message));
+            }
+            _ => {}
+        }
     }
-    // Otherwise show minimal output (or nothing for clean look)
+    // For other tools, keep minimal output (diffs only)
 }
 
 /// Render AI reasoning text (inline between tools)
@@ -877,7 +921,7 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     // Build full input string for manual wrapping
     let full_input = format!("> {}", app.input);
-    
+
     // Calculate wrap width, accounting for send hint space if input is not empty
     let hint_space = if app.input.is_empty() { 0 } else { 8 }; // "↵ send" + padding
     let wrap_width = inner.width.saturating_sub(1 + hint_space) as usize; // leave margin + hint space

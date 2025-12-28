@@ -64,6 +64,12 @@ enum AiUpdate {
         tool_name: String,
         output: String,
     },
+    /// Streaming bash output line (for inline display)
+    BashOutputLine {
+        block_id: String,
+        tool_name: String,
+        line: String,
+    },
     /// AI tool completed
     ToolComplete {
         block_id: String,
@@ -312,6 +318,42 @@ impl ShellTuiRunner {
                                     output
                                 };
                                 child.output = BlockOutput::Success(display_output);
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    AiUpdate::BashOutputLine {
+                        block_id,
+                        tool_name,
+                        line,
+                    } => {
+                        // Stream bash output inline to the tool's child block
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.iter_mut().rev().find(|c| {
+                                matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
+                            }) {
+                                // Append line to streaming output
+                                match &mut child.output {
+                                    BlockOutput::Streaming { lines, .. } => {
+                                        lines.push(line);
+                                    }
+                                    BlockOutput::Pending => {
+                                        child.output = BlockOutput::Streaming {
+                                            lines: vec![line],
+                                            complete: false,
+                                        };
+                                    }
+                                    _ => {
+                                        // If already complete, convert to streaming and add
+                                        let existing = child.output.get_text();
+                                        let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+                                        lines.push(line);
+                                        child.output = BlockOutput::Streaming {
+                                            lines,
+                                            complete: false,
+                                        };
+                                    }
+                                }
                             }
                         }
                         self.app.mark_dirty();
@@ -1054,6 +1096,13 @@ Keyboard:
                                 tool_name: name,
                                 output,
                             },
+                            SessionEvent::BashOutputLine { name, line } => {
+                                AiUpdate::BashOutputLine {
+                                    block_id: block_id_inner.clone(),
+                                    tool_name: name,
+                                    line,
+                                }
+                            }
                             SessionEvent::ToolComplete { name, success } => {
                                 AiUpdate::ToolComplete {
                                     block_id: block_id_inner.clone(),
