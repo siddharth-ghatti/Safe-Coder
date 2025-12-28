@@ -21,7 +21,9 @@ use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, Mutex};
 
-use super::shell_app::{AiCommand, BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp};
+use super::shell_app::{
+    AiCommand, BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
+};
 use super::shell_ui;
 use crate::config::Config;
 use crate::orchestrator::{Orchestrator, OrchestratorConfig};
@@ -420,6 +422,23 @@ impl ShellTuiRunner {
             // Ctrl+U - clear line
             KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.app.input_clear();
+            }
+
+            // Ctrl+P - cycle permission mode (YOLO/EDIT/ASK)
+            KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.app.cycle_permission_mode();
+                // Show feedback
+                let mode = self.app.permission_mode;
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    format!(
+                        "Permission mode: {} - {}",
+                        mode.short_name(),
+                        mode.description()
+                    ),
+                    prompt,
+                );
+                self.app.add_block(block);
             }
 
             // Regular character input
