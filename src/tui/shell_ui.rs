@@ -17,6 +17,7 @@ use ratatui::{
 use similar::{ChangeTag, TextDiff};
 use textwrap::wrap;
 
+use super::file_picker::FilePicker;
 use super::shell_app::{BlockType, CommandBlock, FileDiff, InputMode, PermissionMode, ShellTuiApp};
 
 // Crush-inspired color scheme
@@ -139,6 +140,11 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
             .constraints([Constraint::Min(3), Constraint::Length(3)])
             .split(horizontal_layout[0]);
         draw_autocomplete(f, app, main_layout[1]);
+    }
+
+    // Draw file picker dropup if visible
+    if app.file_picker.visible {
+        draw_file_picker(f, app, horizontal_layout[0]);
     }
 }
 
@@ -421,7 +427,7 @@ fn draw_modified_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 /// Draw help hints at bottom of sidebar
 fn draw_help_hints(f: &mut Frame, area: Rect) {
     let lines = vec![Line::from(Span::styled(
-        "ctrl+c quit · @ ai",
+        "/help · @file context",
         Style::default().fg(TEXT_MUTED),
     ))];
 
@@ -943,6 +949,175 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     };
 
     f.render_widget(paragraph, input_area);
+}
+
+/// Draw the file picker dropup menu above the input area
+fn draw_file_picker(f: &mut Frame, app: &ShellTuiApp, main_area: Rect) {
+    let filtered_entries = app.file_picker.filtered_entries();
+
+    if filtered_entries.is_empty() && app.file_picker.filter.is_empty() {
+        return;
+    }
+
+    // Calculate dimensions
+    let max_entries = 10;
+    let entry_count = filtered_entries.len().min(max_entries);
+    let height = (entry_count + 3) as u16; // +3 for border, title, and filter line
+
+    // Find max entry width for sizing
+    let max_name_width = filtered_entries
+        .iter()
+        .map(|e| e.name.len() + 8) // Icon + size space
+        .max()
+        .unwrap_or(20);
+    let width = (max_name_width as u16 + 4)
+        .min(main_area.width.saturating_sub(4))
+        .max(30);
+
+    // Position dropup above input area
+    let x = main_area.x + 2;
+    let y = main_area.height.saturating_sub(height + 3); // +3 for input area
+
+    let popup_area = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    // Build title with path
+    let title = if app.file_picker.current_dir.is_empty() {
+        " Files ".to_string()
+    } else {
+        format!(" {} ", app.file_picker.current_dir)
+    };
+
+    let popup_block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_CYAN))
+        .style(Style::default().bg(BG_DARK));
+
+    let inner = popup_block.inner(popup_area);
+
+    // Clear the area and draw block
+    f.render_widget(ratatui::widgets::Clear, popup_area);
+    f.render_widget(popup_block, popup_area);
+
+    // Draw filter input at top of picker
+    let filter_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: 1,
+    };
+
+    let filter_text = if app.file_picker.filter.is_empty() {
+        "Type to filter...".to_string()
+    } else {
+        app.file_picker.filter.clone()
+    };
+
+    let filter_style = if app.file_picker.filter.is_empty() {
+        Style::default().fg(TEXT_MUTED)
+    } else {
+        Style::default().fg(ACCENT_CYAN)
+    };
+
+    let filter_para = Paragraph::new(Line::from(vec![
+        Span::styled("🔍 ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled(filter_text, filter_style),
+    ]));
+    f.render_widget(filter_para, filter_area);
+
+    // Draw entries list
+    let list_area = Rect {
+        x: inner.x,
+        y: inner.y + 1,
+        width: inner.width,
+        height: inner.height.saturating_sub(1),
+    };
+
+    if filtered_entries.is_empty() {
+        let no_match = Paragraph::new(Line::from(Span::styled(
+            "No matches",
+            Style::default().fg(TEXT_MUTED),
+        )));
+        f.render_widget(no_match, list_area);
+        return;
+    }
+
+    let items: Vec<ListItem> = filtered_entries
+        .iter()
+        .enumerate()
+        .take(max_entries)
+        .map(|(i, entry)| {
+            let style = if i == app.file_picker.selected {
+                Style::default()
+                    .fg(BG_DARK)
+                    .bg(ACCENT_CYAN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+
+            // Icon based on type
+            let icon = if entry.is_dir {
+                "📁 "
+            } else {
+                // File icon based on extension
+                let ext = entry.name.rsplit('.').next().unwrap_or("");
+                match ext {
+                    "rs" => "🦀 ",
+                    "js" | "ts" | "jsx" | "tsx" => "📜 ",
+                    "py" => "🐍 ",
+                    "json" | "toml" | "yaml" | "yml" => "⚙️ ",
+                    "md" => "📝 ",
+                    "html" | "css" => "🌐 ",
+                    _ => "📄 ",
+                }
+            };
+
+            // Size display for files
+            let size_str = if let Some(size) = entry.size {
+                format!(" {}", FilePicker::format_size(size))
+            } else {
+                String::new()
+            };
+
+            // Truncate name if needed
+            let max_name_len =
+                (list_area.width as usize).saturating_sub(icon.len() + size_str.len() + 2);
+            let display_name = if entry.name.len() > max_name_len {
+                format!("{}...", &entry.name[..max_name_len.saturating_sub(3)])
+            } else {
+                entry.name.clone()
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::raw(icon),
+                Span::styled(display_name, style),
+                Span::styled(size_str, Style::default().fg(TEXT_DIM)),
+            ]))
+            .style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    f.render_widget(list, list_area);
+
+    // Show scroll indicator if more entries
+    if filtered_entries.len() > max_entries {
+        let more_text = format!("↓ {} more", filtered_entries.len() - max_entries);
+        let more_area = Rect {
+            x: popup_area.x + popup_area.width - more_text.len() as u16 - 2,
+            y: popup_area.y + popup_area.height - 1,
+            width: more_text.len() as u16 + 1,
+            height: 1,
+        };
+        let more_para = Paragraph::new(Span::styled(more_text, Style::default().fg(TEXT_MUTED)));
+        f.render_widget(more_para, more_area);
+    }
 }
 
 /// Draw the autocomplete popup above the input area
