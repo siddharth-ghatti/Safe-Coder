@@ -21,9 +21,7 @@ use tokio::io::{AsyncBufReadExt, BufReader as TokioBufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, Mutex};
 
-use super::shell_app::{
-    AiCommand, BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
-};
+use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
 use crate::config::Config;
 use crate::orchestrator::{Orchestrator, OrchestratorConfig};
@@ -443,12 +441,35 @@ impl ShellTuiRunner {
 
             // Regular character input
             KeyCode::Char(c) => {
-                self.app.input_push(c);
+                // Check if file picker is visible - send input there
+                if self.app.file_picker.visible {
+                    self.app.file_picker.filter_push(c);
+                    self.app.mark_dirty();
+                } else {
+                    self.app.input_push(c);
+
+                    // Trigger file picker when @ is typed
+                    if c == '@' {
+                        self.app.file_picker.open(&self.app.cwd);
+                        self.app.mark_dirty();
+                    }
+                }
             }
 
             // Backspace
             KeyCode::Backspace => {
-                self.app.input_pop();
+                if self.app.file_picker.visible {
+                    if self.app.file_picker.filter.is_empty() {
+                        // Close picker and remove the @ from input
+                        self.app.file_picker.close();
+                        self.app.input_pop(); // Remove the @
+                    } else {
+                        self.app.file_picker.filter_pop();
+                    }
+                    self.app.mark_dirty();
+                } else {
+                    self.app.input_pop();
+                }
             }
 
             // Delete
@@ -473,21 +494,29 @@ impl ShellTuiRunner {
 
             // Arrow keys
             KeyCode::Left => {
-                if self.app.autocomplete_visible() {
+                if self.app.file_picker.visible {
+                    // Left arrow does nothing in file picker
+                } else if self.app.autocomplete_visible() {
                     self.app.autocomplete.hide();
+                    self.app.cursor_left();
+                } else {
+                    self.app.cursor_left();
                 }
-                self.app.cursor_left();
             }
             KeyCode::Right => {
-                // Right arrow applies autocomplete if visible
-                if self.app.autocomplete_visible() {
+                if self.app.file_picker.visible {
+                    // Right arrow does nothing in file picker
+                } else if self.app.autocomplete_visible() {
                     self.app.apply_autocomplete();
                 } else {
                     self.app.cursor_right();
                 }
             }
             KeyCode::Up => {
-                if modifiers.contains(KeyModifiers::SHIFT) {
+                if self.app.file_picker.visible {
+                    self.app.file_picker.select_up();
+                    self.app.mark_dirty();
+                } else if modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Up scrolls up
                     self.app.scroll_up();
                 } else if self.app.autocomplete_visible() {
@@ -497,7 +526,10 @@ impl ShellTuiRunner {
                 }
             }
             KeyCode::Down => {
-                if modifiers.contains(KeyModifiers::SHIFT) {
+                if self.app.file_picker.visible {
+                    self.app.file_picker.select_down();
+                    self.app.mark_dirty();
+                } else if modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Down scrolls down
                     self.app.scroll_down();
                 } else if self.app.autocomplete_visible() {
@@ -523,9 +555,22 @@ impl ShellTuiRunner {
                 self.app.scroll_page_down();
             }
 
-            // Enter - submit command or apply autocomplete
+            // Enter - submit command or apply autocomplete/file picker
             KeyCode::Enter => {
-                if self.app.autocomplete_visible() {
+                if self.app.file_picker.visible {
+                    // Select file from picker
+                    let cwd = self.app.cwd.clone();
+                    if let Some(selected_path) = self.app.file_picker.select_current(&cwd) {
+                        // Remove the @ we typed and add the full file reference
+                        // Find the last @ in input and replace from there
+                        if let Some(at_pos) = self.app.input.rfind('@') {
+                            self.app.input.truncate(at_pos);
+                            self.app.input.push_str(&format!("@{} ", selected_path));
+                            self.app.cursor_pos = self.app.input.len();
+                        }
+                    }
+                    self.app.mark_dirty();
+                } else if self.app.autocomplete_visible() {
                     // Apply autocomplete selection
                     self.app.apply_autocomplete();
                 } else {
@@ -537,9 +582,16 @@ impl ShellTuiRunner {
                 }
             }
 
-            // Escape - cancel autocomplete or clear input
+            // Escape - cancel file picker, autocomplete, or clear input
             KeyCode::Esc => {
-                if self.app.autocomplete_visible() {
+                if self.app.file_picker.visible {
+                    self.app.file_picker.close();
+                    // Also remove the @ that triggered the picker
+                    if self.app.input.ends_with('@') {
+                        self.app.input_pop();
+                    }
+                    self.app.mark_dirty();
+                } else if self.app.autocomplete_visible() {
                     self.app.autocomplete.hide();
                     self.app.mark_dirty();
                 } else {
@@ -562,18 +614,23 @@ impl ShellTuiRunner {
     ) -> Result<()> {
         let input = input.trim();
 
-        // Check for AI command
-        if let Some(ai_cmd) = ShellTuiApp::parse_ai_command(input) {
-            return self.execute_ai_command(ai_cmd, input, ai_tx).await;
+        // Check for slash commands first (e.g., /connect, /help)
+        if let Some(slash_cmd) = ShellTuiApp::parse_slash_command(input) {
+            return self.execute_slash_command(slash_cmd, ai_tx).await;
         }
 
-        // Check for built-in commands
+        // Check for built-in shell commands (cd, pwd, exit, etc.)
         if ShellTuiApp::is_builtin_command(input) {
             return self.execute_builtin(input);
         }
 
-        // Execute as shell command
-        self.execute_shell_command(input, cmd_tx).await
+        // Check if it looks like a shell command
+        if ShellTuiApp::looks_like_shell_command(input) {
+            return self.execute_shell_command(input, cmd_tx).await;
+        }
+
+        // Otherwise, send to AI (with optional @file context)
+        self.execute_ai_query(input, ai_tx).await
     }
 
     /// Execute a built-in command
@@ -755,143 +812,101 @@ Keyboard Shortcuts:
         Ok(())
     }
 
-    /// Execute an AI command
-    async fn execute_ai_command(
+    /// Execute a slash command (e.g., /connect, /help)
+    async fn execute_slash_command(
         &mut self,
-        cmd: AiCommand,
-        original_input: &str,
-        tx: mpsc::UnboundedSender<AiUpdate>,
+        cmd: SlashCommand,
+        _tx: mpsc::UnboundedSender<AiUpdate>,
     ) -> Result<()> {
         match cmd {
-            AiCommand::Connect => {
+            SlashCommand::Connect => {
                 self.connect_ai().await?;
             }
 
-            AiCommand::Disconnect => {
+            SlashCommand::Disconnect => {
                 self.disconnect_ai();
             }
 
-            AiCommand::Query(query) => {
-                if !self.app.ai_connected {
-                    let prompt = self.app.current_prompt();
-                    let block = CommandBlock::system(
-                        "AI not connected. Run @connect first.".to_string(),
-                        prompt,
-                    );
-                    self.app.add_block(block);
-                    return Ok(());
-                }
-
-                // Create AI query block
+            SlashCommand::Help => {
                 let prompt = self.app.current_prompt();
-                let block = CommandBlock::new(query.clone(), BlockType::AiQuery, prompt);
-                let block_id = block.id.clone();
+                let help_text = r#"Safe Coder Shell - AI-Powered Development
+
+Commands:
+  /connect          Connect to AI
+  /disconnect       Disconnect from AI
+  /help             Show this help
+  /tools            List available AI tools
+  /mode             Toggle permission mode (ASK/EDIT/YOLO)
+  /orchestrate      Run multi-agent task
+
+Shell:
+  Type any shell command (ls, git, cargo, etc.)
+
+AI Queries:
+  Just type naturally - if it's not a shell command, it goes to AI
+  Use @filename to include file contents as context
+
+Examples:
+  fix the bug in auth @src/auth.rs
+  explain this code @main.rs @lib.rs
+  refactor to use async/await @src/**/*.rs
+
+Keyboard:
+  Ctrl+C      Cancel/exit
+  Ctrl+P      Toggle permission mode
+  Ctrl+L      Clear screen
+  Tab         Autocomplete"#;
+                let block = CommandBlock::system(help_text.to_string(), prompt);
                 self.app.add_block(block);
-                self.app.set_ai_thinking(true);
-
-                // Build context and send to AI
-                let context = self.app.build_ai_context();
-                let full_query = format!(
-                    "Context from shell session:\n{}\n\nUser query: {}",
-                    context, query
-                );
-
-                // Clone session for async task
-                if let Some(session) = &self.app.session {
-                    let session = Arc::clone(session);
-                    let ai_tx = tx.clone();
-                    let block_id_clone = block_id.clone();
-
-                    tokio::spawn(async move {
-                        let mut session = session.lock().await;
-
-                        // Create channel for session events
-                        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-
-                        // Spawn a task to forward SessionEvents to AiUpdates
-                        let block_id_inner = block_id_clone.clone();
-                        let ai_tx_inner = ai_tx.clone();
-                        let forwarder = tokio::spawn(async move {
-                            while let Some(event) = event_rx.recv().await {
-                                let update = match event {
-                                    SessionEvent::Thinking(msg) => AiUpdate::Thinking {
-                                        block_id: block_id_inner.clone(),
-                                        message: msg,
-                                    },
-                                    SessionEvent::ToolStart { name, description } => {
-                                        AiUpdate::ToolStart {
-                                            block_id: block_id_inner.clone(),
-                                            tool_name: name,
-                                            description,
-                                        }
-                                    }
-                                    SessionEvent::ToolOutput { name, output } => {
-                                        AiUpdate::ToolOutput {
-                                            block_id: block_id_inner.clone(),
-                                            tool_name: name,
-                                            output,
-                                        }
-                                    }
-                                    SessionEvent::ToolComplete { name, success } => {
-                                        AiUpdate::ToolComplete {
-                                            block_id: block_id_inner.clone(),
-                                            tool_name: name,
-                                            success,
-                                        }
-                                    }
-                                    SessionEvent::FileDiff {
-                                        path,
-                                        old_content,
-                                        new_content,
-                                    } => AiUpdate::FileDiff {
-                                        block_id: block_id_inner.clone(),
-                                        path,
-                                        old_content,
-                                        new_content,
-                                    },
-                                    SessionEvent::TextChunk(text) => AiUpdate::TextChunk {
-                                        block_id: block_id_inner.clone(),
-                                        text,
-                                    },
-                                };
-                                let _ = ai_tx_inner.send(update);
-                            }
-                        });
-
-                        // Call the new progress-aware method
-                        match session
-                            .send_message_with_progress(full_query, event_tx)
-                            .await
-                        {
-                            Ok(response) => {
-                                // Wait for forwarder to finish
-                                let _ = forwarder.await;
-
-                                let _ = ai_tx.send(AiUpdate::Response {
-                                    block_id: block_id_clone.clone(),
-                                    text: response,
-                                });
-                                let _ = ai_tx.send(AiUpdate::Complete {
-                                    block_id: block_id_clone,
-                                });
-                            }
-                            Err(e) => {
-                                forwarder.abort();
-                                let _ = ai_tx.send(AiUpdate::Error {
-                                    block_id: block_id_clone,
-                                    message: e.to_string(),
-                                });
-                            }
-                        }
-                    });
-                }
             }
 
-            AiCommand::Orchestrate(task) => {
+            SlashCommand::Tools => {
+                let prompt = self.app.current_prompt();
+                let tools_text = r#"Available AI Tools:
+
+  File Operations:
+    • read      - Read file contents
+    • write     - Write/create files
+    • edit      - Edit existing files
+    • list      - List directory contents
+
+  Search:
+    • glob      - Find files by pattern
+    • grep      - Search file contents
+
+  Execution:
+    • bash      - Run shell commands
+
+  Web:
+    • webfetch  - Fetch URL content
+
+  Task Tracking:
+    • todowrite - Update task list
+    • todoread  - Read task list"#;
+                let block = CommandBlock::system(tools_text.to_string(), prompt);
+                self.app.add_block(block);
+            }
+
+            SlashCommand::Mode => {
+                self.app.cycle_permission_mode();
+                let mode = self.app.permission_mode;
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    format!(
+                        "Permission mode: {} - {}",
+                        mode.short_name(),
+                        mode.description()
+                    ),
+                    prompt,
+                );
+                self.app.add_block(block);
+            }
+
+            SlashCommand::Orchestrate(task) => {
                 if task.is_empty() {
                     let prompt = self.app.current_prompt();
-                    let mut block = CommandBlock::system(
-                        "Usage: @orchestrate <task description>".to_string(),
+                    let block = CommandBlock::system(
+                        "Usage: /orchestrate <task description>".to_string(),
                         prompt,
                     );
                     self.app.add_block(block);
@@ -905,10 +920,9 @@ Keyboard Shortcuts:
                 self.app.add_block(block);
 
                 // TODO: Implement orchestration integration
-                // For now, show a placeholder
                 let prompt = self.app.current_prompt();
-                let mut msg_block = CommandBlock::system(
-                    "Orchestration support coming soon. Use the 'safe-coder orchestrate' command for now.".to_string(),
+                let msg_block = CommandBlock::system(
+                    "Orchestration support coming soon. Use 'safe-coder orchestrate' command for now.".to_string(),
                     prompt,
                 );
                 self.app.add_block(msg_block);
@@ -917,6 +931,180 @@ Keyboard Shortcuts:
                     block.complete("See above".to_string(), 0);
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Execute an AI query (natural language, possibly with @file context)
+    async fn execute_ai_query(
+        &mut self,
+        input: &str,
+        tx: mpsc::UnboundedSender<AiUpdate>,
+    ) -> Result<()> {
+        if !self.app.ai_connected {
+            let prompt = self.app.current_prompt();
+            let block =
+                CommandBlock::system("AI not connected. Run /connect first.".to_string(), prompt);
+            self.app.add_block(block);
+            return Ok(());
+        }
+
+        // Extract file context from @mentions
+        let (query, file_patterns) = ShellTuiApp::extract_file_context(input);
+
+        if query.is_empty() && file_patterns.is_empty() {
+            return Ok(());
+        }
+
+        // Build file context
+        let mut file_context = String::new();
+        for pattern in &file_patterns {
+            let file_path = self.app.cwd.join(pattern);
+            if file_path.exists() && file_path.is_file() {
+                match std::fs::read_to_string(&file_path) {
+                    Ok(content) => {
+                        file_context
+                            .push_str(&format!("\n--- File: {} ---\n{}\n", pattern, content));
+                    }
+                    Err(e) => {
+                        file_context
+                            .push_str(&format!("\n--- File: {} (error: {}) ---\n", pattern, e));
+                    }
+                }
+            } else {
+                // Try as glob pattern
+                let full_pattern = self.app.cwd.join(pattern);
+                if let Ok(entries) = glob::glob(&full_pattern.to_string_lossy()) {
+                    for entry in entries.filter_map(|e| e.ok()) {
+                        if entry.is_file() {
+                            if let Ok(content) = std::fs::read_to_string(&entry) {
+                                let rel_path = entry
+                                    .strip_prefix(&self.app.cwd)
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|_| entry.to_string_lossy().to_string());
+                                file_context.push_str(&format!(
+                                    "\n--- File: {} ---\n{}\n",
+                                    rel_path, content
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create AI query block
+        let display_input = if file_patterns.is_empty() {
+            input.to_string()
+        } else {
+            format!("{} (with {} file(s))", query, file_patterns.len())
+        };
+
+        let prompt = self.app.current_prompt();
+        let block = CommandBlock::new(display_input, BlockType::AiQuery, prompt);
+        let block_id = block.id.clone();
+        self.app.add_block(block);
+        self.app.set_ai_thinking(true);
+
+        // Build full context
+        let shell_context = self.app.build_ai_context();
+        let full_query = if file_context.is_empty() {
+            format!(
+                "Context from shell session:\n{}\n\nUser query: {}",
+                shell_context, query
+            )
+        } else {
+            format!(
+                "Context from shell session:\n{}\n\nFile contents:{}\n\nUser query: {}",
+                shell_context, file_context, query
+            )
+        };
+
+        // Clone session for async task
+        if let Some(session) = &self.app.session {
+            let session = Arc::clone(session);
+            let ai_tx = tx.clone();
+            let block_id_clone = block_id.clone();
+
+            tokio::spawn(async move {
+                let mut session = session.lock().await;
+
+                // Create channel for session events
+                let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+
+                // Spawn a task to forward SessionEvents to AiUpdates
+                let block_id_inner = block_id_clone.clone();
+                let ai_tx_inner = ai_tx.clone();
+                let forwarder = tokio::spawn(async move {
+                    while let Some(event) = event_rx.recv().await {
+                        let update = match event {
+                            SessionEvent::Thinking(msg) => AiUpdate::Thinking {
+                                block_id: block_id_inner.clone(),
+                                message: msg,
+                            },
+                            SessionEvent::ToolStart { name, description } => AiUpdate::ToolStart {
+                                block_id: block_id_inner.clone(),
+                                tool_name: name,
+                                description,
+                            },
+                            SessionEvent::ToolOutput { name, output } => AiUpdate::ToolOutput {
+                                block_id: block_id_inner.clone(),
+                                tool_name: name,
+                                output,
+                            },
+                            SessionEvent::ToolComplete { name, success } => {
+                                AiUpdate::ToolComplete {
+                                    block_id: block_id_inner.clone(),
+                                    tool_name: name,
+                                    success,
+                                }
+                            }
+                            SessionEvent::FileDiff {
+                                path,
+                                old_content,
+                                new_content,
+                            } => AiUpdate::FileDiff {
+                                block_id: block_id_inner.clone(),
+                                path,
+                                old_content,
+                                new_content,
+                            },
+                            SessionEvent::TextChunk(text) => AiUpdate::TextChunk {
+                                block_id: block_id_inner.clone(),
+                                text,
+                            },
+                        };
+                        let _ = ai_tx_inner.send(update);
+                    }
+                });
+
+                // Call the progress-aware method
+                match session
+                    .send_message_with_progress(full_query, event_tx)
+                    .await
+                {
+                    Ok(response) => {
+                        // Wait for forwarder to finish
+                        let _ = forwarder.await;
+
+                        let _ = ai_tx.send(AiUpdate::Response {
+                            block_id: block_id_clone.clone(),
+                            text: response,
+                        });
+                        let _ = ai_tx.send(AiUpdate::Complete {
+                            block_id: block_id_clone,
+                        });
+                    }
+                    Err(e) => {
+                        forwarder.abort();
+                        let _ = ai_tx.send(AiUpdate::Error {
+                            block_id: block_id_clone,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            });
         }
 
         Ok(())
@@ -943,7 +1131,7 @@ Keyboard Shortcuts:
                 self.app.session = Some(Arc::new(Mutex::new(session)));
                 self.app.set_ai_connected(true);
                 block.complete(
-                    "Connected to AI. Use @ <query> to ask questions.".to_string(),
+                    "Connected to AI. Just type naturally to ask questions. Use @file to add context.".to_string(),
                     0,
                 );
             }

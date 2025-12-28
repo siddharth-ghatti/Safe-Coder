@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::autocomplete::Autocomplete;
+use super::file_picker::FilePicker;
 use super::spinner::Spinner;
 use crate::config::Config;
 use crate::session::Session;
@@ -407,6 +408,8 @@ pub struct ShellTuiApp {
     pub search_result_pos: usize,
     /// Autocomplete state
     pub autocomplete: Autocomplete,
+    /// File picker for @mentions
+    pub file_picker: FilePicker,
 
     // === Animation/Render State ===
     /// Whether UI needs to be redrawn
@@ -455,6 +458,7 @@ impl ShellTuiApp {
             search_results: Vec::new(),
             search_result_pos: 0,
             autocomplete: Autocomplete::new(),
+            file_picker: FilePicker::new(),
 
             needs_redraw: true,
             animation_frame: 0,
@@ -466,14 +470,17 @@ impl ShellTuiApp {
         let welcome = format!(
             "Welcome to Safe Coder Shell!\n\n\
              Project: {}\n\n\
+             Usage:\n\
+             • Shell commands work normally (ls, git, cargo, etc.)\n\
+             • Just type naturally to ask AI for help\n\
+             • Use @file.rs to include file context\n\n\
              Commands:\n\
-             • Type shell commands normally (ls, git, cargo, etc.)\n\
-             • @ <query>     - Ask AI for help\n\
-             • @connect      - Connect to AI\n\
-             • @disconnect   - Disconnect from AI\n\
-             • @orchestrate  - Run multi-agent task\n\
+             • /connect      - Connect to AI\n\
+             • /disconnect   - Disconnect from AI\n\
+             • /help         - Show all commands\n\
+             • /mode         - Toggle permission mode\n\
              • exit          - Exit shell\n\n\
-             Press Ctrl+C to cancel running commands.",
+             Press Ctrl+C to cancel, Ctrl+P to change mode.",
             project_path.display()
         );
         let prompt = app.current_prompt();
@@ -895,23 +902,66 @@ impl ShellTuiApp {
         Ok(())
     }
 
-    /// Check if input is an AI command
-    pub fn is_ai_command(input: &str) -> bool {
-        input.starts_with('@')
+    /// Check if input is a slash command (e.g., /connect, /help)
+    pub fn is_slash_command(input: &str) -> bool {
+        input.starts_with('/')
     }
 
-    /// Check if input is a built-in command
+    /// Check if input is a built-in shell command
     pub fn is_builtin_command(input: &str) -> bool {
         let cmd = input.split_whitespace().next().unwrap_or("");
         matches!(
             cmd,
-            "cd" | "pwd" | "exit" | "quit" | "clear" | "history" | "export" | "env" | "help"
+            "cd" | "pwd" | "exit" | "quit" | "clear" | "history" | "export" | "env"
         )
     }
 
-    /// Parse AI command from input
-    pub fn parse_ai_command(input: &str) -> Option<AiCommand> {
-        if !input.starts_with('@') {
+    /// Check if input looks like a shell command (starts with common commands or contains shell operators)
+    pub fn looks_like_shell_command(input: &str) -> bool {
+        let first_word = input.split_whitespace().next().unwrap_or("");
+
+        // Common shell commands
+        let shell_commands = [
+            "ls", "cat", "grep", "find", "mkdir", "rm", "mv", "cp", "touch", "echo", "git",
+            "cargo", "npm", "yarn", "pnpm", "node", "python", "python3", "pip", "pip3", "make",
+            "cmake", "gcc", "clang", "rustc", "go", "java", "javac", "ruby", "perl", "php",
+            "docker", "kubectl", "curl", "wget", "ssh", "scp", "rsync", "tar", "zip", "unzip",
+            "head", "tail", "less", "more", "wc", "sort", "uniq", "awk", "sed", "chmod", "chown",
+            "sudo", "apt", "brew", "yum", "dnf", "pacman", "which", "where", "man", "diff",
+            "patch", "tree", "du", "df", "ps", "top", "htop", "kill", "killall", "ping", "nc",
+            "netstat", ".", "source", "bash", "sh", "zsh", "fish",
+        ];
+
+        // Check if starts with a known shell command
+        if shell_commands.contains(&first_word) {
+            return true;
+        }
+
+        // Check for shell operators/patterns
+        if input.contains('|')
+            || input.contains('>')
+            || input.contains('<')
+            || input.contains("&&")
+            || input.contains("||")
+            || input.starts_with("./")
+            || input.starts_with("../")
+            || first_word.starts_with("./")
+            || first_word.starts_with("../")
+        {
+            return true;
+        }
+
+        // Check if it looks like a path execution
+        if first_word.contains('/') && !first_word.starts_with('@') {
+            return true;
+        }
+
+        false
+    }
+
+    /// Parse slash command from input (e.g., /connect, /disconnect)
+    pub fn parse_slash_command(input: &str) -> Option<SlashCommand> {
+        if !input.starts_with('/') {
             return None;
         }
 
@@ -921,24 +971,48 @@ impl ShellTuiApp {
         let args = parts.get(1).map(|s| s.to_string());
 
         match cmd.as_str() {
-            "connect" => Some(AiCommand::Connect),
-            "disconnect" => Some(AiCommand::Disconnect),
-            "orchestrate" | "orch" => Some(AiCommand::Orchestrate(args.unwrap_or_default())),
-            "" => None, // Just "@" with nothing after
-            _ => Some(AiCommand::Query(rest.to_string())),
+            "connect" => Some(SlashCommand::Connect),
+            "disconnect" => Some(SlashCommand::Disconnect),
+            "orchestrate" | "orch" => Some(SlashCommand::Orchestrate(args.unwrap_or_default())),
+            "help" => Some(SlashCommand::Help),
+            "tools" => Some(SlashCommand::Tools),
+            "mode" => Some(SlashCommand::Mode),
+            _ => None,
         }
+    }
+
+    /// Extract file context patterns from input (words starting with @)
+    /// Returns (query_without_files, file_patterns)
+    pub fn extract_file_context(input: &str) -> (String, Vec<String>) {
+        let mut query_parts = Vec::new();
+        let mut file_patterns = Vec::new();
+
+        for word in input.split_whitespace() {
+            if word.starts_with('@') && word.len() > 1 {
+                // This is a file pattern
+                file_patterns.push(word[1..].to_string());
+            } else {
+                query_parts.push(word);
+            }
+        }
+
+        (query_parts.join(" "), file_patterns)
     }
 }
 
-/// AI commands parsed from @-prefixed input
+/// Slash commands (e.g., /connect, /help)
 #[derive(Debug, Clone)]
-pub enum AiCommand {
+pub enum SlashCommand {
     /// Connect to AI service
     Connect,
     /// Disconnect from AI service
     Disconnect,
     /// Run orchestration task
     Orchestrate(String),
-    /// Query AI with the given text
-    Query(String),
+    /// Show help
+    Help,
+    /// List available tools
+    Tools,
+    /// Show/toggle permission mode
+    Mode,
 }

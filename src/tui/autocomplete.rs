@@ -4,6 +4,7 @@
 //! - Commands from PATH
 //! - File and directory paths
 //! - Built-in shell commands
+//! - @file mentions for AI context
 
 use std::collections::HashSet;
 use std::env;
@@ -25,6 +26,8 @@ pub struct Autocomplete {
     path_commands: HashSet<String>,
     /// Whether PATH commands have been loaded
     path_loaded: bool,
+    /// Whether we're completing a @file mention
+    pub completing_at_mention: bool,
 }
 
 impl Default for Autocomplete {
@@ -42,6 +45,7 @@ impl Autocomplete {
             prefix: String::new(),
             path_commands: HashSet::new(),
             path_loaded: false,
+            completing_at_mention: false,
         }
     }
 
@@ -95,10 +99,25 @@ impl Autocomplete {
         self.ensure_path_loaded();
         self.suggestions.clear();
         self.selected = 0;
+        self.completing_at_mention = false;
 
         if input.is_empty() {
             self.visible = false;
             return;
+        }
+
+        // Check if we're completing an @file mention
+        // Find the last @ that might be a file mention
+        if let Some(at_pos) = input.rfind('@') {
+            let after_at = &input[at_pos + 1..];
+            // If there's no space after @, we're completing a file mention
+            if !after_at.contains(' ') {
+                self.completing_at_mention = true;
+                self.prefix = format!("@{}", after_at);
+                self.complete_at_mention(after_at, cwd);
+                self.visible = !self.suggestions.is_empty();
+                return;
+            }
         }
 
         // Parse the input to find what we're completing
@@ -122,6 +141,85 @@ impl Autocomplete {
         }
 
         self.visible = !self.suggestions.is_empty();
+    }
+
+    /// Complete @file mentions for AI context
+    fn complete_at_mention(&mut self, partial: &str, cwd: &Path) {
+        let (dir_path, file_prefix) = if partial.contains('/') {
+            let path = Path::new(partial);
+            if partial.ends_with('/') {
+                (partial.to_string(), String::new())
+            } else {
+                let parent = path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let file = path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                (parent, file)
+            }
+        } else {
+            (String::new(), partial.to_string())
+        };
+
+        // Resolve the directory to search
+        let search_dir = if dir_path.is_empty() {
+            cwd.to_path_buf()
+        } else {
+            cwd.join(&dir_path)
+        };
+
+        // Read directory entries
+        if let Ok(entries) = fs::read_dir(&search_dir) {
+            let prefix_lower = file_prefix.to_lowercase();
+
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    // Skip hidden files unless explicitly typing them
+                    if name.starts_with('.') && !file_prefix.starts_with('.') {
+                        continue;
+                    }
+
+                    if name.to_lowercase().starts_with(&prefix_lower) {
+                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+                        // Build the completion string with @ prefix
+                        let path_part = if dir_path.is_empty() {
+                            if is_dir {
+                                format!("{}/", name)
+                            } else {
+                                name.to_string()
+                            }
+                        } else {
+                            let sep = if dir_path.ends_with('/') { "" } else { "/" };
+                            if is_dir {
+                                format!("{}{}{}/", dir_path, sep, name)
+                            } else {
+                                format!("{}{}{}", dir_path, sep, name)
+                            }
+                        };
+
+                        self.suggestions.push(format!("@{}", path_part));
+                    }
+                }
+            }
+        }
+
+        // Sort: directories first, then alphabetically
+        self.suggestions.sort_by(|a, b| {
+            let a_is_dir = a.ends_with('/');
+            let b_is_dir = b.ends_with('/');
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.to_lowercase().cmp(&b.to_lowercase()),
+            }
+        });
+
+        // Limit suggestions
+        self.suggestions.truncate(15);
     }
 
     /// Complete command names
@@ -160,8 +258,14 @@ impl Autocomplete {
             if partial.ends_with('/') || partial.ends_with('\\') {
                 (partial.to_string(), String::new())
             } else {
-                let parent = path.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                let file = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                let parent = path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let file = path
+                    .file_name()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .unwrap_or_default();
                 (parent, file)
             }
         } else {
@@ -268,7 +372,10 @@ impl Autocomplete {
             Some(suggestion.to_string())
         } else {
             // Replacing the last argument
-            let last_start = input.rfind(|c: char| c.is_whitespace()).map(|i| i + 1).unwrap_or(0);
+            let last_start = input
+                .rfind(|c: char| c.is_whitespace())
+                .map(|i| i + 1)
+                .unwrap_or(0);
             let mut result = input[..last_start].to_string();
             result.push_str(suggestion);
             Some(result)
