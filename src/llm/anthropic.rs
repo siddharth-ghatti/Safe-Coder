@@ -221,14 +221,15 @@ impl LlmClient for AnthropicClient {
         system_prompt: Option<&str>,
     ) -> Result<Message> {
         // Build the system prompt:
-        // 1. If Claude Code OAuth compat is enabled, prepend that
-        // 2. Then add any provided system prompt
-        let final_system_prompt = match (self.claude_code_compat && self.is_oauth(), system_prompt)
-        {
-            (true, Some(custom)) => Some(format!("{}\n\n{}", CLAUDE_CODE_SYSTEM_PROMPT, custom)),
-            (true, None) => Some(CLAUDE_CODE_SYSTEM_PROMPT.to_string()),
-            (false, Some(custom)) => Some(custom.to_string()),
-            (false, None) => None,
+        // For OAuth with Claude Code compat, we MUST use ONLY the Claude Code system prompt.
+        // Anthropic's API rejects OAuth tokens if the system prompt is anything other than
+        // exactly the Claude Code identity prompt.
+        let final_system_prompt = if self.claude_code_compat && self.is_oauth() {
+            // OAuth requires exactly the Claude Code prompt - no additions allowed
+            Some(CLAUDE_CODE_SYSTEM_PROMPT.to_string())
+        } else {
+            // Non-OAuth can use any system prompt
+            system_prompt.map(|s| s.to_string())
         };
 
         let request = AnthropicRequest {
