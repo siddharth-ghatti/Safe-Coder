@@ -50,8 +50,22 @@ pub struct ToolDefinition {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn send_message(&self, messages: &[Message], tools: &[ToolDefinition])
-        -> Result<Message>;
+    /// Send a message to the LLM with optional system prompt
+    async fn send_message_with_system(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_prompt: Option<&str>,
+    ) -> Result<Message>;
+
+    /// Send a message to the LLM (backward compatible, no system prompt)
+    async fn send_message(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<Message> {
+        self.send_message_with_system(messages, tools, None).await
+    }
 }
 
 pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
@@ -88,19 +102,17 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
                         }
                     }
 
-                    // Log warning if using Claude Code OAuth compatibility mode
-                    if config.llm.claude_code_oauth_compat {
-                        tracing::warn!(
-                            "⚠️  BETA: Claude Code OAuth compatibility mode enabled. \
-                            This may violate Anthropic's Terms of Service."
-                        );
-                    }
+                    // OAuth REQUIRES Claude Code compatibility mode - always enable it
+                    // The Claude Code system prompt is required for OAuth tokens to work
+                    tracing::info!(
+                        "OAuth authentication requires Claude Code compatibility mode (auto-enabled)"
+                    );
 
                     return Ok(Box::new(anthropic::AnthropicClient::with_token_manager(
                         token_manager,
                         config.llm.model.clone(),
                         config.llm.max_tokens,
-                        config.llm.claude_code_oauth_compat,
+                        true, // Always enable for OAuth - it's required
                     )));
                 }
 

@@ -70,9 +70,10 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         return;
     }
 
-    // Calculate available width for content (leave space for potential scrollbar)
-    let content_width = (area.width.saturating_sub(2)) as usize;
-    let content_width = content_width.max(20);
+    // Calculate available width for content (more generous than input area)
+    let available_width = area.width.saturating_sub(2); // Account for borders and padding
+    let effective_width = (available_width as usize * 85) / 100; // Use 85% of width for better readability
+    let effective_width = effective_width.max(30); // Ensure reasonable minimum width
 
     // Build all lines from messages
     let mut all_lines: Vec<Line> = Vec::new();
@@ -80,11 +81,14 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     for msg in app.messages.iter() {
         // Tool messages get special compact formatting
         if msg.message_type == MessageType::Tool {
-            all_lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled("⚙ ", Style::default().fg(ACCENT_AMBER)),
-                Span::styled(&msg.content, Style::default().fg(TEXT_DIM)),
-            ]));
+            let tool_wrapped = wrap(&msg.content, effective_width.saturating_sub(4)); // Account for "  ⚙ " prefix
+            for line in tool_wrapped.iter() {
+                all_lines.push(Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled("⚙ ", Style::default().fg(ACCENT_AMBER)),
+                    Span::styled(line.to_string(), Style::default().fg(TEXT_DIM)),
+                ]));
+            }
             continue;
         }
 
@@ -110,7 +114,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         )]));
 
         // Message content - wrapped to fit width
-        let wrapped = wrap(&msg.content, content_width.saturating_sub(2));
+        let wrapped = wrap(&msg.content, effective_width.saturating_sub(2));
         for line in wrapped.iter() {
             all_lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()), // Indent content

@@ -43,9 +43,9 @@ const PULSE_CHARS: &[&str] = &["◐", "◓", "◑", "◒"];
 const THINKING_FRAMES: &[&str] = &["🧠", "💭", "💡", "✨"];
 
 // Sidebar constraints
-const SIDEBAR_MIN_WIDTH: u16 = 28;
-const SIDEBAR_PREFERRED_WIDTH: u16 = 48; // Wide enough for full logo
-const MIN_MAIN_WIDTH: u16 = 50; // Minimum main content area
+const SIDEBAR_MIN_WIDTH: u16 = 24;
+const SIDEBAR_PREFERRED_WIDTH: u16 = 36; // Narrower sidebar
+const MIN_MAIN_WIDTH: u16 = 60; // More space for main content
 
 /// Full ASCII art logo (needs ~45 chars width)
 const LOGO_FULL: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
@@ -150,15 +150,28 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     }
 }
 
+/// Calculate the wrap width for input - must match between height calculation and rendering
+fn calculate_input_wrap_width(area_width: u16) -> usize {
+    // Inner area has 2 chars less (1 on each side for padding)
+    let inner_width = area_width.saturating_sub(4); // Extra margin for safety
+                                                    // Reserve space for "↵ send" hint (8 chars) + extra padding
+    let hint_space: u16 = 12;
+    let wrap_width = inner_width.saturating_sub(hint_space) as usize;
+    // Use 90% of remaining width for more aggressive wrapping
+    let wrap_width = (wrap_width * 90) / 100;
+    wrap_width.max(10) // minimum 10 chars
+}
+
 /// Draw the main content area (left side)
 fn draw_main_content(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
     // Calculate input height based on content (for word wrap)
-    // Be aggressive: use 70% of width to trigger wrap earlier and account for prompt/margins
-    let effective_width = (area.width.saturating_sub(6) as usize * 70) / 100;
-    let effective_width = effective_width.max(10); // minimum 10 chars
+    // Use the same wrap width calculation as draw_input for consistency
+    let wrap_width = calculate_input_wrap_width(area.width);
     let input_char_count = app.input.chars().count() + 2; // +2 for "> " prompt
-    let input_lines = if effective_width > 0 {
-        ((input_char_count / effective_width) + 1).max(1).min(6) as u16 // max 6 lines
+    let input_lines = if wrap_width > 0 {
+        ((input_char_count + wrap_width - 1) / wrap_width)
+            .max(1)
+            .min(8) as u16 // max 8 lines
     } else {
         1
     };
@@ -355,13 +368,22 @@ fn draw_model_info(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_frame
 
 /// Draw permission mode section with animated indicator
 fn draw_permission_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_frame: usize) {
-    let mode = app.permission_mode;
+    use crate::tools::AgentMode;
 
-    // Mode-specific colors and icons
-    let (mode_color, mode_icon) = match mode {
+    let perm_mode = app.permission_mode;
+    let agent_mode = app.agent_mode;
+
+    // Permission mode colors and icons
+    let (perm_color, perm_icon) = match perm_mode {
         PermissionMode::Yolo => (ACCENT_RED, "👹"),
         PermissionMode::Edit => (ACCENT_AMBER, "✏"),
         PermissionMode::Ask => (ACCENT_GREEN, "🛡"),
+    };
+
+    // Agent mode colors and icons
+    let (agent_color, agent_icon) = match agent_mode {
+        AgentMode::Plan => (ACCENT_CYAN, "🔍"),
+        AgentMode::Build => (ACCENT_GREEN, "🔨"),
     };
 
     // Subtle pulsing animation for the mode indicator
@@ -373,19 +395,34 @@ fn draw_permission_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("Mode ", Style::default().fg(TEXT_DIM)),
-            Span::styled("───────────", Style::default().fg(BORDER_DIM)),
+            Span::styled("Modes ", Style::default().fg(TEXT_DIM)),
+            Span::styled("──────────", Style::default().fg(BORDER_DIM)),
         ]),
+        // Agent mode line
         Line::from(vec![
-            Span::styled(format!("{} ", mode_icon), Style::default().fg(mode_color)),
+            Span::styled(format!("{} ", agent_icon), Style::default().fg(agent_color)),
             Span::styled(
-                mode.short_name(),
-                Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+                agent_mode.short_name(),
+                Style::default()
+                    .fg(agent_color)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!(" {}", pulse), Style::default().fg(mode_color)),
+            Span::styled(format!(" {}", pulse), Style::default().fg(agent_color)),
         ]),
         Line::from(Span::styled(
-            format!("ctrl+p: {}", mode.description()),
+            "ctrl+g: toggle",
+            Style::default().fg(TEXT_MUTED),
+        )),
+        // Permission mode line
+        Line::from(vec![
+            Span::styled(format!("{} ", perm_icon), Style::default().fg(perm_color)),
+            Span::styled(
+                perm_mode.short_name(),
+                Style::default().fg(perm_color).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "ctrl+p: toggle",
             Style::default().fg(TEXT_MUTED),
         )),
     ];
@@ -922,10 +959,8 @@ fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Build full input string for manual wrapping
     let full_input = format!("> {}", app.input);
 
-    // Calculate wrap width, accounting for send hint space if input is not empty
-    let hint_space = if app.input.is_empty() { 0 } else { 8 }; // "↵ send" + padding
-    let wrap_width = inner.width.saturating_sub(1 + hint_space) as usize; // leave margin + hint space
-    let wrap_width = wrap_width.max(5);
+    // Use consistent wrap width calculation (same as height calculation)
+    let wrap_width = calculate_input_wrap_width(area.width);
 
     // Manually wrap the text into lines
     let wrapped_lines: Vec<String> = if wrap_width > 0 {

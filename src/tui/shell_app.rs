@@ -16,6 +16,7 @@ use super::file_picker::FilePicker;
 use super::spinner::Spinner;
 use crate::config::Config;
 use crate::session::Session;
+use crate::tools::AgentMode;
 
 /// Permission mode for tool execution
 /// Controls how much user approval is required
@@ -386,6 +387,8 @@ pub struct ShellTuiApp {
     pub config: Config,
     /// Permission mode for tool execution (YOLO/EDIT/ASK)
     pub permission_mode: PermissionMode,
+    /// Agent mode for tool availability (PLAN/BUILD)
+    pub agent_mode: AgentMode,
 
     // === UI State ===
     /// Current input text
@@ -447,6 +450,7 @@ impl ShellTuiApp {
             ai_context_commands: DEFAULT_AI_CONTEXT_COMMANDS,
             config,
             permission_mode: PermissionMode::default(),
+            agent_mode: AgentMode::default(),
 
             input: String::new(),
             cursor_pos: 0,
@@ -820,6 +824,18 @@ impl ShellTuiApp {
     /// Cycle to next permission mode
     pub fn cycle_permission_mode(&mut self) {
         self.permission_mode = self.permission_mode.next();
+        self.needs_redraw = true;
+    }
+
+    /// Cycle to next agent mode (PLAN/BUILD)
+    pub fn cycle_agent_mode(&mut self) {
+        self.agent_mode = self.agent_mode.next();
+        self.needs_redraw = true;
+    }
+
+    /// Set agent mode directly
+    pub fn set_agent_mode(&mut self, mode: AgentMode) {
+        self.agent_mode = mode;
         self.needs_redraw = true;
     }
 

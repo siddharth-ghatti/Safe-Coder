@@ -214,23 +214,28 @@ impl AnthropicClient {
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
-    async fn send_message(
+    async fn send_message_with_system(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        system_prompt: Option<&str>,
     ) -> Result<Message> {
-        // Determine if we should inject the Claude Code system prompt
-        // This is needed for OAuth tokens to work with the API
-        let system_prompt = if self.claude_code_compat && self.is_oauth() {
+        // Build the system prompt:
+        // For OAuth with Claude Code compat, we MUST use ONLY the Claude Code system prompt.
+        // Anthropic's API rejects OAuth tokens if the system prompt is anything other than
+        // exactly the Claude Code identity prompt.
+        let final_system_prompt = if self.claude_code_compat && self.is_oauth() {
+            // OAuth requires exactly the Claude Code prompt - no additions allowed
             Some(CLAUDE_CODE_SYSTEM_PROMPT.to_string())
         } else {
-            None
+            // Non-OAuth can use any system prompt
+            system_prompt.map(|s| s.to_string())
         };
 
         let request = AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            system: system_prompt,
+            system: final_system_prompt,
             messages: messages
                 .iter()
                 .map(Self::convert_message_to_anthropic)
@@ -271,6 +276,17 @@ impl LlmClient for AnthropicClient {
             req_builder = req_builder.header("x-api-key", api_key);
         }
 
+        // Debug log the request for troubleshooting
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(
+                "Anthropic request: model={}, system_len={}, messages={}, tools={}",
+                request.model,
+                request.system.as_ref().map(|s| s.len()).unwrap_or(0),
+                request.messages.len(),
+                request.tools.len()
+            );
+        }
+
         let response = req_builder
             .json(&request)
             .send()
@@ -280,6 +296,14 @@ impl LlmClient for AnthropicClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await?;
+            // Log more detail for debugging
+            tracing::error!(
+                "Anthropic API error: status={}, is_oauth={}, model={}, error={}",
+                status,
+                is_oauth,
+                self.model,
+                text
+            );
             anyhow::bail!("Anthropic API error ({}): {}", status, text);
         }
 

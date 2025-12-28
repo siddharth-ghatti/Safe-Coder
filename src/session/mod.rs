@@ -8,12 +8,16 @@ use tokio::sync::mpsc;
 use crate::approval::{ApprovalMode, ExecutionMode, ExecutionPlan, PlannedTool};
 use crate::checkpoint::CheckpointManager;
 use crate::config::Config;
+use crate::context::ContextManager;
 use crate::custom_commands::CustomCommandManager;
 use crate::git::GitManager;
 use crate::llm::{create_client, ContentBlock, LlmClient, Message, ToolDefinition};
+use crate::loop_detector::{DoomLoopAction, LoopDetector};
 use crate::memory::MemoryManager;
+use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
-use crate::tools::{ToolContext, ToolRegistry};
+use crate::prompts;
+use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
@@ -47,11 +51,15 @@ pub struct Session {
 
     // Safety & tracking
     git_manager: GitManager,
+    loop_detector: LoopDetector,
+    context_manager: ContextManager,
+    permission_manager: PermissionManager,
 
     // Features
     persistence: SessionPersistence,
     approval_mode: ApprovalMode,
     execution_mode: ExecutionMode,
+    agent_mode: AgentMode,
     stats: SessionStats,
     memory: MemoryManager,
     checkpoints: CheckpointManager,
@@ -83,10 +91,14 @@ impl Session {
             project_path: project_path.clone(),
 
             git_manager,
+            loop_detector: LoopDetector::new(),
+            context_manager: ContextManager::new(),
+            permission_manager: PermissionManager::new(),
 
             persistence,
             approval_mode: ApprovalMode::default(),
             execution_mode: ExecutionMode::default(),
+            agent_mode: AgentMode::default(),
             stats: SessionStats::new(),
             memory,
             checkpoints,
@@ -106,6 +118,39 @@ impl Session {
     /// Get current execution mode
     pub fn execution_mode(&self) -> ExecutionMode {
         self.execution_mode
+    }
+
+    /// Set agent mode (Plan or Build)
+    pub fn set_agent_mode(&mut self, mode: AgentMode) {
+        self.agent_mode = mode;
+        tracing::info!("Agent mode set to: {}", mode);
+    }
+
+    /// Get current agent mode
+    pub fn agent_mode(&self) -> AgentMode {
+        self.agent_mode
+    }
+
+    /// Cycle to next agent mode
+    pub fn cycle_agent_mode(&mut self) {
+        self.agent_mode = self.agent_mode.next();
+        tracing::info!("Agent mode cycled to: {}", self.agent_mode);
+    }
+
+    /// Apply a permission preset (safe, dev, full, yolo)
+    pub fn apply_permission_preset(&mut self, preset: &str) {
+        self.permission_manager.apply_preset(preset);
+        tracing::info!("Applied permission preset: {}", preset);
+    }
+
+    /// Get permission manager summary
+    pub fn permission_summary(&self) -> String {
+        self.permission_manager.summary()
+    }
+
+    /// Get mutable reference to permission manager for advanced configuration
+    pub fn permissions_mut(&mut self) -> &mut PermissionManager {
+        &mut self.permission_manager
     }
 
     pub async fn start(&mut self) -> Result<()> {
@@ -133,13 +178,30 @@ impl Session {
         // Add user message to history
         self.messages.push(Message::user(user_message.clone()));
 
+        // Check if context compaction is needed
+        if self.context_manager.needs_compaction(&self.messages) {
+            let (compacted, summary) = self
+                .context_manager
+                .compact(std::mem::take(&mut self.messages));
+            self.messages = compacted;
+            if !summary.is_empty() {
+                tracing::info!("Context compacted: {}", summary);
+            }
+        }
+
         let mut response_text = String::new();
+
+        // Build hierarchical system prompt
+        let project_context = self.memory.get_system_prompt().await.ok();
+        let system_prompt =
+            prompts::build_system_prompt(self.agent_mode, project_context.as_deref(), None);
 
         loop {
             // Get tools schema
+            // Get tools filtered by current agent mode
             let tools: Vec<ToolDefinition> = self
                 .tool_registry
-                .get_tools_schema()
+                .get_tools_schema_for_mode(self.agent_mode)
                 .into_iter()
                 .map(|schema| ToolDefinition {
                     name: schema["name"].as_str().unwrap().to_string(),
@@ -148,8 +210,11 @@ impl Session {
                 })
                 .collect();
 
-            // Send to LLM
-            let assistant_message = self.llm_client.send_message(&self.messages, &tools).await?;
+            // Send to LLM with hierarchical system prompt
+            let assistant_message = self
+                .llm_client
+                .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                .await?;
 
             // Track stats (approximate token counting)
             self.stats.total_tokens_sent += user_message.len() / 4; // Rough estimate
@@ -261,19 +326,59 @@ impl Session {
 
                     tracing::info!("🔧 Executing tool: {}", name);
 
+                    // Check if tool is allowed in current agent mode
+                    if !self
+                        .tool_registry
+                        .can_execute_in_mode(name, self.agent_mode)
+                    {
+                        let result = format!(
+                            "Error: Tool '{}' is not available in {} mode. Switch to BUILD mode to use this tool.",
+                            name, self.agent_mode
+                        );
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: result,
+                        });
+                        continue;
+                    }
+
+                    // Check for doom loop (repeated identical tool calls)
+                    match self.loop_detector.check(name, input) {
+                        DoomLoopAction::Block { message } => {
+                            tracing::warn!("Doom loop blocked: {}", message);
+                            tool_results.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: message,
+                            });
+                            continue;
+                        }
+                        DoomLoopAction::Warn { message } | DoomLoopAction::AskUser { message } => {
+                            tracing::warn!("{}", message);
+                        }
+                        DoomLoopAction::Continue => {}
+                    }
+
                     // Create tool context with working directory and config
                     let tool_ctx = ToolContext::new(&self.project_path, &self.config.tools);
 
-                    let result = match self.tool_registry.get_tool(name) {
+                    let (result, success) = match self.tool_registry.get_tool(name) {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
                             Ok(output) => {
                                 tools_executed.push(name.clone());
-                                output
+                                (output, true)
                             }
-                            Err(e) => format!("Error: {}", e),
+                            Err(e) => (format!("Error: {}", e), false),
                         },
-                        None => format!("Error: Unknown tool '{}'", name),
+                        None => (format!("Error: Unknown tool '{}'", name), false),
                     };
+
+                    // Record tool call for doom loop detection
+                    self.loop_detector.record(name, input);
+                    if success {
+                        self.loop_detector.record_success();
+                    } else {
+                        self.loop_detector.record_failure(&result);
+                    }
 
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
@@ -320,16 +425,37 @@ impl Session {
         // Add user message to history
         self.messages.push(Message::user(user_message.clone()));
 
+        // Check if context compaction is needed
+        if self.context_manager.needs_compaction(&self.messages) {
+            let (compacted, summary) = self
+                .context_manager
+                .compact(std::mem::take(&mut self.messages));
+            self.messages = compacted;
+            if !summary.is_empty() {
+                tracing::info!("Context compacted: {}", summary);
+                let _ = event_tx.send(SessionEvent::TextChunk(format!(
+                    "\n📦 Context compacted: {}\n",
+                    summary
+                )));
+            }
+        }
+
         let mut response_text = String::new();
+
+        // Build hierarchical system prompt
+        let project_context = self.memory.get_system_prompt().await.ok();
+        let system_prompt =
+            prompts::build_system_prompt(self.agent_mode, project_context.as_deref(), None);
 
         loop {
             // Notify UI that we're thinking
             let _ = event_tx.send(SessionEvent::Thinking("Processing...".to_string()));
 
             // Get tools schema
+            // Get tools filtered by current agent mode
             let tools: Vec<ToolDefinition> = self
                 .tool_registry
-                .get_tools_schema()
+                .get_tools_schema_for_mode(self.agent_mode)
                 .into_iter()
                 .map(|schema| ToolDefinition {
                     name: schema["name"].as_str().unwrap().to_string(),
@@ -338,8 +464,11 @@ impl Session {
                 })
                 .collect();
 
-            // Send to LLM
-            let assistant_message = self.llm_client.send_message(&self.messages, &tools).await?;
+            // Send to LLM with hierarchical system prompt
+            let assistant_message = self
+                .llm_client
+                .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                .await?;
 
             // Track stats
             self.stats.total_tokens_sent += user_message.len() / 4;
@@ -390,6 +519,70 @@ impl Session {
                             tool_name: name.clone(),
                             count: 1,
                         });
+                    }
+
+                    // Check if tool is allowed in current agent mode
+                    if !self
+                        .tool_registry
+                        .can_execute_in_mode(name, self.agent_mode)
+                    {
+                        let result = format!(
+                            "Error: Tool '{}' is not available in {} mode. Switch to BUILD mode to use this tool.",
+                            name, self.agent_mode
+                        );
+                        let _ = event_tx.send(SessionEvent::ToolStart {
+                            name: name.clone(),
+                            description: format!("Blocked: {}", name),
+                        });
+                        let _ = event_tx.send(SessionEvent::ToolOutput {
+                            name: name.clone(),
+                            output: result.clone(),
+                        });
+                        let _ = event_tx.send(SessionEvent::ToolComplete {
+                            name: name.clone(),
+                            success: false,
+                        });
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: result,
+                        });
+                        continue;
+                    }
+
+                    // Check for doom loop (repeated identical tool calls)
+                    match self.loop_detector.check(name, input) {
+                        DoomLoopAction::Block { message } => {
+                            let _ = event_tx.send(SessionEvent::ToolStart {
+                                name: name.clone(),
+                                description: format!("Blocked (doom loop): {}", name),
+                            });
+                            let _ = event_tx.send(SessionEvent::ToolOutput {
+                                name: name.clone(),
+                                output: message.clone(),
+                            });
+                            let _ = event_tx.send(SessionEvent::ToolComplete {
+                                name: name.clone(),
+                                success: false,
+                            });
+                            tool_results.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: message,
+                            });
+                            continue;
+                        }
+                        DoomLoopAction::Warn { message } => {
+                            // Log warning but continue
+                            tracing::warn!("{}", message);
+                            let _ =
+                                event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
+                        }
+                        DoomLoopAction::AskUser { message } => {
+                            // For now, treat as warning (full approval would require UI changes)
+                            tracing::warn!("{}", message);
+                            let _ =
+                                event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
+                        }
+                        DoomLoopAction::Continue => {}
                     }
 
                     // Generate description for the tool action
@@ -452,6 +645,21 @@ impl Session {
                         },
                         None => (format!("Error: Unknown tool '{}'", name), false),
                     };
+
+                    // Record tool call for doom loop detection
+                    self.loop_detector.record(name, input);
+                    if success {
+                        self.loop_detector.record_success();
+                    } else {
+                        self.loop_detector.record_failure(&result);
+                        // Check for failure loop
+                        if let Some(DoomLoopAction::AskUser { message }) =
+                            self.loop_detector.check_failure_loop()
+                        {
+                            let _ =
+                                event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
+                        }
+                    }
 
                     // For edit_file, send diff if we have old content
                     // Note: edit_file uses "file_path", write_file uses "path"

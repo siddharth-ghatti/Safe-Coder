@@ -81,7 +81,12 @@ struct OpenAiResponseMessage {
 }
 
 impl OpenAiClient {
-    pub fn new(api_key: String, model: String, max_tokens: usize, base_url: Option<String>) -> Self {
+    pub fn new(
+        api_key: String,
+        model: String,
+        max_tokens: usize,
+        base_url: Option<String>,
+    ) -> Self {
         Self {
             api_key,
             model,
@@ -140,12 +145,26 @@ impl OpenAiClient {
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
-    async fn send_message(
+    async fn send_message_with_system(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        system_prompt: Option<&str>,
     ) -> Result<Message> {
-        let openai_messages = self.convert_messages(messages);
+        // Build messages, prepending system prompt if provided
+        let mut openai_messages = Vec::new();
+
+        if let Some(system) = system_prompt {
+            openai_messages.push(OpenAiMessage {
+                role: "system".to_string(),
+                content: Some(system.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+        }
+
+        openai_messages.extend(self.convert_messages(messages));
 
         let openai_tools: Vec<OpenAiTool> = tools
             .iter()
@@ -199,17 +218,14 @@ impl LlmClient for OpenAiClient {
         // Add text content if present
         if let Some(text) = &choice.message.content {
             if !text.is_empty() {
-                content_blocks.push(ContentBlock::Text {
-                    text: text.clone(),
-                });
+                content_blocks.push(ContentBlock::Text { text: text.clone() });
             }
         }
 
         // Add tool calls if present
         for tool_call in &choice.message.tool_calls {
-            let input: serde_json::Value =
-                serde_json::from_str(&tool_call.function.arguments)
-                    .unwrap_or(serde_json::Value::Null);
+            let input: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+                .unwrap_or(serde_json::Value::Null);
 
             content_blocks.push(ContentBlock::ToolUse {
                 id: tool_call.id.clone(),
