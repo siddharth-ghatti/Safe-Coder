@@ -50,8 +50,22 @@ pub struct ToolDefinition {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn send_message(&self, messages: &[Message], tools: &[ToolDefinition])
-        -> Result<Message>;
+    /// Send a message to the LLM with optional system prompt
+    async fn send_message_with_system(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        system_prompt: Option<&str>,
+    ) -> Result<Message>;
+
+    /// Send a message to the LLM (backward compatible, no system prompt)
+    async fn send_message(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+    ) -> Result<Message> {
+        self.send_message_with_system(messages, tools, None).await
+    }
 }
 
 pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {

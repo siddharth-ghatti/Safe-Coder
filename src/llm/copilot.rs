@@ -165,12 +165,25 @@ impl CopilotClient {
 
 #[async_trait]
 impl LlmClient for CopilotClient {
-    async fn send_message(
+    async fn send_message_with_system(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        system_prompt: Option<&str>,
     ) -> Result<Message> {
-        let copilot_messages = self.convert_messages(messages);
+        // Build messages, prepending system prompt if provided
+        let mut copilot_messages = Vec::new();
+
+        if let Some(system) = system_prompt {
+            copilot_messages.push(CopilotMessage {
+                role: "system".to_string(),
+                content: Some(system.to_string()),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        copilot_messages.extend(self.convert_messages(messages));
 
         let copilot_tools: Vec<CopilotTool> = tools
             .iter()
@@ -225,17 +238,14 @@ impl LlmClient for CopilotClient {
         // Add text content if present
         if let Some(text) = &choice.message.content {
             if !text.is_empty() {
-                content_blocks.push(ContentBlock::Text {
-                    text: text.clone(),
-                });
+                content_blocks.push(ContentBlock::Text { text: text.clone() });
             }
         }
 
         // Add tool calls if present
         for tool_call in &choice.message.tool_calls {
-            let input: serde_json::Value =
-                serde_json::from_str(&tool_call.function.arguments)
-                    .unwrap_or(serde_json::Value::Null);
+            let input: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)
+                .unwrap_or(serde_json::Value::Null);
 
             content_blocks.push(ContentBlock::ToolUse {
                 id: tool_call.id.clone(),

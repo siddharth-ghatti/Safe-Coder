@@ -1,10 +1,86 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 use crate::config::ToolConfig;
+
+/// Agent execution mode - controls which tools are available
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentMode {
+    /// Plan mode: Read-only exploration tools only
+    /// Use this to explore, understand, and plan before making changes
+    Plan,
+    /// Build mode: Full tool access including file modifications and bash
+    #[default]
+    Build,
+}
+
+impl AgentMode {
+    /// Get the list of tool names available in this mode
+    pub fn enabled_tools(&self) -> &'static [&'static str] {
+        match self {
+            AgentMode::Plan => &[
+                "read_file", // Read files
+                "list_file", // List directories
+                "glob",      // Find files by pattern
+                "grep",      // Search file contents
+                "webfetch",  // Fetch web content
+                "todoread",  // Read task list
+            ],
+            AgentMode::Build => &[
+                "read_file",
+                "write_file",
+                "edit_file",
+                "list_file",
+                "glob",
+                "grep",
+                "bash",
+                "webfetch",
+                "todowrite",
+                "todoread",
+            ],
+        }
+    }
+
+    /// Check if a specific tool is enabled in this mode
+    pub fn is_tool_enabled(&self, tool_name: &str) -> bool {
+        self.enabled_tools().contains(&tool_name)
+    }
+
+    /// Get a description of this mode for display
+    pub fn description(&self) -> &'static str {
+        match self {
+            AgentMode::Plan => {
+                "Read-only exploration mode. Analyze the codebase before making changes."
+            }
+            AgentMode::Build => "Full execution mode. Can modify files and run commands.",
+        }
+    }
+
+    /// Get short display name
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            AgentMode::Plan => "PLAN",
+            AgentMode::Build => "BUILD",
+        }
+    }
+
+    /// Cycle to next mode
+    pub fn next(self) -> Self {
+        match self {
+            AgentMode::Plan => AgentMode::Build,
+            AgentMode::Build => AgentMode::Plan,
+        }
+    }
+}
+
+impl fmt::Display for AgentMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.short_name())
+    }
+}
 
 pub mod bash;
 pub mod edit;
@@ -47,7 +123,11 @@ impl<'a> ToolContext<'a> {
         }
     }
 
-    pub fn with_output_callback(working_dir: &'a Path, config: &'a ToolConfig, callback: OutputCallback) -> Self {
+    pub fn with_output_callback(
+        working_dir: &'a Path,
+        config: &'a ToolConfig,
+        callback: OutputCallback,
+    ) -> Self {
         Self {
             working_dir,
             config,
@@ -111,6 +191,27 @@ impl ToolRegistry {
                 })
             })
             .collect()
+    }
+
+    /// Get tool schemas filtered by agent mode
+    /// Only returns tools that are enabled for the given mode
+    pub fn get_tools_schema_for_mode(&self, mode: AgentMode) -> Vec<serde_json::Value> {
+        self.tools
+            .iter()
+            .filter(|tool| mode.is_tool_enabled(tool.name()))
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name(),
+                    "description": tool.description(),
+                    "input_schema": tool.parameters_schema()
+                })
+            })
+            .collect()
+    }
+
+    /// Check if a tool can be executed in the given mode
+    pub fn can_execute_in_mode(&self, tool_name: &str, mode: AgentMode) -> bool {
+        mode.is_tool_enabled(tool_name)
     }
 }
 

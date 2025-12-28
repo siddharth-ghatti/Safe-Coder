@@ -214,23 +214,27 @@ impl AnthropicClient {
 
 #[async_trait]
 impl LlmClient for AnthropicClient {
-    async fn send_message(
+    async fn send_message_with_system(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        system_prompt: Option<&str>,
     ) -> Result<Message> {
-        // Determine if we should inject the Claude Code system prompt
-        // This is needed for OAuth tokens to work with the API
-        let system_prompt = if self.claude_code_compat && self.is_oauth() {
-            Some(CLAUDE_CODE_SYSTEM_PROMPT.to_string())
-        } else {
-            None
+        // Build the system prompt:
+        // 1. If Claude Code OAuth compat is enabled, prepend that
+        // 2. Then add any provided system prompt
+        let final_system_prompt = match (self.claude_code_compat && self.is_oauth(), system_prompt)
+        {
+            (true, Some(custom)) => Some(format!("{}\n\n{}", CLAUDE_CODE_SYSTEM_PROMPT, custom)),
+            (true, None) => Some(CLAUDE_CODE_SYSTEM_PROMPT.to_string()),
+            (false, Some(custom)) => Some(custom.to_string()),
+            (false, None) => None,
         };
 
         let request = AnthropicRequest {
             model: self.model.clone(),
             max_tokens: self.max_tokens,
-            system: system_prompt,
+            system: final_system_prompt,
             messages: messages
                 .iter()
                 .map(Self::convert_message_to_anthropic)

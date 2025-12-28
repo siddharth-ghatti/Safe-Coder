@@ -144,12 +144,25 @@ impl OllamaClient {
 
 #[async_trait]
 impl LlmClient for OllamaClient {
-    async fn send_message(
+    async fn send_message_with_system(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
+        system_prompt: Option<&str>,
     ) -> Result<Message> {
-        let ollama_messages = self.convert_messages(messages);
+        // Build messages, prepending system prompt if provided
+        let mut ollama_messages = Vec::new();
+
+        if let Some(system) = system_prompt {
+            ollama_messages.push(OllamaMessage {
+                role: "system".to_string(),
+                content: system.to_string(),
+                tool_calls: None,
+                tool_call_id: None,
+            });
+        }
+
+        ollama_messages.extend(self.convert_messages(messages));
 
         let ollama_tools = if !tools.is_empty() {
             Some(
@@ -178,12 +191,7 @@ impl LlmClient for OllamaClient {
 
         let url = format!("{}/v1/chat/completions", self.base_url);
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.client.post(&url).json(&request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -203,9 +211,7 @@ impl LlmClient for OllamaClient {
         // Add text content if present
         if let Some(text) = &choice.message.content {
             if !text.is_empty() {
-                content_blocks.push(ContentBlock::Text {
-                    text: text.clone(),
-                });
+                content_blocks.push(ContentBlock::Text { text: text.clone() });
             }
         }
 

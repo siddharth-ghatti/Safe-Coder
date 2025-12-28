@@ -26,6 +26,7 @@ use super::shell_ui;
 use crate::config::Config;
 use crate::orchestrator::{Orchestrator, OrchestratorConfig};
 use crate::session::{Session, SessionEvent};
+use crate::tools::AgentMode;
 
 /// Message types for async command execution
 #[derive(Debug)]
@@ -480,6 +481,29 @@ impl ShellTuiRunner {
                     prompt,
                 );
                 self.app.add_block(block);
+            }
+
+            // Ctrl+G - cycle agent mode (PLAN/BUILD)
+            KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.app.cycle_agent_mode();
+                // Show feedback and sync with session
+                let mode = self.app.agent_mode;
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    format!("Agent mode: {} - {}", mode.short_name(), mode.description()),
+                    prompt,
+                );
+                self.app.add_block(block);
+
+                // Sync agent mode with session if connected
+                if let Some(session) = &self.app.session {
+                    let session = session.clone();
+                    let agent_mode = mode;
+                    tokio::spawn(async move {
+                        let mut session = session.lock().await;
+                        session.set_agent_mode(agent_mode);
+                    });
+                }
             }
 
             // Regular character input
