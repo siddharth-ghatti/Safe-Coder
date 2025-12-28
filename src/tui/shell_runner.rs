@@ -304,9 +304,10 @@ impl ShellTuiRunner {
                             if let Some(child) = parent.children.iter_mut().rev().find(|c| {
                                 matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
                             }) {
-                                // Truncate output for display
-                                let display_output = if output.len() > 500 {
-                                    format!("{}...[truncated]", &output[..500])
+                                // Truncate output for display (UTF-8 safe)
+                                let display_output = if output.chars().count() > 500 {
+                                    let truncated: String = output.chars().take(500).collect();
+                                    format!("{}...[truncated]", truncated)
                                 } else {
                                     output
                                 };

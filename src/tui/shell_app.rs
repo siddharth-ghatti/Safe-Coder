@@ -854,9 +854,10 @@ impl ShellTuiApp {
 
             let output = block.output.get_text();
             if !output.is_empty() {
-                // Truncate long outputs
-                let preview = if output.len() > 500 {
-                    format!("{}...[truncated]", &output[..500])
+                // Truncate long outputs (UTF-8 safe)
+                let preview = if output.chars().count() > 500 {
+                    let truncated: String = output.chars().take(500).collect();
+                    format!("{}...[truncated]", truncated)
                 } else {
                     output
                 };
