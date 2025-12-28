@@ -275,6 +275,17 @@ impl LlmClient for AnthropicClient {
             req_builder = req_builder.header("x-api-key", api_key);
         }
 
+        // Debug log the request for troubleshooting
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            tracing::debug!(
+                "Anthropic request: model={}, system_len={}, messages={}, tools={}",
+                request.model,
+                request.system.as_ref().map(|s| s.len()).unwrap_or(0),
+                request.messages.len(),
+                request.tools.len()
+            );
+        }
+
         let response = req_builder
             .json(&request)
             .send()
@@ -284,6 +295,14 @@ impl LlmClient for AnthropicClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await?;
+            // Log more detail for debugging
+            tracing::error!(
+                "Anthropic API error: status={}, is_oauth={}, model={}, error={}",
+                status,
+                is_oauth,
+                self.model,
+                text
+            );
             anyhow::bail!("Anthropic API error ({}): {}", status, text);
         }
 

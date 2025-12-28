@@ -102,19 +102,17 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
                         }
                     }
 
-                    // Log warning if using Claude Code OAuth compatibility mode
-                    if config.llm.claude_code_oauth_compat {
-                        tracing::warn!(
-                            "⚠️  BETA: Claude Code OAuth compatibility mode enabled. \
-                            This may violate Anthropic's Terms of Service."
-                        );
-                    }
+                    // OAuth REQUIRES Claude Code compatibility mode - always enable it
+                    // The Claude Code system prompt is required for OAuth tokens to work
+                    tracing::info!(
+                        "OAuth authentication requires Claude Code compatibility mode (auto-enabled)"
+                    );
 
                     return Ok(Box::new(anthropic::AnthropicClient::with_token_manager(
                         token_manager,
                         config.llm.model.clone(),
                         config.llm.max_tokens,
-                        config.llm.claude_code_oauth_compat,
+                        true, // Always enable for OAuth - it's required
                     )));
                 }
 
