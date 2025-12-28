@@ -27,9 +27,9 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             max_tokens: 128_000,          // Claude's context window
-            compact_threshold_pct: 75,    // Compact at 75%
-            preserve_recent_messages: 10, // Keep last 10 messages
-            preserve_tool_results: 5,     // Keep last 5 tool results
+            compact_threshold_pct: 50,    // Compact at 50% to leave room for responses
+            preserve_recent_messages: 20, // Keep last 20 messages for better context
+            preserve_tool_results: 10,    // Keep last 10 tool results
             chars_per_token: 4,           // Rough estimate
         }
     }
@@ -173,19 +173,39 @@ impl ContextManager {
         let mut summary = String::new();
 
         // Extract key information from messages
-        let mut topics = Vec::new();
-        let mut files_mentioned = Vec::new();
+        let mut user_requests = Vec::new();
+        let mut assistant_actions = Vec::new();
+        let mut files_modified = Vec::new();
+        let mut files_read = Vec::new();
         let mut tools_used = Vec::new();
+        let mut key_decisions = Vec::new();
 
         for msg in messages {
             for block in &msg.content {
                 match block {
                     ContentBlock::Text { text } => {
-                        // Extract first sentence as topic indicator
-                        if let Some(first_sentence) = text.split('.').next() {
-                            let trimmed = first_sentence.trim();
-                            if trimmed.len() > 10 && trimmed.len() < 200 {
-                                topics.push(trimmed.to_string());
+                        // Capture user requests (from user messages)
+                        if matches!(msg.role, Role::User) {
+                            // Get first meaningful sentence
+                            let first_part: String = text.chars().take(300).collect();
+                            if let Some(sentence) = first_part.split(&['.', '?', '!'][..]).next() {
+                                let trimmed = sentence.trim();
+                                if trimmed.len() > 15 && !trimmed.starts_with('[') {
+                                    user_requests.push(trimmed.to_string());
+                                }
+                            }
+                        } else {
+                            // Capture key assistant statements
+                            for line in text.lines().take(3) {
+                                let trimmed = line.trim();
+                                if trimmed.len() > 20
+                                    && trimmed.len() < 200
+                                    && !trimmed.starts_with('[')
+                                    && !trimmed.starts_with("```")
+                                {
+                                    assistant_actions.push(trimmed.to_string());
+                                    break;
+                                }
                             }
                         }
 
@@ -193,61 +213,99 @@ impl ContextManager {
                         for word in text.split_whitespace() {
                             if word.contains('/') && word.contains('.') {
                                 let clean = word.trim_matches(|c: char| {
-                                    !c.is_alphanumeric() && c != '/' && c != '.' && c != '_'
+                                    !c.is_alphanumeric()
+                                        && c != '/'
+                                        && c != '.'
+                                        && c != '_'
+                                        && c != '-'
                                 });
-                                if clean.len() > 3 {
-                                    files_mentioned.push(clean.to_string());
+                                if clean.len() > 3 && !clean.starts_with("http") {
+                                    files_read.push(clean.to_string());
                                 }
                             }
                         }
                     }
-                    ContentBlock::ToolUse { name, .. } => {
+                    ContentBlock::ToolUse { name, input, .. } => {
                         if !tools_used.contains(name) {
                             tools_used.push(name.clone());
                         }
+                        // Track file modifications
+                        if name == "write" || name == "edit" || name == "Write" || name == "Edit" {
+                            if let Some(path) = input.get("file_path").and_then(|v| v.as_str()) {
+                                if !files_modified.contains(&path.to_string()) {
+                                    files_modified.push(path.to_string());
+                                }
+                            }
+                        }
                     }
-                    _ => {}
+                    ContentBlock::ToolResult { content, .. } => {
+                        // Capture important results/errors
+                        if content.contains("error")
+                            || content.contains("Error")
+                            || content.contains("failed")
+                        {
+                            let first_line = content.lines().next().unwrap_or("");
+                            if first_line.len() > 10 && first_line.len() < 150 {
+                                key_decisions.push(format!("Encountered: {}", first_line));
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Build summary
-        if !topics.is_empty() {
-            summary.push_str("Discussion covered:\n");
-            for (i, topic) in topics.iter().take(5).enumerate() {
-                summary.push_str(&format!("{}. {}\n", i + 1, topic));
+        // Build comprehensive summary
+        summary.push_str("=== Conversation Summary ===\n\n");
+
+        if !user_requests.is_empty() {
+            summary.push_str("User requested:\n");
+            for (i, req) in user_requests.iter().take(8).enumerate() {
+                summary.push_str(&format!("  {}. {}\n", i + 1, req));
             }
-            if topics.len() > 5 {
-                summary.push_str(&format!("... and {} more topics\n", topics.len() - 5));
+            if user_requests.len() > 8 {
+                summary.push_str(&format!(
+                    "  ... and {} more requests\n",
+                    user_requests.len() - 8
+                ));
             }
             summary.push('\n');
+        }
+
+        if !assistant_actions.is_empty() {
+            summary.push_str("Actions taken:\n");
+            for action in assistant_actions.iter().take(6) {
+                summary.push_str(&format!("  - {}\n", action));
+            }
+            summary.push('\n');
+        }
+
+        if !files_modified.is_empty() {
+            summary.push_str(&format!("Files modified: {}\n", files_modified.join(", ")));
+        }
+
+        // Dedupe files read
+        files_read.sort();
+        files_read.dedup();
+        if !files_read.is_empty() {
+            let display_files: Vec<_> = files_read.iter().take(15).cloned().collect();
+            summary.push_str(&format!("Files referenced: {}\n", display_files.join(", ")));
+            if files_read.len() > 15 {
+                summary.push_str(&format!("  ... and {} more files\n", files_read.len() - 15));
+            }
         }
 
         if !tools_used.is_empty() {
             summary.push_str(&format!("Tools used: {}\n", tools_used.join(", ")));
         }
 
-        // Dedupe files
-        files_mentioned.sort();
-        files_mentioned.dedup();
-        if !files_mentioned.is_empty() {
-            summary.push_str(&format!(
-                "Files referenced: {}\n",
-                files_mentioned
-                    .iter()
-                    .take(10)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            if files_mentioned.len() > 10 {
-                summary.push_str(&format!(
-                    "... and {} more files\n",
-                    files_mentioned.len() - 10
-                ));
+        if !key_decisions.is_empty() {
+            summary.push_str("\nKey events:\n");
+            for decision in key_decisions.iter().take(5) {
+                summary.push_str(&format!("  - {}\n", decision));
             }
         }
 
+        summary.push_str("\n=== End Summary ===\n");
         summary
     }
 
