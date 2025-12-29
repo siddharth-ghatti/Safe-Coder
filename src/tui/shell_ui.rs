@@ -743,6 +743,13 @@ fn render_block_to_strings(
                     }
                 }
             }
+
+            // Render child blocks (tasks) for orchestration
+            if !block.children.is_empty() {
+                for child in &block.children {
+                    render_tool_strings(child, width, lines, animation_frame);
+                }
+            }
         }
     }
 }
@@ -790,15 +797,19 @@ fn render_tool_strings(
     // Show diff if present
     if let Some(diff) = &block.diff {
         render_diff_strings(diff, width, lines);
-    } else if tool_name == "bash" {
-        // For bash commands, show streaming output inline (like Zed)
+    } else if tool_name == "bash" || tool_name.starts_with("task-") {
+        // For bash commands and orchestration tasks, show streaming output inline
         match &block.output {
             BlockOutput::Streaming {
                 lines: output_lines,
                 ..
             } => {
                 // Show last N lines of streaming output for compact view
-                let max_lines = 8;
+                let max_lines = if tool_name.starts_with("task-") {
+                    12
+                } else {
+                    8
+                };
                 let start = output_lines.len().saturating_sub(max_lines);
                 for line in output_lines.iter().skip(start) {
                     let wrapped = wrap(line, width.saturating_sub(4));

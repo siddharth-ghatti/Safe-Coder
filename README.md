@@ -6,6 +6,30 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 
 ## 🌟 What's New
 
+### 🧠 **Smarter AI (v2.1)**
+- **Context-aware reasoning** - AI understands project structure and conventions
+- **Loop detection** - Prevents AI from getting stuck in repetitive patterns
+- **Inline bash streaming** - See command output in real-time as it executes
+- **Better word wrapping** - Improved text rendering in the TUI
+
+### 🛠️ **Expanded Tool Suite**
+- **Glob search** - Fast file pattern matching with `**/*.rs` syntax
+- **Grep search** - Content search across files with regex support
+- **File listing** - Directory exploration with smart filtering
+- **Todo tracking** - Built-in task management for complex workflows
+- **Web fetch** - Retrieve and analyze web content
+
+### 📁 **File Picker UI**
+- **Visual file selection** - Browse and select files with a popup interface
+- **Keyboard navigation** - Use arrow keys to navigate directories
+- **Glob pattern support** - Filter files with patterns like `*.ts`
+
+### 🔐 **Permission Modes**
+- **Plan mode** - Preview all actions before execution
+- **Default mode** - Ask before each tool call (recommended)
+- **Auto-edit mode** - Auto-approve file operations only
+- **YOLO mode** - Auto-approve everything (use with caution)
+
 ### ⚡ **Simplified Architecture (v2.0)**
 - **20x faster startup** - Removed VM/Docker complexity for direct filesystem access
 - **Git-based safety** - All changes tracked with automatic commits and easy rollback
@@ -23,6 +47,7 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **Cyberpunk theme** - Pulsing neon borders and glitch effects
 - **Professional dark mode** - Google CLI / Claude Code inspired styling
 - **Animated processing** - Braille spinners and real-time status updates
+- **Inline reasoning display** - See AI thought process between tool calls
 
 ### ⚡ **Qwen Code CLI Features**
 - **Slash commands** (`/help`, `/stats`, `/chat save`) for meta-control
@@ -46,10 +71,11 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 
 ### 💻 **Standalone Coding CLI**
 - **Direct AI Coding**: Full-featured coding assistant without external dependencies
-- **Comprehensive Tool Suite**: Read, write, edit files, and execute bash commands
+- **Comprehensive Tool Suite**: Read, write, edit, glob, grep, list, todo, and web fetch
 - **Multiple LLM Providers**: Claude, OpenAI, or Ollama (local models)
 - **Privacy-First Option**: Run 100% locally with Ollama - no API costs, complete privacy
 - **Beautiful TUI**: Modern terminal interface with professional styling and animations
+- **File Picker**: Visual file selection with keyboard navigation and glob patterns
 
 ### ⚡ **Qwen Code CLI-Inspired Features**
 - **Slash Commands**: Meta-level control with `/help`, `/stats`, `/chat save/resume/list`
@@ -662,8 +688,26 @@ safe-coder/
 │   │   └── task.rs          # Task definitions
 │   ├── session/             # Chat session management
 │   ├── llm/                 # LLM client integrations
-│   ├── tools/               # Agent tools (read, write, edit, bash)
+│   ├── tools/               # Agent tools
+│   │   ├── mod.rs           # Tool registry and dispatch
+│   │   ├── bash.rs          # Shell command execution
+│   │   ├── read.rs          # File reading
+│   │   ├── write.rs         # File writing
+│   │   ├── edit.rs          # File editing with diffs
+│   │   ├── glob.rs          # File pattern matching
+│   │   ├── grep.rs          # Content search
+│   │   ├── list.rs          # Directory listing
+│   │   ├── todo.rs          # Task tracking
+│   │   └── webfetch.rs      # Web content retrieval
 │   ├── tui/                 # Terminal UI
+│   │   ├── shell_ui.rs      # Main shell interface
+│   │   ├── shell_runner.rs  # Shell command runner
+│   │   ├── file_picker.rs   # Visual file selection
+│   │   └── autocomplete.rs  # Tab completion
+│   ├── context/             # Project context awareness
+│   ├── loop_detector/       # AI loop detection
+│   ├── permissions/         # Permission mode handling
+│   ├── prompts/             # System prompts
 │   └── git/                 # Git change tracking
 ├── Cargo.toml
 └── README.md
@@ -742,6 +786,13 @@ safe-coder login anthropic
 - [x] Context-aware AI integration in shell mode
 - [x] Git auto-commit control for shell mode
 - [x] Real-time tool call display with diff rendering
+- [x] File picker with visual selection UI
+- [x] Expanded tool suite (glob, grep, list, todo, webfetch)
+- [x] Multiple permission modes (plan/default/auto-edit/yolo)
+- [x] Inline bash tool streaming
+- [x] Smarter AI with loop detection and context awareness
+- [x] Better word wrapping in TUI
+- [x] Inline LLM reasoning display between tool calls
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI
