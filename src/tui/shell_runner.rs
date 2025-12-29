@@ -11,6 +11,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::FutureExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::{self, BufRead, BufReader};
 use std::path::PathBuf;
@@ -23,8 +24,9 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
+use crate::approval::ExecutionMode;
 use crate::config::Config;
-use crate::orchestrator::{Orchestrator, OrchestratorConfig};
+use crate::orchestrator::{Orchestrator, OrchestratorConfig, TaskPlan, WorkerKind};
 use crate::session::{Session, SessionEvent};
 use crate::tools::AgentMode;
 
@@ -90,6 +92,46 @@ enum AiUpdate {
     Error { block_id: String, message: String },
 }
 
+/// Message types for orchestration updates
+#[derive(Debug)]
+enum OrchestrationUpdate {
+    /// Planning phase started
+    Planning { block_id: String },
+    /// Plan created and ready for review
+    PlanReady { block_id: String, plan: TaskPlan },
+    /// Plan approved and execution starting
+    Executing { block_id: String, task_count: usize },
+    /// Task started
+    TaskStarted {
+        block_id: String,
+        task_id: String,
+        description: String,
+        worker: String,
+    },
+    /// Streaming output line from task
+    TaskOutput {
+        block_id: String,
+        task_id: String,
+        line: String,
+    },
+    /// Task completed
+    TaskCompleted {
+        block_id: String,
+        task_id: String,
+        success: bool,
+        output: String,
+    },
+    /// Orchestration complete
+    Complete {
+        block_id: String,
+        summary: String,
+        success_count: usize,
+        fail_count: usize,
+    },
+    /// Orchestration error
+    Error { block_id: String, message: String },
+}
+
 /// Shell TUI runner
 pub struct ShellTuiRunner {
     app: ShellTuiApp,
@@ -142,6 +184,7 @@ impl ShellTuiRunner {
         // Channels for async command execution
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<CommandUpdate>();
         let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<AiUpdate>();
+        let (orch_tx, mut orch_rx) = mpsc::unbounded_channel::<OrchestrationUpdate>();
 
         loop {
             // Draw if needed
@@ -155,7 +198,7 @@ impl ShellTuiRunner {
                 match event::read()? {
                     Event::Key(key) => {
                         match self
-                            .handle_key_event(key.code, key.modifiers, &cmd_tx, &ai_tx)
+                            .handle_key_event(key.code, key.modifiers, &cmd_tx, &ai_tx, &orch_tx)
                             .await
                         {
                             Ok(true) => break, // Exit requested
@@ -411,6 +454,189 @@ impl ShellTuiRunner {
                 }
             }
 
+            // Process orchestration updates
+            while let Ok(update) = orch_rx.try_recv() {
+                match update {
+                    OrchestrationUpdate::Planning { block_id } => {
+                        if let Some(block) = self.app.get_block_mut(&block_id) {
+                            block.output = BlockOutput::Streaming {
+                                lines: vec!["🎯 Creating orchestration plan...".to_string()],
+                                complete: false,
+                            };
+                        }
+                        self.app.mark_dirty();
+                    }
+                    OrchestrationUpdate::PlanReady { block_id, plan } => {
+                        // Add child blocks for each task in the plan
+                        let prompt = self.app.current_prompt();
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            parent.output = BlockOutput::Streaming {
+                                lines: vec![
+                                    format!("📋 Plan: {}", plan.summary),
+                                    format!("   {} task(s) to execute", plan.tasks.len()),
+                                ],
+                                complete: false,
+                            };
+
+                            // Add a child block showing plan details
+                            let mut plan_block = CommandBlock::new(
+                                "Plan Details".to_string(),
+                                BlockType::AiToolExecution {
+                                    tool_name: "plan".to_string(),
+                                },
+                                prompt,
+                            );
+                            let mut plan_text = String::new();
+                            for (i, task) in plan.tasks.iter().enumerate() {
+                                plan_text.push_str(&format!(
+                                    "{}. {} [{}]\n   {}\n",
+                                    i + 1,
+                                    task.description,
+                                    task.preferred_worker
+                                        .as_ref()
+                                        .map(|w| format!("{:?}", w))
+                                        .unwrap_or_else(|| "default".to_string()),
+                                    if task.relevant_files.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!("Files: {}", task.relevant_files.join(", "))
+                                    }
+                                ));
+                            }
+                            plan_block.output = BlockOutput::Success(plan_text);
+                            plan_block.exit_code = Some(0);
+                            parent.add_child(plan_block);
+                        }
+                        self.app.mark_dirty();
+                    }
+                    OrchestrationUpdate::Executing {
+                        block_id,
+                        task_count,
+                    } => {
+                        if let Some(block) = self.app.get_block_mut(&block_id) {
+                            if let BlockOutput::Streaming { lines, .. } = &mut block.output {
+                                lines.push(format!("🚀 Executing {} task(s)...", task_count));
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    OrchestrationUpdate::TaskStarted {
+                        block_id,
+                        task_id,
+                        description,
+                        worker,
+                    } => {
+                        let prompt = self.app.current_prompt();
+                        // Get worker icon based on worker type
+                        let worker_icon = match worker.to_lowercase().as_str() {
+                            "claude" | "claude-code" | "claudecode" => "🤖",
+                            "gemini" | "gemini-cli" | "geminicli" => "✨",
+                            "safe-coder" | "safecoder" => "🛡️",
+                            "github-copilot" | "copilot" | "githubcopilot" => "🐙",
+                            _ => "⚡",
+                        };
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            let mut child = CommandBlock::new(
+                                format!("{} Task {}: {}", worker_icon, task_id, description),
+                                BlockType::AiToolExecution {
+                                    tool_name: format!("task-{}", task_id),
+                                },
+                                prompt,
+                            );
+                            // Start with streaming output
+                            child.output = BlockOutput::Streaming {
+                                lines: vec![],
+                                complete: false,
+                            };
+                            parent.add_child(child);
+                        }
+                        self.app.mark_dirty();
+                    }
+                    OrchestrationUpdate::TaskOutput {
+                        block_id,
+                        task_id,
+                        line,
+                    } => {
+                        // Stream output to the task's child block
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.iter_mut().rev().find(|c| {
+                                matches!(&c.block_type, BlockType::AiToolExecution { tool_name }
+                                    if tool_name == &format!("task-{}", task_id))
+                            }) {
+                                match &mut child.output {
+                                    BlockOutput::Streaming { lines, .. } => {
+                                        lines.push(line);
+                                    }
+                                    BlockOutput::Pending => {
+                                        child.output = BlockOutput::Streaming {
+                                            lines: vec![line],
+                                            complete: false,
+                                        };
+                                    }
+                                    _ => {
+                                        // Convert to streaming if needed
+                                        let existing = child.output.get_text();
+                                        let mut lines: Vec<String> =
+                                            existing.lines().map(|s| s.to_string()).collect();
+                                        lines.push(line);
+                                        child.output = BlockOutput::Streaming {
+                                            lines,
+                                            complete: false,
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    OrchestrationUpdate::TaskCompleted {
+                        block_id,
+                        task_id,
+                        success,
+                        output,
+                    } => {
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.iter_mut().rev().find(|c| {
+                                matches!(&c.block_type, BlockType::AiToolExecution { tool_name }
+                                    if tool_name == &format!("task-{}", task_id))
+                            }) {
+                                let status = if success { "✓" } else { "✗" };
+                                let truncated_output = if output.len() > 200 {
+                                    format!("{}...", &output[..200])
+                                } else {
+                                    output
+                                };
+                                child.output = BlockOutput::Success(format!(
+                                    "{} {}",
+                                    status, truncated_output
+                                ));
+                                child.exit_code = Some(if success { 0 } else { 1 });
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    OrchestrationUpdate::Complete {
+                        block_id,
+                        summary,
+                        success_count,
+                        fail_count,
+                    } => {
+                        if let Some(block) = self.app.get_block_mut(&block_id) {
+                            let status = if fail_count == 0 { "✅" } else { "⚠️" };
+                            block.output = BlockOutput::Success(format!(
+                                "{} Orchestration complete: {} succeeded, {} failed\n\n{}",
+                                status, success_count, fail_count, summary
+                            ));
+                            block.exit_code = Some(if fail_count == 0 { 0 } else { 1 });
+                        }
+                        self.app.mark_dirty();
+                    }
+                    OrchestrationUpdate::Error { block_id, message } => {
+                        self.app.fail_block(&block_id, message, String::new(), 1);
+                    }
+                }
+            }
+
             // Tick animations
             self.app.tick();
         }
@@ -425,6 +651,7 @@ impl ShellTuiRunner {
         modifiers: KeyModifiers,
         cmd_tx: &mpsc::UnboundedSender<CommandUpdate>,
         ai_tx: &mpsc::UnboundedSender<AiUpdate>,
+        orch_tx: &mpsc::UnboundedSender<OrchestrationUpdate>,
     ) -> Result<bool> {
         match code {
             // Ctrl+C - cancel or clear
@@ -643,7 +870,7 @@ impl ShellTuiRunner {
                 } else {
                     let input = self.app.input_submit();
                     if !input.is_empty() {
-                        self.execute_input(&input, cmd_tx.clone(), ai_tx.clone())
+                        self.execute_input(&input, cmd_tx.clone(), ai_tx.clone(), orch_tx.clone())
                             .await?;
                     }
                 }
@@ -678,12 +905,13 @@ impl ShellTuiRunner {
         input: &str,
         cmd_tx: mpsc::UnboundedSender<CommandUpdate>,
         ai_tx: mpsc::UnboundedSender<AiUpdate>,
+        orch_tx: mpsc::UnboundedSender<OrchestrationUpdate>,
     ) -> Result<()> {
         let input = input.trim();
 
         // Check for slash commands first (e.g., /connect, /help)
         if let Some(slash_cmd) = ShellTuiApp::parse_slash_command(input) {
-            return self.execute_slash_command(slash_cmd, ai_tx).await;
+            return self.execute_slash_command(slash_cmd, ai_tx, orch_tx).await;
         }
 
         // Check for built-in shell commands (cd, pwd, exit, etc.)
@@ -883,7 +1111,8 @@ Keyboard Shortcuts:
     async fn execute_slash_command(
         &mut self,
         cmd: SlashCommand,
-        _tx: mpsc::UnboundedSender<AiUpdate>,
+        _ai_tx: mpsc::UnboundedSender<AiUpdate>,
+        orch_tx: mpsc::UnboundedSender<OrchestrationUpdate>,
     ) -> Result<()> {
         match cmd {
             SlashCommand::Connect => {
@@ -986,21 +1215,472 @@ Keyboard:
                 let block_id = block.id.clone();
                 self.app.add_block(block);
 
-                // TODO: Implement orchestration integration
-                let prompt = self.app.current_prompt();
-                let msg_block = CommandBlock::system(
-                    "Orchestration support coming soon. Use 'safe-coder orchestrate' command for now.".to_string(),
-                    prompt,
-                );
-                self.app.add_block(msg_block);
+                // Spawn async orchestration execution
+                let project_path = self.app.cwd.clone();
+                let config = self.config.clone();
+                let task_owned = task.clone();
+                let orch_tx_clone = orch_tx.clone();
+                let block_id_clone = block_id.clone();
 
-                if let Some(block) = self.app.get_block_mut(&block_id) {
-                    block.complete("See above".to_string(), 0);
-                }
+                tokio::spawn(async move {
+                    let result = std::panic::AssertUnwindSafe(Self::run_orchestration(
+                        project_path,
+                        config,
+                        task_owned,
+                        block_id_clone.clone(),
+                        orch_tx_clone.clone(),
+                    ))
+                    .catch_unwind()
+                    .await;
+
+                    if let Err(e) = result {
+                        let panic_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = e.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        let _ = orch_tx_clone.send(OrchestrationUpdate::Error {
+                            block_id: block_id_clone,
+                            message: format!("Orchestration panicked: {}", panic_msg),
+                        });
+                    }
+                });
             }
         }
 
         Ok(())
+    }
+
+    /// Run orchestration asynchronously
+    /// Run orchestration asynchronously - simplified version for TUI
+    /// This runs Claude CLI directly without the full workspace/worktree setup
+    async fn run_orchestration(
+        project_path: PathBuf,
+        config: Config,
+        task: String,
+        block_id: String,
+        tx: mpsc::UnboundedSender<OrchestrationUpdate>,
+    ) {
+        // Send planning status
+        let _ = tx.send(OrchestrationUpdate::Planning {
+            block_id: block_id.clone(),
+        });
+
+        // For TUI mode, we'll run Claude CLI directly without worktrees
+        // This is simpler and more reliable for interactive use
+        let cli_path = config.orchestrator.claude_cli_path.clone();
+
+        // Create a simple plan with one task
+        use crate::orchestrator::Task;
+        let mut plan = TaskPlan::new(
+            "tui-task-1".to_string(),
+            task.clone(),
+            format!("Execute: {}", task),
+        );
+        plan.add_task(Task::new("task-1".to_string(), task.clone(), task.clone()));
+
+        // Send plan ready
+        let _ = tx.send(OrchestrationUpdate::PlanReady {
+            block_id: block_id.clone(),
+            plan: plan.clone(),
+        });
+
+        // Send executing status
+        let _ = tx.send(OrchestrationUpdate::Executing {
+            block_id: block_id.clone(),
+            task_count: 1,
+        });
+
+        // Send task started (using Claude as the worker for shell mode)
+        let _ = tx.send(OrchestrationUpdate::TaskStarted {
+            block_id: block_id.clone(),
+            task_id: "1".to_string(),
+            description: task.clone(),
+            worker: "claude".to_string(),
+        });
+
+        // Run Claude CLI directly with streaming output
+        let result = Self::run_claude_cli(
+            &cli_path,
+            &project_path,
+            &task,
+            block_id.clone(),
+            "1".to_string(),
+            tx.clone(),
+        )
+        .await;
+
+        let (success, output) = match result {
+            Ok(output) => (true, output),
+            Err(e) => (false, e.to_string()),
+        };
+
+        // Send task completed
+        let _ = tx.send(OrchestrationUpdate::TaskCompleted {
+            block_id: block_id.clone(),
+            task_id: "1".to_string(),
+            success,
+            output: output.clone(),
+        });
+
+        // Send completion
+        let _ = tx.send(OrchestrationUpdate::Complete {
+            block_id,
+            summary: if success {
+                format!("Task completed successfully:\n{}", output)
+            } else {
+                format!("Task failed:\n{}", output)
+            },
+            success_count: if success { 1 } else { 0 },
+            fail_count: if success { 0 } else { 1 },
+        });
+    }
+
+    /// Run Claude CLI directly and return output, streaming to the UI
+    async fn run_claude_cli(
+        cli_path: &str,
+        working_dir: &PathBuf,
+        task: &str,
+        block_id: String,
+        task_id: String,
+        tx: mpsc::UnboundedSender<OrchestrationUpdate>,
+    ) -> Result<String> {
+        use std::process::Stdio;
+        use tokio::io::AsyncBufReadExt;
+
+        // Check if claude CLI is available
+        let version_check = TokioCommand::new(cli_path).arg("--version").output().await;
+
+        if version_check.is_err() {
+            return Err(anyhow::anyhow!(
+                "Claude CLI not found at '{}'. Make sure it's installed and in your PATH.",
+                cli_path
+            ));
+        }
+
+        // Run claude with stream-json output for real-time updates
+        let mut child = TokioCommand::new(cli_path)
+            .current_dir(working_dir)
+            .arg("-p")
+            .arg(task)
+            .arg("--dangerously-skip-permissions")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--include-partial-messages")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Failed to spawn Claude CLI")?;
+
+        let stdout = child.stdout.take().context("Failed to capture stdout")?;
+        let stderr = child.stderr.take().context("Failed to capture stderr")?;
+
+        // Read stdout and stderr, streaming to UI
+        let stdout_reader = TokioBufReader::new(stdout);
+        let stderr_reader = TokioBufReader::new(stderr);
+
+        // Clone for the tasks
+        let tx_stdout = tx.clone();
+        let block_id_stdout = block_id.clone();
+        let task_id_stdout = task_id.clone();
+
+        let stdout_task = tokio::spawn(async move {
+            let mut final_result = String::new();
+            let mut lines = stdout_reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Skip empty lines
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                // Parse JSON events from stream-json output
+                let display_line = Self::parse_claude_json_event(&line);
+
+                // Send the parsed line (or indicate we received data)
+                if let Some(parsed) = display_line {
+                    let _ = tx_stdout.send(OrchestrationUpdate::TaskOutput {
+                        block_id: block_id_stdout.clone(),
+                        task_id: task_id_stdout.clone(),
+                        line: parsed,
+                    });
+                }
+
+                // Try to extract final result
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+                    if json.get("type").and_then(|t| t.as_str()) == Some("result") {
+                        if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
+                            final_result = result.to_string();
+                        }
+                    }
+                }
+            }
+            final_result
+        });
+
+        let tx_stderr = tx.clone();
+        let block_id_stderr = block_id.clone();
+        let task_id_stderr = task_id.clone();
+
+        let stderr_task = tokio::spawn(async move {
+            let mut errors = String::new();
+            let mut lines = stderr_reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                // Send stderr lines to UI with prefix
+                let _ = tx_stderr.send(OrchestrationUpdate::TaskOutput {
+                    block_id: block_id_stderr.clone(),
+                    task_id: task_id_stderr.clone(),
+                    line: format!("[stderr] {}", line),
+                });
+                errors.push_str(&line);
+                errors.push('\n');
+            }
+            errors
+        });
+
+        // Wait with timeout (5 minutes)
+        let timeout = tokio::time::Duration::from_secs(300);
+        let wait_result = tokio::time::timeout(timeout, async {
+            let (stdout_result, stderr_result) = tokio::join!(stdout_task, stderr_task);
+            let output = stdout_result.unwrap_or_default();
+            let errors = stderr_result.unwrap_or_default();
+            let status = child.wait().await.context("Failed to wait for process")?;
+            Ok::<(String, String, std::process::ExitStatus), anyhow::Error>((
+                output, errors, status,
+            ))
+        })
+        .await;
+
+        match wait_result {
+            Ok(Ok((output, errors, status))) => {
+                if status.success() {
+                    Ok(if output.is_empty() {
+                        "Task completed".to_string()
+                    } else {
+                        output
+                    })
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Claude CLI exited with status {}: {}",
+                        status.code().unwrap_or(-1),
+                        errors
+                    ))
+                }
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!(
+                "Claude CLI timed out after {} seconds",
+                timeout.as_secs()
+            )),
+        }
+    }
+
+    /// Parse a Claude CLI JSON event and return a human-readable display line
+    fn parse_claude_json_event(json_line: &str) -> Option<String> {
+        let json: serde_json::Value = serde_json::from_str(json_line).ok()?;
+
+        let event_type = json.get("type")?.as_str()?;
+
+        match event_type {
+            "system" => {
+                let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                match subtype {
+                    "init" => Some("Initializing Claude...".to_string()),
+                    _ => None,
+                }
+            }
+            "stream_event" => {
+                // Handle streaming events for real-time updates
+                if let Some(event) = json.get("event") {
+                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match event_type {
+                        "content_block_start" => {
+                            // Tool use or text block starting
+                            if let Some(content_block) = event.get("content_block") {
+                                let block_type = content_block
+                                    .get("type")
+                                    .and_then(|t| t.as_str())
+                                    .unwrap_or("");
+                                if block_type == "tool_use" {
+                                    let tool_name = content_block
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("unknown");
+                                    let display_name = if tool_name.contains("__") {
+                                        tool_name.split("__").last().unwrap_or(tool_name)
+                                    } else {
+                                        tool_name
+                                    };
+                                    return Some(format!("▶ Starting tool: {}", display_name));
+                                }
+                            }
+                        }
+                        "content_block_delta" => {
+                            // Streaming content delta
+                            if let Some(delta) = event.get("delta") {
+                                let delta_type =
+                                    delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                match delta_type {
+                                    "text_delta" => {
+                                        // Text being streamed - don't show every chunk, too noisy
+                                        return None;
+                                    }
+                                    "input_json_delta" => {
+                                        // Tool input being streamed - don't show every chunk
+                                        return None;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        "content_block_stop" => {
+                            // Block finished
+                            return None;
+                        }
+                        "message_stop" => {
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }
+            "assistant" => {
+                // Check for tool use in the message content
+                if let Some(message) = json.get("message") {
+                    if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
+                        for item in content {
+                            if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
+                                match item_type {
+                                    "tool_use" => {
+                                        let tool_name = item
+                                            .get("name")
+                                            .and_then(|n| n.as_str())
+                                            .unwrap_or("unknown");
+
+                                        // Normalize tool name (strip MCP prefixes)
+                                        let display_name = if tool_name.contains("__") {
+                                            tool_name.split("__").last().unwrap_or(tool_name)
+                                        } else {
+                                            tool_name
+                                        };
+
+                                        // Try to get a description for common tools
+                                        let detail = if tool_name.contains("Bash") {
+                                            item.get("input")
+                                                .and_then(|i| i.get("command"))
+                                                .and_then(|c| c.as_str())
+                                                .map(|cmd| {
+                                                    // Truncate long commands
+                                                    if cmd.len() > 60 {
+                                                        format!(": {}...", &cmd[..57])
+                                                    } else {
+                                                        format!(": {}", cmd)
+                                                    }
+                                                })
+                                                .unwrap_or_default()
+                                        } else if tool_name.contains("Read")
+                                            || tool_name.contains("Write")
+                                            || tool_name.contains("Edit")
+                                        {
+                                            item.get("input")
+                                                .and_then(|i| i.get("file_path").or(i.get("path")))
+                                                .and_then(|p| p.as_str())
+                                                .map(|path| {
+                                                    // Shorten long paths
+                                                    if path.len() > 50 {
+                                                        format!(": ...{}", &path[path.len() - 47..])
+                                                    } else {
+                                                        format!(": {}", path)
+                                                    }
+                                                })
+                                                .unwrap_or_default()
+                                        } else if tool_name.contains("Glob") {
+                                            item.get("input")
+                                                .and_then(|i| i.get("pattern"))
+                                                .and_then(|p| p.as_str())
+                                                .map(|pat| format!(": {}", pat))
+                                                .unwrap_or_default()
+                                        } else if tool_name.contains("Grep") {
+                                            item.get("input")
+                                                .and_then(|i| i.get("pattern"))
+                                                .and_then(|p| p.as_str())
+                                                .map(|pat| format!(": {}", pat))
+                                                .unwrap_or_default()
+                                        } else {
+                                            String::new()
+                                        };
+
+                                        return Some(format!(
+                                            "Using tool: {}{}",
+                                            display_name, detail
+                                        ));
+                                    }
+                                    "text" => {
+                                        if let Some(text) =
+                                            item.get("text").and_then(|t| t.as_str())
+                                        {
+                                            // Only show non-empty text that's not too long
+                                            let trimmed = text.trim();
+                                            if !trimmed.is_empty() {
+                                                let display = if trimmed.len() > 100 {
+                                                    format!("{}...", &trimmed[..97])
+                                                } else {
+                                                    trimmed.to_string()
+                                                };
+                                                return Some(format!("Claude: {}", display));
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            "user" => {
+                // Tool results
+                if let Some(message) = json.get("message") {
+                    if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
+                        for item in content {
+                            if let Some(item_type) = item.get("type").and_then(|t| t.as_str()) {
+                                if item_type == "tool_result" {
+                                    let is_error = item
+                                        .get("is_error")
+                                        .and_then(|e| e.as_bool())
+                                        .unwrap_or(false);
+                                    if is_error {
+                                        return Some("Tool returned error".to_string());
+                                    } else {
+                                        return Some("Tool completed".to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            "result" => {
+                let subtype = json.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                match subtype {
+                    "success" => Some("Task completed successfully".to_string()),
+                    "error" => {
+                        let error = json
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("Unknown error");
+                        Some(format!("Task failed: {}", error))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Execute an AI query (natural language, possibly with @file context)

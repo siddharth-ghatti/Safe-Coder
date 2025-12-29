@@ -340,25 +340,55 @@ async fn run_orchestrate(
     // Parse execution mode
     let execution_mode = ExecutionMode::from_str(&mode)?;
 
-    // Parse worker preference
-    let default_worker = match worker.to_lowercase().as_str() {
-        "claude" | "claude-code" => WorkerKind::ClaudeCode,
-        "gemini" | "gemini-cli" => WorkerKind::GeminiCli,
-        _ => {
-            eprintln!("Unknown worker '{}'. Using claude.", worker);
-            WorkerKind::ClaudeCode
-        }
-    };
-
     // Load config for throttle limits
     let user_config = Config::load().unwrap_or_default();
+
+    // Helper function to parse worker string to WorkerKind
+    fn parse_worker_kind(s: &str) -> WorkerKind {
+        match s.to_lowercase().as_str() {
+            "claude" | "claude-code" => WorkerKind::ClaudeCode,
+            "gemini" | "gemini-cli" => WorkerKind::GeminiCli,
+            "safe-coder" | "safecoder" => WorkerKind::SafeCoder,
+            "github-copilot" | "copilot" | "gh-copilot" => WorkerKind::GitHubCopilot,
+            _ => WorkerKind::ClaudeCode,
+        }
+    }
+
+    // Parse worker preference
+    let default_worker = parse_worker_kind(&worker);
+
+    // Parse worker strategy from config
+    let worker_strategy = match user_config
+        .orchestrator
+        .worker_strategy
+        .to_lowercase()
+        .as_str()
+    {
+        "single" | "single-worker" => orchestrator::WorkerStrategy::SingleWorker,
+        "round-robin" | "roundrobin" => orchestrator::WorkerStrategy::RoundRobin,
+        "task-based" | "taskbased" => orchestrator::WorkerStrategy::TaskBased,
+        "load-balanced" | "loadbalanced" => orchestrator::WorkerStrategy::LoadBalanced,
+        _ => orchestrator::WorkerStrategy::SingleWorker,
+    };
+
+    // Parse enabled workers from config
+    let enabled_workers: Vec<WorkerKind> = user_config
+        .orchestrator
+        .enabled_workers
+        .iter()
+        .map(|s| parse_worker_kind(s))
+        .collect();
 
     // Create orchestrator config (CLI args override config file)
     let config = orchestrator::OrchestratorConfig {
         claude_cli_path: Some(user_config.orchestrator.claude_cli_path.clone()),
         gemini_cli_path: Some(user_config.orchestrator.gemini_cli_path.clone()),
+        safe_coder_cli_path: Some(user_config.orchestrator.safe_coder_cli_path.clone()),
+        gh_cli_path: Some(user_config.orchestrator.gh_cli_path.clone()),
         max_workers,
         default_worker,
+        worker_strategy,
+        enabled_workers,
         use_worktrees,
         throttle_limits: orchestrator::ThrottleLimits {
             claude_max_concurrent: claude_max.unwrap_or(
@@ -373,6 +403,14 @@ async fn run_orchestrate(
                     .throttle_limits
                     .gemini_max_concurrent,
             ),
+            safe_coder_max_concurrent: user_config
+                .orchestrator
+                .throttle_limits
+                .safe_coder_max_concurrent,
+            copilot_max_concurrent: user_config
+                .orchestrator
+                .throttle_limits
+                .copilot_max_concurrent,
             start_delay_ms: start_delay_ms
                 .unwrap_or(user_config.orchestrator.throttle_limits.start_delay_ms),
         },

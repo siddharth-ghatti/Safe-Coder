@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Google Gemini logo - the sparkle/star shape -->
+  <defs>
+    <linearGradient id="geminiBlue" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1A73E8"/>
+      <stop offset="100%" style="stop-color:#4285F4"/>
+    </linearGradient>
+    <linearGradient id="geminiMulti" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4285F4"/>
+      <stop offset="25%" style="stop-color:#9B72CB"/>
+      <stop offset="50%" style="stop-color:#D96570"/>
+      <stop offset="75%" style="stop-color:#FCC934"/>
+      <stop offset="100%" style="stop-color:#4285F4"/>
+    </linearGradient>
+  </defs>
+  <rect width="100" height="100" fill="#FFFFFF" rx="20"/>
+  <!-- Gemini's 4-point star/sparkle shape -->
+  <path d="M 50 8
+           C 50 35, 50 35, 50 50
+           C 50 35, 65 50, 92 50
+           C 65 50, 50 65, 50 92
+           C 50 65, 35 50, 8 50
+           C 35 50, 50 35, 50 8"
+        fill="url(#geminiMulti)"/>
+</svg>
