@@ -24,11 +24,10 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
-use crate::approval::ExecutionMode;
 use crate::config::Config;
-use crate::orchestrator::{Orchestrator, OrchestratorConfig, TaskPlan, WorkerKind};
+use crate::lsp::{default_lsp_configs, LspManager};
+use crate::orchestrator::TaskPlan;
 use crate::session::{Session, SessionEvent};
-use crate::tools::AgentMode;
 
 /// Message types for async command execution
 #[derive(Debug)]
@@ -136,17 +135,60 @@ enum OrchestrationUpdate {
 pub struct ShellTuiRunner {
     app: ShellTuiApp,
     config: Config,
+    lsp_manager: Option<LspManager>,
 }
 
 impl ShellTuiRunner {
     /// Create a new shell TUI runner
     pub fn new(project_path: PathBuf, config: Config) -> Self {
-        let app = ShellTuiApp::new(project_path, config.clone());
-        Self { app, config }
+        let mut app = ShellTuiApp::new(project_path.clone(), config.clone());
+
+        // Initialize LSP servers info for display
+        let lsp_configs = default_lsp_configs();
+        for (lang, server_config) in &lsp_configs {
+            let available = which::which(&server_config.command).is_ok();
+            if available {
+                app.lsp_servers.push((
+                    lang.clone(),
+                    server_config.command.clone(),
+                    false, // Not running yet
+                ));
+            }
+        }
+
+        Self {
+            app,
+            config,
+            lsp_manager: None,
+        }
+    }
+
+    /// Initialize LSP servers
+    pub async fn init_lsp(&mut self) {
+        if !self.config.lsp.enabled {
+            return;
+        }
+
+        let mut manager = LspManager::new(self.app.project_path.clone(), None);
+
+        if let Err(e) = manager.initialize().await {
+            eprintln!("LSP initialization error: {}", e);
+        }
+
+        // Update app's LSP status
+        let running_servers = manager.get_running_servers();
+        for (lang, cmd, running) in &mut self.app.lsp_servers {
+            *running = running_servers.contains(&lang.as_str());
+        }
+
+        self.lsp_manager = Some(manager);
     }
 
     /// Run the shell TUI
     pub async fn run(&mut self) -> Result<()> {
+        // Initialize LSP servers in background
+        self.init_lsp().await;
+
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();

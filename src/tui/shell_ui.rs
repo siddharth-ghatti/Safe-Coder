@@ -780,19 +780,19 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         .replace(&std::env::var("HOME").unwrap_or_default(), "~");
 
     let mode = app.agent_mode.short_name();
-
-    // Build status bar like OpenCode: "safe-coder v0.1.0  ~/path/to/project    tab  BUILD MODE"
     let version = "v0.1.0";
-    let app_info = format!("safe-coder {}  {}", version, path);
 
-    // Right side
-    let right_text = format!("tab  {} MODE", mode.to_uppercase());
+    // Build LSP status string (like Crush: "● Go gopls  ● Rust rust-analyzer")
+    let lsp_status: String = app
+        .lsp_servers
+        .iter()
+        .filter(|(_, _, running)| *running)
+        .map(|(lang, cmd, _)| format!("● {} {}", lang, cmd))
+        .collect::<Vec<_>>()
+        .join("  ");
 
-    let padding =
-        area.width
-            .saturating_sub(app_info.len() as u16 + right_text.len() as u16 + 2) as usize;
-
-    let line = Line::from(vec![
+    // Build spans
+    let mut spans = vec![
         Span::styled(" ", Style::default()),
         Span::styled(
             "safe-coder",
@@ -802,18 +802,33 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         ),
         Span::styled(format!(" {}  ", version), Style::default().fg(TEXT_DIM)),
         Span::styled(path.clone(), Style::default().fg(TEXT_SECONDARY)),
-        Span::styled(" ".repeat(padding.max(1)), Style::default()),
-        Span::styled("tab", Style::default().fg(TEXT_DIM)),
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            format!("{} MODE", mode.to_uppercase()),
-            Style::default()
-                .fg(TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" ", Style::default()),
-    ]);
+    ];
 
+    // Add LSP status if any servers are running
+    if !lsp_status.is_empty() {
+        spans.push(Span::styled("  │  ", Style::default().fg(TEXT_MUTED)));
+        spans.push(Span::styled(lsp_status, Style::default().fg(ACCENT_GREEN)));
+    }
+
+    // Calculate padding for right side
+    let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
+    let right_text = format!("tab  {} MODE", mode.to_uppercase());
+    let padding = area
+        .width
+        .saturating_sub(left_len as u16 + right_text.len() as u16 + 2) as usize;
+
+    spans.push(Span::styled(" ".repeat(padding.max(1)), Style::default()));
+    spans.push(Span::styled("tab", Style::default().fg(TEXT_DIM)));
+    spans.push(Span::styled("  ", Style::default()));
+    spans.push(Span::styled(
+        format!("{} MODE", mode.to_uppercase()),
+        Style::default()
+            .fg(TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(" ", Style::default()));
+
+    let line = Line::from(spans);
     let para = Paragraph::new(line).style(Style::default().bg(BG_STATUS));
     f.render_widget(para, area);
 }

@@ -11,6 +11,44 @@ pub struct Config {
     pub orchestrator: OrchestratorConfig,
     #[serde(default)]
     pub tools: ToolConfig,
+    #[serde(default)]
+    pub lsp: LspConfigWrapper,
+}
+
+/// LSP configuration wrapper
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspConfigWrapper {
+    /// Whether LSP is enabled globally
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Per-language server configurations (overrides defaults)
+    #[serde(default)]
+    pub servers: std::collections::HashMap<String, LspServerConfigEntry>,
+}
+
+/// LSP server configuration entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspServerConfigEntry {
+    /// Whether this server is disabled
+    #[serde(default)]
+    pub disabled: bool,
+    /// Command to start the server (overrides default)
+    pub command: Option<String>,
+    /// Arguments to pass to the command
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+impl Default for LspConfigWrapper {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            servers: std::collections::HashMap::new(),
+        }
+    }
 }
 
 /// Configuration for tool execution
@@ -349,6 +387,7 @@ impl Default for Config {
             git: GitConfig::default(),
             orchestrator: OrchestratorConfig::default(),
             tools: ToolConfig::default(),
+            lsp: LspConfigWrapper::default(),
         }
     }
 }
