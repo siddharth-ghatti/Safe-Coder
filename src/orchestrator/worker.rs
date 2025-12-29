@@ -16,6 +16,10 @@ pub enum WorkerKind {
     ClaudeCode,
     /// Gemini CLI (https://github.com/google/gemini-cli)
     GeminiCli,
+    /// Safe-Coder itself (this application)
+    SafeCoder,
+    /// GitHub Copilot CLI (gh copilot)
+    GitHubCopilot,
 }
 
 impl Default for WorkerKind {
@@ -94,6 +98,8 @@ impl Worker {
         let result = match &self.kind {
             WorkerKind::ClaudeCode => self.execute_claude_code().await,
             WorkerKind::GeminiCli => self.execute_gemini_cli().await,
+            WorkerKind::SafeCoder => self.execute_safe_coder().await,
+            WorkerKind::GitHubCopilot => self.execute_github_copilot().await,
         };
 
         match result {
@@ -159,6 +165,73 @@ impl Worker {
         let mut cmd = Command::new(&self.cli_path);
         cmd.current_dir(&self.workspace)
             .arg("--prompt")
+            .arg(&self.task.instructions)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        self.run_command(cmd).await
+    }
+
+    /// Execute using Safe-Coder itself (recursive orchestration)
+    async fn execute_safe_coder(&mut self) -> Result<String> {
+        // Safe-Coder can be invoked via its own binary
+        // First try the current executable, then fall back to cli_path
+        let exe_path = std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| self.cli_path.clone());
+
+        // Check if safe-coder CLI is available
+        let cli_available = Command::new(&exe_path)
+            .arg("--version")
+            .output()
+            .await
+            .is_ok();
+
+        if !cli_available {
+            return Err(anyhow::anyhow!(
+                "Safe-Coder CLI not found at '{}'. Make sure the binary is in your PATH.",
+                exe_path
+            ));
+        }
+
+        // Safe-Coder usage: safe-coder act "prompt" for non-interactive mode
+        let mut cmd = Command::new(&exe_path);
+        cmd.current_dir(&self.workspace)
+            .arg("act")
+            .arg(&self.task.instructions)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        self.run_command(cmd).await
+    }
+
+    /// Execute using GitHub Copilot CLI (gh copilot)
+    async fn execute_github_copilot(&mut self) -> Result<String> {
+        // GitHub Copilot CLI is accessed via `gh copilot` command
+        // Check if gh CLI is available with copilot extension
+        let cli_available = Command::new("gh")
+            .args(["copilot", "--help"])
+            .output()
+            .await
+            .is_ok();
+
+        if !cli_available {
+            return Err(anyhow::anyhow!(
+                "GitHub Copilot CLI not found. Install it with:\n\
+                 1. Install GitHub CLI: https://cli.github.com/\n\
+                 2. Install Copilot extension: gh extension install github/gh-copilot\n\
+                 3. Authenticate: gh auth login"
+            ));
+        }
+
+        // GitHub Copilot CLI usage: gh copilot suggest -t shell "prompt"
+        // For code suggestions, we use the suggest command
+        let mut cmd = Command::new("gh");
+        cmd.current_dir(&self.workspace)
+            .arg("copilot")
+            .arg("suggest")
+            .arg("-t")
+            .arg("shell") // Can be "shell", "git", or "gh"
             .arg(&self.task.instructions)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

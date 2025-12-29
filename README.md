@@ -6,6 +6,13 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 
 ## 🌟 What's New
 
+### 🚀 **Orchestration Integration (v2.2)**
+- **Shell-integrated orchestration** - Run `@orchestrate <task>` directly from the shell TUI
+- **GitHub Copilot support** - New worker type using `gh copilot` for task execution
+- **Worker distribution strategies** - Single, round-robin, task-based, or load-balanced task distribution
+- **Self-orchestration** - Safe-Coder can now use itself as a worker for recursive delegation
+- **Plan vs Act modes** - Choose between approval-required planning or auto-execution
+
 ### 🧠 **Smarter AI (v2.1)**
 - **Context-aware reasoning** - AI understands project structure and conventions
 - **Loop detection** - Prevents AI from getting stuck in repetitive patterns
@@ -88,11 +95,12 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **Statistics Tracking**: Monitor token usage, tool calls, session metrics
 
 ### 🎯 **Orchestrator Mode**
-- **Multi-Agent Delegation**: Orchestrate Claude Code, Gemini CLI, and other AI agents
+- **Multi-Agent Delegation**: Orchestrate Claude Code, Gemini CLI, GitHub Copilot, and Safe-Coder itself
 - **Task Planning**: Automatically break down complex requests into manageable tasks
 - **Workspace Isolation**: Each task runs in its own git worktree/branch
 - **Parallel Execution**: Run up to 3 AI agents concurrently with intelligent throttling
 - **Throttle Control**: Per-worker-type concurrency limits and start delays to respect rate limits
+- **Worker Strategies**: Single-worker, round-robin, task-based, or load-balanced distribution
 - **Automatic Merging**: Merge completed work back to main branch
 
 ### 🔒 **Git-Based Safety (Simplified Architecture)**
@@ -196,6 +204,7 @@ For complex tasks, Safe Coder can still orchestrate multiple AI agents:
 3. **For Orchestrator Mode** (optional):
    - [Claude Code](https://docs.anthropic.com/en/docs/claude-code): `npm install -g @anthropic-ai/claude-code`
    - [Gemini CLI](https://github.com/google/gemini-cli): Install from official repository
+   - [GitHub Copilot](https://cli.github.com/): `gh extension install github/gh-copilot`
 
 ### Installation
 
@@ -416,6 +425,26 @@ See the [Ollama Setup Guide](OLLAMA_SETUP.md) for detailed instructions.
 │ └─────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────┘
 
+┌─ Command Block 4 ───────────────────────────────────────────┐
+│ 🤖 my-project (main) $ @orchestrate add user auth and tests │
+│ ┌─ Orchestration ────────────────────────────────────────┐  │
+│ │ 🎯 Planning task: add user auth and tests              │  │
+│ │                                                         │  │
+│ │ 📋 Breaking down into 2 tasks:                         │  │
+│ │   1. Add user authentication system                    │  │
+│ │   2. Write comprehensive auth tests                    │  │
+│ │                                                         │  │
+│ │ 🚀 Starting workers...                                 │  │
+│ │ ├─ Task 1: ClaudeCode → .safe-coder-workspaces/task-1  │  │
+│ │ └─ Task 2: ClaudeCode → .safe-coder-workspaces/task-2  │  │
+│ │                                                         │  │
+│ │ ✓ Task 1 completed                                     │  │
+│ │ ✓ Task 2 completed                                     │  │
+│ │                                                         │  │
+│ │ 📊 Results: 2/2 successful                             │  │
+│ └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+
 ┌─ Input ─────────────────────────────────────────────────────┐
 │ my-project (main) $ cargo add ser[TAB]                      │
 │ ┌─ Autocomplete ─┐                                          │
@@ -591,14 +620,20 @@ warn_dangerous_commands = true
 [orchestrator]
 claude_cli_path = "claude"      # Path to Claude Code CLI
 gemini_cli_path = "gemini"      # Path to Gemini CLI
+safe_coder_cli_path = "safe-coder"  # Path to Safe-Coder CLI (for self-orchestration)
+gh_cli_path = "gh"              # Path to GitHub CLI (for Copilot)
 max_workers = 3                 # Maximum concurrent workers (up to 3)
-default_worker = "claude"       # Default: "claude" or "gemini"
+default_worker = "claude"       # Default: "claude", "gemini", "safe-coder", or "github-copilot"
+worker_strategy = "single"      # Strategy: "single", "round-robin", "task-based", or "load-balanced"
+enabled_workers = ["claude"]    # Workers to use for multi-worker strategies
 use_worktrees = true            # Use git worktrees for isolation
 
 # Throttle limits for controlling worker concurrency by type
 [orchestrator.throttle_limits]
 claude_max_concurrent = 2       # Max concurrent Claude workers
 gemini_max_concurrent = 2       # Max concurrent Gemini workers
+safe_coder_max_concurrent = 2   # Max concurrent Safe-Coder workers
+copilot_max_concurrent = 2      # Max concurrent GitHub Copilot workers
 start_delay_ms = 100            # Delay between starting workers (ms)
 ```
 
@@ -642,8 +677,21 @@ The shell now features a modern Warp-like TUI interface with enhanced functional
 Safe Coder can run up to 3 CLI agents in parallel, with intelligent throttling:
 
 - **Global Concurrency Limit**: Maximum of 3 workers running simultaneously
-- **Per-Worker-Type Limits**: Control how many Claude or Gemini workers can run at once
+- **Per-Worker-Type Limits**: Control how many Claude, Gemini, Copilot, or Safe-Coder workers can run at once
 - **Start Delay**: Configurable delay between starting workers
+
+### 🔀 **Worker Distribution Strategies**
+
+Choose how tasks are distributed across multiple worker types:
+
+| Strategy | Description |
+|----------|-------------|
+| `single` | Use only the default worker for all tasks (default) |
+| `round-robin` | Distribute tasks evenly across all enabled workers |
+| `task-based` | Assign workers based on task complexity (simple → Copilot, complex → Claude) |
+| `load-balanced` | Assign to workers with the fewest queued tasks |
+
+Configure via `worker_strategy` and `enabled_workers` in your config file.
 
 ### 📝 **Task Decomposition**
 
@@ -681,9 +729,9 @@ safe-coder/
 │   ├── shell/               # Shell mode module
 │   │   └── mod.rs           # Interactive shell with AI
 │   ├── orchestrator/        # Orchestration module
-│   │   ├── mod.rs           # Orchestrator coordinator
+│   │   ├── mod.rs           # Orchestrator coordinator + worker strategies
 │   │   ├── planner.rs       # Task decomposition
-│   │   ├── worker.rs        # CLI worker management
+│   │   ├── worker.rs        # CLI workers (Claude, Gemini, Copilot, Safe-Coder)
 │   │   ├── workspace.rs     # Git worktree manager
 │   │   └── task.rs          # Task definitions
 │   ├── session/             # Chat session management
@@ -793,6 +841,10 @@ safe-coder login anthropic
 - [x] Smarter AI with loop detection and context awareness
 - [x] Better word wrapping in TUI
 - [x] Inline LLM reasoning display between tool calls
+- [x] Shell-integrated orchestration (`@orchestrate` command)
+- [x] GitHub Copilot worker support
+- [x] Worker distribution strategies (round-robin, task-based, load-balanced)
+- [x] Self-orchestration (Safe-Coder as a worker)
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI
@@ -810,7 +862,7 @@ MIT License - See LICENSE file for details
 
 ## Acknowledgments
 
-- Orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [Gemini CLI](https://github.com/google/gemini-cli)
+- Orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Gemini CLI](https://github.com/google/gemini-cli), and [GitHub Copilot](https://cli.github.com/)
 - TUI powered by [Ratatui](https://github.com/ratatui-org/ratatui)
 - Diff rendering powered by the [Similar](https://github.com/mitsuhiko/similar) crate
 - Built with Rust for performance and safety

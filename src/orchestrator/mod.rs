@@ -36,6 +36,25 @@ pub struct Orchestrator {
     pub config: OrchestratorConfig,
 }
 
+/// Strategy for distributing tasks across multiple workers
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkerStrategy {
+    /// Use only the default worker for all tasks
+    SingleWorker,
+    /// Distribute tasks round-robin across enabled workers
+    RoundRobin,
+    /// Assign workers based on task type/complexity (simple tasks to faster workers)
+    TaskBased,
+    /// Use all enabled workers, load-balanced by current queue
+    LoadBalanced,
+}
+
+impl Default for WorkerStrategy {
+    fn default() -> Self {
+        WorkerStrategy::SingleWorker
+    }
+}
+
 /// Configuration for the orchestrator
 #[derive(Debug, Clone)]
 pub struct OrchestratorConfig {
@@ -43,10 +62,18 @@ pub struct OrchestratorConfig {
     pub claude_cli_path: Option<String>,
     /// Path to Gemini CLI (gemini)
     pub gemini_cli_path: Option<String>,
+    /// Path to Safe-Coder CLI (safe-coder)
+    pub safe_coder_cli_path: Option<String>,
+    /// Path to GitHub CLI for Copilot (gh)
+    pub gh_cli_path: Option<String>,
     /// Maximum concurrent workers
     pub max_workers: usize,
     /// Default worker kind to use
     pub default_worker: WorkerKind,
+    /// Strategy for distributing tasks across workers
+    pub worker_strategy: WorkerStrategy,
+    /// List of enabled workers (used for multi-worker strategies)
+    pub enabled_workers: Vec<WorkerKind>,
     /// Whether to use git worktrees for isolation
     pub use_worktrees: bool,
     /// Throttle limits per worker type
@@ -62,6 +89,10 @@ pub struct ThrottleLimits {
     pub claude_max_concurrent: usize,
     /// Maximum concurrent Gemini CLI workers
     pub gemini_max_concurrent: usize,
+    /// Maximum concurrent Safe-Coder workers
+    pub safe_coder_max_concurrent: usize,
+    /// Maximum concurrent GitHub Copilot workers
+    pub copilot_max_concurrent: usize,
     /// Delay between starting workers of the same type (milliseconds)
     pub start_delay_ms: u64,
 }
@@ -71,8 +102,15 @@ impl Default for OrchestratorConfig {
         Self {
             claude_cli_path: Some("claude".to_string()),
             gemini_cli_path: Some("gemini".to_string()),
+            safe_coder_cli_path: std::env::current_exe()
+                .map(|p| p.to_string_lossy().to_string())
+                .ok()
+                .or_else(|| Some("safe-coder".to_string())),
+            gh_cli_path: Some("gh".to_string()),
             max_workers: 3,
             default_worker: WorkerKind::ClaudeCode,
+            worker_strategy: WorkerStrategy::default(),
+            enabled_workers: vec![WorkerKind::ClaudeCode], // Default to just Claude
             use_worktrees: true,
             throttle_limits: ThrottleLimits::default(),
             execution_mode: ExecutionMode::default(),
@@ -85,6 +123,8 @@ impl Default for ThrottleLimits {
         Self {
             claude_max_concurrent: 2,
             gemini_max_concurrent: 2,
+            safe_coder_max_concurrent: 2,
+            copilot_max_concurrent: 2,
             start_delay_ms: 100,
         }
     }
@@ -108,7 +148,10 @@ impl Orchestrator {
     /// Process a user request by planning and delegating to workers
     pub async fn process_request(&mut self, request: &str) -> Result<OrchestratorResponse> {
         // Step 1: Create a high-level plan
-        let plan = self.planner.create_plan(request).await?;
+        let mut plan = self.planner.create_plan(request).await?;
+
+        // Step 1.5: Assign workers to tasks based on configured strategy
+        self.assign_workers_to_tasks(&mut plan);
 
         let mut response = OrchestratorResponse {
             plan: plan.clone(),
@@ -180,6 +223,8 @@ impl Orchestrator {
             let worker_icon = match worker {
                 WorkerKind::ClaudeCode => "🤖",
                 WorkerKind::GeminiCli => "💎",
+                WorkerKind::SafeCoder => "🛡️",
+                WorkerKind::GitHubCopilot => "🐙",
             };
 
             output.push_str(&format!("\n  {}. {} {:?}\n", i + 1, worker_icon, worker));
@@ -327,6 +372,8 @@ impl Orchestrator {
             let max = match worker_kind {
                 WorkerKind::ClaudeCode => self.config.throttle_limits.claude_max_concurrent,
                 WorkerKind::GeminiCli => self.config.throttle_limits.gemini_max_concurrent,
+                WorkerKind::SafeCoder => self.config.throttle_limits.safe_coder_max_concurrent,
+                WorkerKind::GitHubCopilot => self.config.throttle_limits.copilot_max_concurrent,
             };
 
             if count >= max {
@@ -412,6 +459,103 @@ impl Orchestrator {
                 .gemini_cli_path
                 .clone()
                 .unwrap_or_else(|| "gemini".to_string()),
+            WorkerKind::SafeCoder => self.config.safe_coder_cli_path.clone().unwrap_or_else(|| {
+                std::env::current_exe()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "safe-coder".to_string())
+            }),
+            WorkerKind::GitHubCopilot => self
+                .config
+                .gh_cli_path
+                .clone()
+                .unwrap_or_else(|| "gh".to_string()),
+        }
+    }
+
+    /// Assign workers to tasks based on the configured strategy
+    /// This modifies the plan's tasks to set their preferred_worker field
+    fn assign_workers_to_tasks(&self, plan: &mut TaskPlan) {
+        if self.config.enabled_workers.is_empty() {
+            // No workers enabled, use default for all
+            return;
+        }
+
+        match self.config.worker_strategy {
+            WorkerStrategy::SingleWorker => {
+                // Use default worker for all tasks (already the default behavior)
+                for task in &mut plan.tasks {
+                    if task.preferred_worker.is_none() {
+                        task.preferred_worker = Some(self.config.default_worker.clone());
+                    }
+                }
+            }
+            WorkerStrategy::RoundRobin => {
+                // Distribute tasks evenly across enabled workers
+                let workers = &self.config.enabled_workers;
+                for (i, task) in plan.tasks.iter_mut().enumerate() {
+                    if task.preferred_worker.is_none() {
+                        let worker_idx = i % workers.len();
+                        task.preferred_worker = Some(workers[worker_idx].clone());
+                    }
+                }
+            }
+            WorkerStrategy::TaskBased => {
+                // Assign workers based on task characteristics
+                // - Simple/fast tasks (single file, no deps) -> Copilot or SafeCoder
+                // - Complex tasks (multiple files, deps) -> Claude or Gemini
+                for task in &mut plan.tasks {
+                    if task.preferred_worker.is_none() {
+                        let is_simple = task.relevant_files.len() <= 1
+                            && task.dependencies.is_empty()
+                            && task.instructions.len() < 500;
+
+                        task.preferred_worker = Some(if is_simple {
+                            // Prefer faster/lighter workers for simple tasks
+                            self.config
+                                .enabled_workers
+                                .iter()
+                                .find(|w| {
+                                    matches!(w, WorkerKind::GitHubCopilot | WorkerKind::SafeCoder)
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| self.config.default_worker.clone())
+                        } else {
+                            // Prefer more capable workers for complex tasks
+                            self.config
+                                .enabled_workers
+                                .iter()
+                                .find(|w| {
+                                    matches!(w, WorkerKind::ClaudeCode | WorkerKind::GeminiCli)
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| self.config.default_worker.clone())
+                        });
+                    }
+                }
+            }
+            WorkerStrategy::LoadBalanced => {
+                // Assign to workers with least assigned tasks
+                let mut worker_counts: std::collections::HashMap<WorkerKind, usize> = self
+                    .config
+                    .enabled_workers
+                    .iter()
+                    .map(|w| (w.clone(), 0))
+                    .collect();
+
+                for task in &mut plan.tasks {
+                    if task.preferred_worker.is_none() {
+                        // Find worker with minimum assigned tasks
+                        let min_worker = worker_counts
+                            .iter()
+                            .min_by_key(|(_, count)| *count)
+                            .map(|(worker, _)| worker.clone())
+                            .unwrap_or_else(|| self.config.default_worker.clone());
+
+                        task.preferred_worker = Some(min_worker.clone());
+                        *worker_counts.entry(min_worker).or_insert(0) += 1;
+                    }
+                }
+            }
         }
     }
 

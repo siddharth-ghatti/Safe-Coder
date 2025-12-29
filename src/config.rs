@@ -98,12 +98,24 @@ pub struct OrchestratorConfig {
     /// Path to Gemini CLI executable
     #[serde(default = "default_gemini_cli")]
     pub gemini_cli_path: String,
+    /// Path to Safe-Coder CLI executable (defaults to current exe)
+    #[serde(default = "default_safe_coder_cli")]
+    pub safe_coder_cli_path: String,
+    /// Path to GitHub CLI (for Copilot)
+    #[serde(default = "default_gh_cli")]
+    pub gh_cli_path: String,
     /// Maximum number of concurrent workers
     #[serde(default = "default_max_workers")]
     pub max_workers: usize,
-    /// Default worker to use: "claude" or "gemini"
+    /// Default worker to use: "claude", "gemini", "safe-coder", or "github-copilot"
     #[serde(default = "default_worker")]
     pub default_worker: String,
+    /// Worker distribution strategy: "single", "round-robin", "task-based", or "load-balanced"
+    #[serde(default = "default_worker_strategy")]
+    pub worker_strategy: String,
+    /// List of enabled workers for multi-worker strategies
+    #[serde(default = "default_enabled_workers")]
+    pub enabled_workers: Vec<String>,
     /// Use git worktrees for task isolation
     #[serde(default = "default_true")]
     pub use_worktrees: bool,
@@ -121,6 +133,12 @@ pub struct ThrottleLimitsConfig {
     /// Maximum concurrent Gemini CLI workers
     #[serde(default = "default_gemini_max")]
     pub gemini_max_concurrent: usize,
+    /// Maximum concurrent Safe-Coder workers
+    #[serde(default = "default_safe_coder_max")]
+    pub safe_coder_max_concurrent: usize,
+    /// Maximum concurrent GitHub Copilot workers
+    #[serde(default = "default_copilot_max")]
+    pub copilot_max_concurrent: usize,
     /// Delay between starting workers of the same type (milliseconds)
     #[serde(default = "default_start_delay")]
     pub start_delay_ms: u64,
@@ -134,6 +152,17 @@ fn default_gemini_cli() -> String {
     "gemini".to_string()
 }
 
+fn default_safe_coder_cli() -> String {
+    // Default to current executable path or "safe-coder" in PATH
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "safe-coder".to_string())
+}
+
+fn default_gh_cli() -> String {
+    "gh".to_string()
+}
+
 fn default_max_workers() -> usize {
     3
 }
@@ -142,11 +171,27 @@ fn default_worker() -> String {
     "claude".to_string()
 }
 
+fn default_worker_strategy() -> String {
+    "single".to_string()
+}
+
+fn default_enabled_workers() -> Vec<String> {
+    vec!["claude".to_string()]
+}
+
 fn default_claude_max() -> usize {
     2
 }
 
 fn default_gemini_max() -> usize {
+    2
+}
+
+fn default_safe_coder_max() -> usize {
+    2
+}
+
+fn default_copilot_max() -> usize {
     2
 }
 
@@ -159,6 +204,8 @@ impl Default for ThrottleLimitsConfig {
         Self {
             claude_max_concurrent: default_claude_max(),
             gemini_max_concurrent: default_gemini_max(),
+            safe_coder_max_concurrent: default_safe_coder_max(),
+            copilot_max_concurrent: default_copilot_max(),
             start_delay_ms: default_start_delay(),
         }
     }
@@ -169,8 +216,12 @@ impl Default for OrchestratorConfig {
         Self {
             claude_cli_path: default_claude_cli(),
             gemini_cli_path: default_gemini_cli(),
+            safe_coder_cli_path: default_safe_coder_cli(),
+            gh_cli_path: default_gh_cli(),
             max_workers: default_max_workers(),
             default_worker: default_worker(),
+            worker_strategy: default_worker_strategy(),
+            enabled_workers: default_enabled_workers(),
             use_worktrees: true,
             throttle_limits: ThrottleLimitsConfig::default(),
         }

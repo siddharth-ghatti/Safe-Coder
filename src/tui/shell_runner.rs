@@ -106,6 +106,7 @@ enum OrchestrationUpdate {
         block_id: String,
         task_id: String,
         description: String,
+        worker: String,
     },
     /// Streaming output line from task
     TaskOutput {
@@ -523,11 +524,20 @@ impl ShellTuiRunner {
                         block_id,
                         task_id,
                         description,
+                        worker,
                     } => {
                         let prompt = self.app.current_prompt();
+                        // Get worker icon based on worker type
+                        let worker_icon = match worker.to_lowercase().as_str() {
+                            "claude" | "claude-code" | "claudecode" => "🤖",
+                            "gemini" | "gemini-cli" | "geminicli" => "✨",
+                            "safe-coder" | "safecoder" => "🛡️",
+                            "github-copilot" | "copilot" | "githubcopilot" => "🐙",
+                            _ => "⚡",
+                        };
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             let mut child = CommandBlock::new(
-                                format!("Task {}: {}", task_id, description),
+                                format!("{} Task {}: {}", worker_icon, task_id, description),
                                 BlockType::AiToolExecution {
                                     tool_name: format!("task-{}", task_id),
                                 },
@@ -1283,11 +1293,12 @@ Keyboard:
             task_count: 1,
         });
 
-        // Send task started
+        // Send task started (using Claude as the worker for shell mode)
         let _ = tx.send(OrchestrationUpdate::TaskStarted {
             block_id: block_id.clone(),
             task_id: "1".to_string(),
             description: task.clone(),
+            worker: "claude".to_string(),
         });
 
         // Run Claude CLI directly with streaming output
