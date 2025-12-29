@@ -1,16 +1,19 @@
-//! Shell-first TUI rendering with Crush-inspired layout
+//! Shell-first TUI rendering with OpenCode-inspired layout
 //!
-//! Features:
-//! - Right sidebar with logo and session info
-//! - Main content area on left with command blocks
-//! - Status bar and input at bottom
+//! A clean, minimal terminal UI inspired by OpenCode:
+//! - Full-width content area (no sidebar)
+//! - Status bar at bottom with app info, path, and mode
+//! - Clean message blocks with left accent borders
+//! - Beautiful side-by-side diff view with line numbers
+//! - Simple input with model info
 
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
     },
     Frame,
 };
@@ -22,529 +25,154 @@ use super::shell_app::{
     BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
 };
 
-// Crush-inspired color scheme
-const ACCENT_MAGENTA: Color = Color::Rgb(200, 100, 200); // Magenta for AI/logo
-const ACCENT_GREEN: Color = Color::Rgb(100, 200, 140); // Green for success
-const ACCENT_AMBER: Color = Color::Rgb(220, 180, 100); // Amber for tools
-const ACCENT_RED: Color = Color::Rgb(220, 100, 100); // Red for errors
-const ACCENT_CYAN: Color = Color::Rgb(100, 200, 200); // Cyan for info
+// ============================================================================
+// Color Palette - OpenCode inspired, dark and minimal
+// ============================================================================
 
-const TEXT_PRIMARY: Color = Color::Rgb(220, 220, 220); // Main text
+const ACCENT_CYAN: Color = Color::Rgb(80, 200, 220); // Primary accent (input, selections)
+const ACCENT_GREEN: Color = Color::Rgb(120, 200, 120); // Success, additions
+const ACCENT_RED: Color = Color::Rgb(220, 100, 100); // Errors, deletions
+const ACCENT_YELLOW: Color = Color::Rgb(220, 200, 100); // Warnings, highlights
+const ACCENT_MAGENTA: Color = Color::Rgb(180, 120, 200); // AI/model accent
+const ACCENT_BLUE: Color = Color::Rgb(100, 140, 200); // Links, info
+
+const TEXT_PRIMARY: Color = Color::Rgb(210, 210, 215); // Main text
+const TEXT_SECONDARY: Color = Color::Rgb(150, 150, 160); // Secondary text
 const TEXT_DIM: Color = Color::Rgb(100, 100, 110); // Dimmed text
 const TEXT_MUTED: Color = Color::Rgb(70, 70, 80); // Very dim text
 
-const BG_DARK: Color = Color::Rgb(20, 20, 25); // Dark background
-const BORDER_DIM: Color = Color::Rgb(50, 50, 55); // Subtle borders
+const BG_PRIMARY: Color = Color::Rgb(30, 32, 40); // Main background
+const BG_BLOCK: Color = Color::Rgb(38, 40, 50); // Message block background
+const BG_INPUT: Color = Color::Rgb(45, 48, 58); // Input area background
+const BG_STATUS: Color = Color::Rgb(35, 38, 48); // Status bar background
 
-// Animated spinner frames
+const BORDER_SUBTLE: Color = Color::Rgb(55, 58, 68); // Subtle borders
+const BORDER_ACCENT: Color = Color::Rgb(80, 200, 220); // Accent borders
+
+// ============================================================================
+// Animation Constants
+// ============================================================================
+
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const PROGRESS_CHARS: &[&str] = &["░", "▒", "▓", "█", "▓", "▒"];
-const PULSE_CHARS: &[&str] = &["◐", "◓", "◑", "◒"];
-const THINKING_FRAMES: &[&str] = &["🧠", "💭", "💡", "✨"];
 
-// Sidebar constraints
-const SIDEBAR_MIN_WIDTH: u16 = 24;
-const SIDEBAR_PREFERRED_WIDTH: u16 = 36; // Narrower sidebar
-const MIN_MAIN_WIDTH: u16 = 60; // More space for main content
+// ============================================================================
+// Main Draw Function
+// ============================================================================
 
-/// Full ASCII art logo (needs ~45 chars width)
-const LOGO_FULL: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
- ___        __         ___          _
-/ __| __ _ / _|___    / __|___   __| |___ _ _
-\__ \/ _` |  _/ -_)  | (__/ _ \ / _` / -_) '_|
-|___/\__,_|_| \___|   \___\___/ \__,_\___|_|
-╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱"#;
-
-/// Compact logo for narrow terminals
-const LOGO_COMPACT: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
-  ___        __
- / __| __ _ / _|___
- \__ \/ _` |  _/ -_)
- |___/\__,_|_| \___|
-    ___         _
-   / __|___  __| |___ _ _
-  | (__/ _ \/ _` / -_) '_|
-   \___\___/\__,_\___|_|
-╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱"#;
-
-/// Minimal logo for very narrow terminals
-const LOGO_MINIMAL: &str = r#"╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱
- Safe Coder
-╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱╱"#;
-
-/// Calculate sidebar width based on terminal size
-fn calculate_sidebar_width(total_width: u16) -> u16 {
-    // If terminal is too narrow, hide sidebar entirely
-    if total_width < MIN_MAIN_WIDTH + SIDEBAR_MIN_WIDTH {
-        return 0;
-    }
-
-    // Calculate available space for sidebar
-    let available = total_width.saturating_sub(MIN_MAIN_WIDTH);
-
-    // Use preferred width if we have space, otherwise use what's available
-    available
-        .min(SIDEBAR_PREFERRED_WIDTH)
-        .max(SIDEBAR_MIN_WIDTH)
-}
-
-/// Get the appropriate logo based on sidebar width
-fn get_logo_for_width(width: u16) -> &'static str {
-    if width >= 46 {
-        LOGO_FULL
-    } else if width >= 26 {
-        LOGO_COMPACT
-    } else {
-        LOGO_MINIMAL
-    }
-}
-
-/// Draw the complete shell TUI with sidebar
 pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     let size = f.area();
 
-    // Calculate dynamic sidebar width
-    let sidebar_width = calculate_sidebar_width(size.width);
+    // Fill background
+    let bg = Block::default().style(Style::default().bg(BG_PRIMARY));
+    f.render_widget(bg, size);
 
-    // If sidebar width is 0, just draw main content (narrow terminal)
-    if sidebar_width == 0 {
-        draw_main_content(f, app, size);
+    // Main layout: [title] [messages] [input hints] [input] [status bar]
+    let chunks = Layout::vertical([
+        Constraint::Length(1),                           // Title bar
+        Constraint::Min(5),                              // Messages
+        Constraint::Length(1),                           // Input hints (enter send / model)
+        Constraint::Length(calculate_input_height(app)), // Input area
+        Constraint::Length(1),                           // Status bar
+    ])
+    .split(size);
 
-        if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
-            let main_layout = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(3)])
-                .split(size);
-            draw_autocomplete(f, app, main_layout[1]);
-        }
-        return;
-    }
+    draw_title_bar(f, app, chunks[0]);
+    draw_messages(f, app, chunks[1]);
+    draw_input_hints(f, app, chunks[2]);
+    draw_input_area(f, app, chunks[3]);
+    draw_status_bar(f, app, chunks[4]);
 
-    // Main horizontal layout: content (left) | sidebar (right)
-    let horizontal_layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(MIN_MAIN_WIDTH),   // Main content area
-            Constraint::Length(sidebar_width), // Right sidebar (dynamic)
-        ])
-        .split(size);
-
-    // Draw main content area (left side)
-    draw_main_content(f, app, horizontal_layout[0]);
-
-    // Draw sidebar (right side)
-    draw_sidebar(f, app, horizontal_layout[1]);
-
-    // Draw autocomplete popup on top if visible
-    if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
-        let main_layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(3)])
-            .split(horizontal_layout[0]);
-        draw_autocomplete(f, app, main_layout[1]);
-    }
-
-    // Draw file picker dropup if visible
+    // Popups on top
     if app.file_picker.visible {
-        draw_file_picker(f, app, horizontal_layout[0]);
+        draw_file_picker_popup(f, app, size);
+    }
+
+    if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
+        draw_autocomplete_popup(f, app, size);
     }
 }
 
-/// Calculate the wrap width for input - must match between height calculation and rendering
-fn calculate_input_wrap_width(area_width: u16) -> usize {
-    // Inner area has 2 chars less (1 on each side for padding)
-    let inner_width = area_width.saturating_sub(4); // Extra margin for safety
-                                                    // Reserve space for "↵ send" hint (8 chars) + extra padding
-    let hint_space: u16 = 12;
-    let wrap_width = inner_width.saturating_sub(hint_space) as usize;
-    // Use 90% of remaining width for more aggressive wrapping
-    let wrap_width = (wrap_width * 90) / 100;
-    wrap_width.max(10) // minimum 10 chars
+fn calculate_input_height(app: &ShellTuiApp) -> u16 {
+    let lines = app.input.lines().count().max(1).min(5) as u16;
+    lines + 2 // borders
 }
 
-/// Draw the main content area (left side)
-fn draw_main_content(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
-    // Calculate input height based on content (for word wrap)
-    // Use the same wrap width calculation as draw_input for consistency
-    let wrap_width = calculate_input_wrap_width(area.width);
-    let input_char_count = app.input.chars().count() + 2; // +2 for "> " prompt
-    let input_lines = if wrap_width > 0 {
-        ((input_char_count + wrap_width - 1) / wrap_width)
-            .max(1)
-            .min(8) as u16 // max 8 lines
-    } else {
-        1
-    };
-    let input_height = input_lines + 2; // +2 for border and helper text
+// ============================================================================
+// Title Bar
+// ============================================================================
 
-    // Vertical layout: blocks (top), input (bottom)
-    let main_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(3),               // Command blocks
-            Constraint::Length(input_height), // Input area (dynamic)
-        ])
-        .split(area);
+fn draw_title_bar(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
+    let title = Paragraph::new(Line::from(vec![Span::styled(
+        "safe-coder",
+        Style::default()
+            .fg(TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD),
+    )]))
+    .alignment(ratatui::layout::Alignment::Center)
+    .style(Style::default().bg(BG_PRIMARY));
 
-    draw_blocks(f, app, main_layout[0]);
-    draw_input(f, app, main_layout[1]);
+    f.render_widget(title, area);
 }
 
-/// Draw the right sidebar with logo and info
-fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    // Sidebar background
-    let sidebar_block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(BORDER_DIM))
-        .style(Style::default().bg(BG_DARK));
+// ============================================================================
+// Messages Area
+// ============================================================================
 
-    f.render_widget(sidebar_block, area);
-
-    // Calculate logo height based on which logo we'll use
-    let logo = get_logo_for_width(area.width);
-    let logo_height = logo.lines().count() as u16 + 1;
-
-    // Sidebar content layout
-    let sidebar_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(logo_height), // Logo (dynamic height)
-            Constraint::Length(2),           // Session info
-            Constraint::Length(2),           // Project path
-            Constraint::Length(3),           // Model info
-            Constraint::Length(4),           // Permission mode section
-            Constraint::Length(5),           // Modified files section
-            Constraint::Min(1),              // Spacer
-            Constraint::Length(2),           // Help hints
-        ])
-        .margin(1)
-        .split(Rect {
-            x: area.x + 1, // Account for border
-            y: area.y,
-            width: area.width.saturating_sub(2),
-            height: area.height,
-        });
-
-    // Draw logo (pass width to select appropriate logo)
-    draw_logo(f, sidebar_layout[0], area.width, app.animation_frame);
-
-    // Draw session info
-    draw_session_info(f, app, sidebar_layout[1]);
-
-    // Draw project path
-    draw_project_path(f, app, sidebar_layout[2]);
-
-    // Draw model info with animation
-    draw_model_info(f, app, sidebar_layout[3], app.animation_frame);
-
-    // Draw permission mode
-    draw_permission_mode(f, app, sidebar_layout[4], app.animation_frame);
-
-    // Draw modified files
-    draw_modified_files(f, app, sidebar_layout[5]);
-
-    // Draw help hints
-    draw_help_hints(f, sidebar_layout[7]);
-}
-
-/// Draw the ASCII logo (selects appropriate size based on width)
-fn draw_logo(f: &mut Frame, area: Rect, sidebar_width: u16, animation_frame: usize) {
-    let logo = get_logo_for_width(sidebar_width);
-
-    // Subtle color cycling for the logo - creates a gentle shimmer effect
-    let cycle = animation_frame % 60;
-    let base_r = 200u8;
-    let base_g = 100u8;
-    let base_b = 200u8;
-
-    // Very subtle brightness variation
-    let brightness_offset = if cycle < 30 { cycle } else { 60 - cycle } as i16;
-    let r = (base_r as i16 + brightness_offset / 2).clamp(0, 255) as u8;
-    let g = (base_g as i16 + brightness_offset / 3).clamp(0, 255) as u8;
-    let b = (base_b as i16 + brightness_offset / 2).clamp(0, 255) as u8;
-
-    let logo_color = Color::Rgb(r, g, b);
-
-    let logo_lines: Vec<Line> = logo
-        .lines()
-        .map(|line| {
-            Line::from(Span::styled(
-                line.to_string(),
-                Style::default().fg(logo_color),
-            ))
-        })
-        .collect();
-
-    let logo = Paragraph::new(logo_lines);
-    f.render_widget(logo, area);
-}
-
-/// Draw session info section
-fn draw_session_info(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
-    let lines = vec![Line::from(Span::styled(
-        "New Session",
-        Style::default().fg(TEXT_PRIMARY),
-    ))];
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-/// Draw project path section
-fn draw_project_path(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    let path_display = app
-        .cwd
-        .to_string_lossy()
-        .to_string()
-        .replace(std::env::var("HOME").unwrap_or_default().as_str(), "~");
-
-    // Truncate if too long
-    let max_len = area.width as usize - 2;
-    let display = if path_display.len() > max_len {
-        format!("...{}", &path_display[path_display.len() - max_len + 3..])
-    } else {
-        path_display
-    };
-
-    let lines = vec![Line::from(Span::styled(
-        display,
-        Style::default().fg(TEXT_DIM),
-    ))];
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-/// Draw model info section with animated status
-fn draw_model_info(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_frame: usize) {
-    let model_name = if app.ai_connected {
-        "Claude Sonnet"
-    } else {
-        "Not connected"
-    };
-
-    // Animated status indicator
-    let (status, status_indicator) = if app.ai_thinking {
-        let thinking_icon = THINKING_FRAMES[(animation_frame / 3) % THINKING_FRAMES.len()];
-        let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
-        (
-            format!("{} Thinking {}", thinking_icon, spinner),
-            ACCENT_AMBER,
-        )
-    } else if app.ai_connected {
-        // Gentle pulsing for ready state
-        let pulse = PULSE_CHARS[(animation_frame / 5) % PULSE_CHARS.len()];
-        (format!("{} Ready", pulse), ACCENT_GREEN)
-    } else {
-        ("○ Offline".to_string(), TEXT_MUTED)
-    };
-
-    // Animated model indicator when connected
-    let model_indicator = if app.ai_connected {
-        let cycle = animation_frame % 40;
-        if cycle < 20 {
-            "◆"
-        } else {
-            "◇"
-        }
-    } else {
-        "◇"
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{} ", model_indicator),
-                Style::default().fg(ACCENT_MAGENTA),
-            ),
-            Span::styled(model_name, Style::default().fg(TEXT_PRIMARY)),
-        ]),
-        Line::from(Span::styled(status, Style::default().fg(status_indicator))),
-    ];
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-/// Draw permission mode section with animated indicator
-fn draw_permission_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect, animation_frame: usize) {
-    use crate::tools::AgentMode;
-
-    let perm_mode = app.permission_mode;
-    let agent_mode = app.agent_mode;
-
-    // Permission mode colors and icons
-    let (perm_color, perm_icon) = match perm_mode {
-        PermissionMode::Yolo => (ACCENT_RED, "👹"),
-        PermissionMode::Edit => (ACCENT_AMBER, "✏"),
-        PermissionMode::Ask => (ACCENT_GREEN, "🛡"),
-    };
-
-    // Agent mode colors and icons
-    let (agent_color, agent_icon) = match agent_mode {
-        AgentMode::Plan => (ACCENT_CYAN, "🔍"),
-        AgentMode::Build => (ACCENT_GREEN, "🔨"),
-    };
-
-    // Subtle pulsing animation for the mode indicator
-    let pulse = if animation_frame % 30 < 15 {
-        "●"
-    } else {
-        "○"
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("Modes ", Style::default().fg(TEXT_DIM)),
-            Span::styled("──────────", Style::default().fg(BORDER_DIM)),
-        ]),
-        // Agent mode line
-        Line::from(vec![
-            Span::styled(format!("{} ", agent_icon), Style::default().fg(agent_color)),
-            Span::styled(
-                agent_mode.short_name(),
-                Style::default()
-                    .fg(agent_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" {}", pulse), Style::default().fg(agent_color)),
-        ]),
-        Line::from(Span::styled(
-            "ctrl+g: toggle",
-            Style::default().fg(TEXT_MUTED),
-        )),
-        // Permission mode line
-        Line::from(vec![
-            Span::styled(format!("{} ", perm_icon), Style::default().fg(perm_color)),
-            Span::styled(
-                perm_mode.short_name(),
-                Style::default().fg(perm_color).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(Span::styled(
-            "ctrl+p: toggle",
-            Style::default().fg(TEXT_MUTED),
-        )),
-    ];
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-/// Draw modified files section
-fn draw_modified_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    // Count unique files that were edited in recent tool calls
-    let mut seen = std::collections::HashSet::new();
-    let modified_files: Vec<String> = app
-        .blocks
-        .iter()
-        .flat_map(|b| &b.children)
-        .filter_map(|child| child.diff.as_ref().map(|d| d.path.clone()))
-        .filter(|path| seen.insert(path.clone()))
-        .collect();
-
-    let mut lines = vec![Line::from(vec![
-        Span::styled("Modified Files", Style::default().fg(TEXT_DIM)),
-        Span::styled(" ─────────", Style::default().fg(BORDER_DIM)),
-    ])];
-
-    if modified_files.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "None",
-            Style::default().fg(TEXT_MUTED),
-        )));
-    } else {
-        for file in modified_files.iter().take(3) {
-            let display = if file.len() > 20 {
-                format!("...{}", &file[file.len() - 17..])
-            } else {
-                file.clone()
-            };
-            lines.push(Line::from(vec![
-                Span::styled("● ", Style::default().fg(ACCENT_GREEN)),
-                Span::styled(display, Style::default().fg(TEXT_DIM)),
-            ]));
-        }
-        if modified_files.len() > 3 {
-            lines.push(Line::from(Span::styled(
-                format!("  +{} more", modified_files.len() - 3),
-                Style::default().fg(TEXT_MUTED),
-            )));
-        }
-    }
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-/// Draw help hints at bottom of sidebar
-fn draw_help_hints(f: &mut Frame, area: Rect) {
-    let lines = vec![Line::from(Span::styled(
-        "/help · @file context",
-        Style::default().fg(TEXT_MUTED),
-    ))];
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
-
-/// Draw command blocks
-fn draw_blocks(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    if area.height < 2 || area.width < 10 {
+fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
+    if area.height < 3 {
         return;
     }
 
-    let content_width = (area.width.saturating_sub(4)) as usize;
-    let content_width = content_width.max(20);
+    let content_width = area.width.saturating_sub(4) as usize;
 
-    // Build all lines from blocks
-    let mut all_lines: Vec<String> = Vec::new();
+    // Build all rendered lines
+    let mut all_lines: Vec<MessageLine> = Vec::new();
 
-    for block in app.blocks.iter() {
-        render_block_to_strings(block, content_width, &mut all_lines, app.animation_frame);
-        all_lines.push(String::new()); // Gap between blocks
+    for block in &app.blocks {
+        render_block(&mut all_lines, block, content_width, app.animation_frame);
+        all_lines.push(MessageLine::Empty); // Gap between blocks
     }
 
-    // Calculate visible portion (scroll_offset = 0 shows bottom)
-    let max_lines = area.height as usize;
+    // Calculate visible portion (auto-scroll to bottom)
+    let max_visible = area.height as usize;
     let total_lines = all_lines.len();
 
-    let visible_start = if total_lines > max_lines {
+    let visible_start = if total_lines > max_visible {
         total_lines
-            .saturating_sub(max_lines)
+            .saturating_sub(max_visible)
             .saturating_sub(app.scroll_offset)
     } else {
         0
     };
-    let visible_end = (visible_start + max_lines).min(total_lines);
+    let visible_end = (visible_start + max_visible).min(total_lines);
 
-    let visible_items: Vec<ListItem> = all_lines
+    // Render visible lines
+    let items: Vec<ListItem> = all_lines
         .get(visible_start..visible_end)
         .unwrap_or(&[])
         .iter()
-        .map(|s| {
-            let line = colorize_line(s);
-            ListItem::new(line)
-        })
+        .map(|line| ListItem::new(line.to_line()))
         .collect();
 
-    let list = List::new(visible_items);
+    let list = List::new(items).style(Style::default().bg(BG_PRIMARY));
     f.render_widget(list, area);
 
-    // Scrollbar
-    if total_lines > max_lines {
+    // Scrollbar if needed
+    if total_lines > max_visible {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
+            .track_symbol(Some(" "))
+            .thumb_symbol("┃")
+            .track_style(Style::default().fg(BG_PRIMARY))
+            .thumb_style(Style::default().fg(BORDER_SUBTLE));
 
         let scroll_pos = total_lines
-            .saturating_sub(max_lines)
+            .saturating_sub(max_visible)
             .saturating_sub(app.scroll_offset);
 
-        let mut scrollbar_state =
-            ScrollbarState::new(total_lines.saturating_sub(max_lines)).position(scroll_pos);
+        let mut state =
+            ScrollbarState::new(total_lines.saturating_sub(max_visible)).position(scroll_pos);
 
         let scrollbar_area = Rect {
             x: area.x + area.width.saturating_sub(1),
@@ -553,358 +181,483 @@ fn draw_blocks(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             height: area.height,
         };
 
-        f.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+        f.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
     }
 }
 
-/// Colorize a line based on embedded markers (Claude Code style)
-fn colorize_line(s: &str) -> Line<'static> {
-    // AI response lines - clean bullet style like Claude Code
-    // "● " is 4 bytes (● is 3 bytes + space)
-    if s.starts_with("● ") {
-        let content = if s.len() > 4 { &s[4..] } else { "" };
-        Line::from(vec![
-            Span::styled("● ", Style::default().fg(TEXT_DIM)),
-            Span::styled(content.to_string(), Style::default().fg(TEXT_PRIMARY)),
-        ])
-    // AI response continuation (indented)
-    } else if s.starts_with("  ") && !s.trim().is_empty() {
-        Line::from(Span::styled(
-            s.to_string(),
-            Style::default().fg(TEXT_PRIMARY),
-        ))
-    // Tool execution - compact amber style
-    } else if s.starts_with("⚡ ") {
-        Line::from(Span::styled(
-            s.to_string(),
-            Style::default().fg(ACCENT_AMBER),
-        ))
-    // Diff lines
-    } else if s.starts_with("  - ") {
-        Line::from(Span::styled(s.to_string(), Style::default().fg(ACCENT_RED)))
-    } else if s.starts_with("  + ") {
-        Line::from(Span::styled(
-            s.to_string(),
-            Style::default().fg(ACCENT_GREEN),
-        ))
-    // File path in diff
-    } else if s.starts_with("  📝 ") {
-        Line::from(Span::styled(
-            s.to_string(),
-            Style::default().fg(ACCENT_AMBER),
-        ))
-    // Shell output
-    } else if s.starts_with("  ") {
-        Line::from(Span::styled(s.to_string(), Style::default().fg(TEXT_DIM)))
-    // User input - shell command style
-    } else if s.starts_with("> ") {
-        let content = &s[2..];
-        Line::from(vec![
-            Span::styled("> ", Style::default().fg(TEXT_DIM)),
-            Span::styled(
-                content.to_string(),
-                Style::default()
-                    .fg(TEXT_PRIMARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ])
-    // System/muted messages
-    } else if s.starts_with("? ") {
-        Line::from(Span::styled(s.to_string(), Style::default().fg(TEXT_MUTED)))
-    } else {
-        Line::from(Span::styled(
-            s.to_string(),
-            Style::default().fg(TEXT_PRIMARY),
-        ))
+// ============================================================================
+// Message Line Types (OpenCode style)
+// ============================================================================
+
+#[derive(Clone)]
+enum MessageLine {
+    Empty,
+    // User input header: "# Change button color..."
+    UserHeader {
+        text: String,
+    },
+    // Session link line (dimmed)
+    SessionInfo {
+        text: String,
+    },
+    // Block separator
+    BlockStart,
+    // AI response text with left border
+    AiText {
+        text: String,
+        model: Option<String>,
+        timestamp: Option<String>,
+    },
+    // Tool header: "Edit packages/frontend/..."
+    ToolHeader {
+        tool: String,
+        target: String,
+    },
+    // Diff line with line numbers
+    DiffContext {
+        old_num: String,
+        new_num: String,
+        text: String,
+    },
+    DiffRemove {
+        old_num: String,
+        text: String,
+    },
+    DiffAdd {
+        new_num: String,
+        text: String,
+    },
+    // Shell command output
+    ShellOutput {
+        text: String,
+    },
+    // System/info message
+    SystemInfo {
+        text: String,
+    },
+    // Streaming/running indicator
+    Running {
+        text: String,
+        spinner_frame: usize,
+    },
+}
+
+impl MessageLine {
+    fn to_line(&self) -> Line<'static> {
+        match self {
+            MessageLine::Empty => Line::from(""),
+
+            MessageLine::UserHeader { text } => Line::from(vec![
+                Span::styled("# ", Style::default().fg(TEXT_DIM)),
+                Span::styled(
+                    text.clone(),
+                    Style::default()
+                        .fg(TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+
+            MessageLine::SessionInfo { text } => {
+                Line::from(Span::styled(text.clone(), Style::default().fg(TEXT_DIM)))
+            }
+
+            MessageLine::BlockStart => Line::from(Span::styled(
+                "─".repeat(60),
+                Style::default().fg(BORDER_SUBTLE),
+            )),
+
+            MessageLine::AiText {
+                text,
+                model,
+                timestamp,
+            } => {
+                let mut spans = vec![
+                    Span::styled("│ ", Style::default().fg(BORDER_ACCENT)),
+                    Span::styled(text.clone(), Style::default().fg(TEXT_PRIMARY)),
+                ];
+
+                // Add model/timestamp on first line if present
+                if let (Some(m), Some(t)) = (model, timestamp) {
+                    spans.push(Span::styled(
+                        format!("\n  {} ({})", m, t),
+                        Style::default().fg(TEXT_DIM),
+                    ));
+                }
+
+                Line::from(spans)
+            }
+
+            MessageLine::ToolHeader { tool, target } => Line::from(vec![
+                Span::styled("│ ", Style::default().fg(BORDER_SUBTLE)),
+                Span::styled(format!("{} ", tool), Style::default().fg(TEXT_SECONDARY)),
+                Span::styled(target.clone(), Style::default().fg(TEXT_PRIMARY)),
+            ]),
+
+            MessageLine::DiffContext {
+                old_num,
+                new_num,
+                text,
+            } => Line::from(vec![
+                Span::styled("│ ", Style::default().fg(BORDER_SUBTLE)),
+                Span::styled(format!("{:>4} ", old_num), Style::default().fg(TEXT_DIM)),
+                Span::styled(format!("{:>4} ", new_num), Style::default().fg(TEXT_DIM)),
+                Span::styled("  ", Style::default()),
+                Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
+            ]),
+
+            MessageLine::DiffRemove { old_num, text } => Line::from(vec![
+                Span::styled("│ ", Style::default().fg(ACCENT_RED)),
+                Span::styled(format!("{:>4} ", old_num), Style::default().fg(ACCENT_RED)),
+                Span::styled("     ", Style::default()),
+                Span::styled("- ", Style::default().fg(ACCENT_RED)),
+                Span::styled(
+                    text.clone(),
+                    Style::default()
+                        .fg(ACCENT_RED)
+                        .add_modifier(Modifier::CROSSED_OUT),
+                ),
+            ]),
+
+            MessageLine::DiffAdd { new_num, text } => Line::from(vec![
+                Span::styled("│ ", Style::default().fg(ACCENT_GREEN)),
+                Span::styled("     ", Style::default()),
+                Span::styled(
+                    format!("{:>4} ", new_num),
+                    Style::default().fg(ACCENT_GREEN),
+                ),
+                Span::styled("+ ", Style::default().fg(ACCENT_GREEN)),
+                Span::styled(text.clone(), Style::default().fg(ACCENT_GREEN)),
+            ]),
+
+            MessageLine::ShellOutput { text } => Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
+            ]),
+
+            MessageLine::SystemInfo { text } => {
+                Line::from(Span::styled(text.clone(), Style::default().fg(TEXT_DIM)))
+            }
+
+            MessageLine::Running {
+                text,
+                spinner_frame,
+            } => {
+                let spinner = SPINNER_FRAMES[*spinner_frame % SPINNER_FRAMES.len()];
+                Line::from(vec![
+                    Span::styled("│ ", Style::default().fg(ACCENT_CYAN)),
+                    Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+                    Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
+                ])
+            }
+        }
     }
 }
 
-/// Render a single command block to plain strings (Claude Code style)
-fn render_block_to_strings(
-    block: &CommandBlock,
-    width: usize,
-    lines: &mut Vec<String>,
-    animation_frame: usize,
-) {
+// ============================================================================
+// Block Rendering
+// ============================================================================
+
+fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize) {
     match &block.block_type {
         BlockType::SystemMessage => {
-            // System messages - muted, with ? prefix
-            let output = block.output.get_text();
-            for line in output.lines() {
-                let wrapped = wrap(line, width.saturating_sub(2));
-                for wrapped_line in wrapped {
-                    lines.push(format!("? {}", wrapped_line));
+            for line in block.output.get_text().lines() {
+                for wrapped in wrap(line, width.saturating_sub(4)) {
+                    lines.push(MessageLine::SystemInfo {
+                        text: wrapped.to_string(),
+                    });
                 }
             }
         }
 
         BlockType::ShellCommand => {
-            // User shell command - "> command" style
-            let mut header = format!("> {}", block.input);
+            // User command header
+            lines.push(MessageLine::UserHeader {
+                text: block.input.clone(),
+            });
 
             if block.is_running() {
-                let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
-                header.push_str(&format!("  {}", spinner));
-            } else if let Some(code) = block.exit_code {
-                if code != 0 {
-                    header.push_str(&format!(" ✗ {}", code));
-                }
+                lines.push(MessageLine::Running {
+                    text: "Running...".to_string(),
+                    spinner_frame: frame,
+                });
             }
 
-            lines.push(header);
+            // Output
+            render_output(lines, &block.output, width);
+        }
 
-            // Shell output - indented
-            let output = block.output.get_text();
-            if !output.is_empty() {
-                for line in output.lines().take(30) {
-                    let wrapped = wrap(line, width.saturating_sub(4));
-                    for wrapped_line in wrapped {
-                        lines.push(format!("  {}", wrapped_line));
+        BlockType::AiQuery => {
+            // User query header (like "# Change button color to danger...")
+            lines.push(MessageLine::UserHeader {
+                text: block.input.clone(),
+            });
+
+            if block.is_running() && block.children.is_empty() && block.output.get_text().is_empty()
+            {
+                lines.push(MessageLine::Running {
+                    text: "Thinking...".to_string(),
+                    spinner_frame: frame,
+                });
+            }
+
+            // Render children (tools, reasoning)
+            for child in &block.children {
+                render_child_block(lines, child, width, frame);
+            }
+
+            // Final AI response
+            let text = block.output.get_text();
+            if !text.is_empty() {
+                lines.push(MessageLine::Empty);
+                lines.push(MessageLine::BlockStart);
+
+                let output_lines: Vec<&str> = text.lines().collect();
+                let total = output_lines.len();
+
+                for (i, line) in output_lines.iter().enumerate() {
+                    for wrapped in wrap(line, width.saturating_sub(4)) {
+                        let is_last = i == total - 1;
+                        lines.push(MessageLine::AiText {
+                            text: wrapped.to_string(),
+                            model: if is_last {
+                                Some("claude-sonnet-4".to_string())
+                            } else {
+                                None
+                            },
+                            timestamp: if is_last {
+                                Some(chrono::Local::now().format("%I:%M %p").to_string())
+                            } else {
+                                None
+                            },
+                        });
                     }
-                }
-                if output.lines().count() > 30 {
-                    lines.push("  ... [truncated]".to_string());
                 }
             }
         }
 
-        BlockType::AiQuery => {
-            // User query - "> query" style (same as shell for consistency)
-            let mut header = format!("> {}", block.input);
+        BlockType::Orchestration => {
+            lines.push(MessageLine::UserHeader {
+                text: format!("orchestrate: {}", block.input),
+            });
+
+            render_output(lines, &block.output, width);
+
+            for child in &block.children {
+                render_child_block(lines, child, width, frame);
+            }
+        }
+
+        BlockType::AiToolExecution { .. } => {
+            render_child_block(lines, block, width, frame);
+        }
+
+        BlockType::AiReasoning => {
+            let text = block.output.get_text();
+            for line in text.lines() {
+                for wrapped in wrap(line, width.saturating_sub(4)) {
+                    lines.push(MessageLine::AiText {
+                        text: wrapped.to_string(),
+                        model: None,
+                        timestamp: None,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn render_child_block(
+    lines: &mut Vec<MessageLine>,
+    block: &CommandBlock,
+    width: usize,
+    frame: usize,
+) {
+    match &block.block_type {
+        BlockType::AiToolExecution { tool_name } => {
+            lines.push(MessageLine::Empty);
+            lines.push(MessageLine::BlockStart);
+
+            // Tool header
+            let target = if !block.input.is_empty() {
+                block.input.clone()
+            } else {
+                String::new()
+            };
+
+            // Capitalize first letter of tool name
+            let tool_display = match tool_name.as_str() {
+                "bash" => "Bash".to_string(),
+                "read" | "Read" => "Read".to_string(),
+                "write" | "Write" => "Write".to_string(),
+                "edit" | "Edit" => "Edit".to_string(),
+                "glob" | "Glob" => "Glob".to_string(),
+                "grep" | "Grep" => "Grep".to_string(),
+                name if name.starts_with("task-") => format!("Task {}", &name[5..]),
+                other => other.to_string(),
+            };
+
+            lines.push(MessageLine::ToolHeader {
+                tool: tool_display,
+                target,
+            });
 
             if block.is_running() {
-                let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
-                header.push_str(&format!("  {}", spinner));
+                lines.push(MessageLine::Running {
+                    text: "Executing...".to_string(),
+                    spinner_frame: frame,
+                });
             }
 
-            lines.push(header);
-
-            // Render child blocks (tools and reasoning) in order
-            if !block.children.is_empty() {
-                for child in &block.children {
-                    match &child.block_type {
-                        BlockType::AiToolExecution { .. } => {
-                            render_tool_strings(child, width, lines, animation_frame);
-                        }
-                        BlockType::AiReasoning => {
-                            render_reasoning_strings(child, width, lines);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // Render final AI response - bullet point style like Claude Code
-            let output = block.output.get_text();
-            if !output.is_empty() && !block.is_running() {
-                let output_lines: Vec<&str> = output.lines().collect();
-                for (i, line) in output_lines.iter().enumerate() {
-                    let wrapped = wrap(line, width.saturating_sub(4));
-                    for (j, wrapped_line) in wrapped.iter().enumerate() {
-                        if i == 0 && j == 0 {
-                            // First line gets bullet
-                            lines.push(format!("● {}", wrapped_line));
-                        } else {
-                            // Continuation lines are indented
-                            lines.push(format!("  {}", wrapped_line));
-                        }
-                    }
-                }
-            } else if block.is_running() && output.is_empty() && block.children.is_empty() {
-                let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
-                lines.push(format!("● {} ...", spinner));
+            // Show diff if present (OpenCode-style with line numbers)
+            if let Some(diff) = &block.diff {
+                render_diff_opencode(lines, diff, width);
+            } else if tool_name == "bash" || tool_name.starts_with("task-") {
+                render_tool_output(lines, &block.output, width);
             }
         }
 
         BlockType::AiReasoning => {
-            render_reasoning_strings(block, width, lines);
-        }
-
-        BlockType::AiToolExecution { .. } => {
-            render_tool_strings(block, width, lines, animation_frame);
-        }
-
-        BlockType::Orchestration => {
-            let mut header = format!("> orchestrate {}", block.input);
-
-            if block.is_running() {
-                let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
-                header.push_str(&format!("  {}", spinner));
-            }
-
-            lines.push(header);
-
-            let output = block.output.get_text();
-            if !output.is_empty() {
-                for line in output.lines() {
-                    let wrapped = wrap(line, width.saturating_sub(4));
-                    for wrapped_line in wrapped {
-                        lines.push(format!("  {}", wrapped_line));
+            let text = block.output.get_text();
+            if !text.is_empty() {
+                lines.push(MessageLine::Empty);
+                for line in text.lines() {
+                    for wrapped in wrap(line, width.saturating_sub(4)) {
+                        lines.push(MessageLine::AiText {
+                            text: wrapped.to_string(),
+                            model: None,
+                            timestamp: None,
+                        });
                     }
                 }
             }
-
-            // Render child blocks (tasks) for orchestration
-            if !block.children.is_empty() {
-                for child in &block.children {
-                    render_tool_strings(child, width, lines, animation_frame);
-                }
-            }
         }
+
+        _ => {}
     }
 }
 
-/// Render tool execution block strings (compact style)
-fn render_tool_strings(
-    block: &CommandBlock,
-    width: usize,
-    lines: &mut Vec<String>,
-    animation_frame: usize,
-) {
-    let tool_name = match &block.block_type {
-        BlockType::AiToolExecution { tool_name } => tool_name.clone(),
-        _ => "tool".to_string(),
-    };
-
-    // Compact tool header
-    let mut header = format!("⚡ {}", tool_name);
-
-    // Add brief description if present
-    if !block.input.is_empty() {
-        let desc = if block.input.chars().count() > 40 {
-            // Safe truncation for UTF-8
-            let truncated: String = block.input.chars().take(37).collect();
-            format!("{}...", truncated)
-        } else {
-            block.input.clone()
-        };
-        header.push_str(&format!(" {}", desc));
-    }
-
-    if block.is_running() {
-        let spinner = SPINNER_FRAMES[animation_frame % SPINNER_FRAMES.len()];
-        header.push_str(&format!(" {}", spinner));
-    } else if let Some(exit_code) = block.exit_code {
-        if exit_code == 0 {
-            header.push_str(" ✓");
-        } else {
-            header.push_str(" ✗");
-        }
-    }
-
-    lines.push(header);
-
-    // Show diff if present
-    if let Some(diff) = &block.diff {
-        render_diff_strings(diff, width, lines);
-    } else if tool_name == "bash" || tool_name.starts_with("task-") {
-        // For bash commands and orchestration tasks, show streaming output inline
-        match &block.output {
-            BlockOutput::Streaming {
-                lines: output_lines,
-                ..
-            } => {
-                // Show last N lines of streaming output for compact view
-                let max_lines = if tool_name.starts_with("task-") {
-                    12
-                } else {
-                    8
-                };
-                let start = output_lines.len().saturating_sub(max_lines);
-                for line in output_lines.iter().skip(start) {
-                    let wrapped = wrap(line, width.saturating_sub(4));
-                    for wrapped_line in wrapped {
-                        lines.push(format!("  │ {}", wrapped_line));
-                    }
-                }
-                if output_lines.len() > max_lines {
-                    lines.push(format!(
-                        "  │ ... ({} more lines)",
-                        output_lines.len() - max_lines
-                    ));
+fn render_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+    match output {
+        BlockOutput::Streaming {
+            lines: output_lines,
+            ..
+        } => {
+            for line in output_lines.iter().take(20) {
+                for wrapped in wrap(line, width.saturating_sub(4)) {
+                    lines.push(MessageLine::ShellOutput {
+                        text: wrapped.to_string(),
+                    });
                 }
             }
-            BlockOutput::Success(output) if !output.is_empty() => {
-                // Show completed output (truncated)
-                let output_lines: Vec<&str> = output.lines().take(8).collect();
-                for line in output_lines {
-                    let wrapped = wrap(line, width.saturating_sub(4));
-                    for wrapped_line in wrapped {
-                        lines.push(format!("  │ {}", wrapped_line));
-                    }
-                }
-                let total_lines = output.lines().count();
-                if total_lines > 8 {
-                    lines.push(format!("  │ ... ({} more lines)", total_lines - 8));
-                }
-            }
-            BlockOutput::Error { message, .. } => {
-                lines.push(format!("  │ ✗ {}", message));
-            }
-            _ => {}
-        }
-    }
-    // For other tools, keep minimal output (diffs only)
-}
-
-/// Render AI reasoning text (inline between tools)
-fn render_reasoning_strings(block: &CommandBlock, width: usize, lines: &mut Vec<String>) {
-    let output = block.output.get_text();
-    if output.is_empty() {
-        return;
-    }
-
-    // Render reasoning as bullet points too
-    let output_lines: Vec<&str> = output.lines().collect();
-    for (i, line) in output_lines.iter().enumerate() {
-        let wrapped = wrap(line, width.saturating_sub(4));
-        for (j, wrapped_line) in wrapped.iter().enumerate() {
-            if i == 0 && j == 0 {
-                lines.push(format!("● {}", wrapped_line));
-            } else {
-                lines.push(format!("  {}", wrapped_line));
+            if output_lines.len() > 20 {
+                lines.push(MessageLine::ShellOutput {
+                    text: format!("... {} more lines", output_lines.len() - 20),
+                });
             }
         }
+        BlockOutput::Success(text) if !text.is_empty() => {
+            for line in text.lines().take(20) {
+                for wrapped in wrap(line, width.saturating_sub(4)) {
+                    lines.push(MessageLine::ShellOutput {
+                        text: wrapped.to_string(),
+                    });
+                }
+            }
+            if text.lines().count() > 20 {
+                lines.push(MessageLine::ShellOutput {
+                    text: format!("... {} more lines", text.lines().count() - 20),
+                });
+            }
+        }
+        BlockOutput::Error { message, .. } => {
+            lines.push(MessageLine::ShellOutput {
+                text: format!("Error: {}", message),
+            });
+        }
+        _ => {}
     }
 }
 
-/// Render a file diff with color-coded additions and deletions (compact)
-fn render_diff_strings(diff: &FileDiff, width: usize, lines: &mut Vec<String>) {
-    lines.push(format!("  📝 {}", diff.path));
+fn render_tool_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+    match output {
+        BlockOutput::Streaming {
+            lines: output_lines,
+            ..
+        } => {
+            for line in output_lines.iter().take(10) {
+                for wrapped in wrap(line, width.saturating_sub(14)) {
+                    lines.push(MessageLine::ShellOutput {
+                        text: format!("  {}", wrapped),
+                    });
+                }
+            }
+        }
+        BlockOutput::Success(text) if !text.is_empty() => {
+            for line in text.lines().take(8) {
+                for wrapped in wrap(line, width.saturating_sub(14)) {
+                    lines.push(MessageLine::ShellOutput {
+                        text: format!("  {}", wrapped),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
+/// Render diff in OpenCode style with side-by-side line numbers
+fn render_diff_opencode(lines: &mut Vec<MessageLine>, diff: &FileDiff, _width: usize) {
     let text_diff = TextDiff::from_lines(&diff.old_content, &diff.new_content);
 
-    let inner_width = width.saturating_sub(6);
-    let mut change_count = 0;
+    let mut old_line = 1usize;
+    let mut new_line = 1usize;
+    let mut changes_shown = 0;
+    let max_changes = 15;
 
-    for change in text_diff.iter_all_changes() {
-        if change_count >= 10 {
+    // Find the first change and show some context
+    let changes: Vec<_> = text_diff.iter_all_changes().collect();
+
+    // Find first actual change
+    let first_change_idx = changes.iter().position(|c| c.tag() != ChangeTag::Equal);
+    let start_idx = first_change_idx.map(|i| i.saturating_sub(2)).unwrap_or(0);
+
+    for (idx, change) in changes.iter().enumerate().skip(start_idx) {
+        if changes_shown >= max_changes {
             break;
         }
 
-        let line_content = change.value().trim_end();
-
-        let display_content = if line_content.chars().count() > inner_width {
-            // Safe truncation for UTF-8
-            let truncated: String = line_content
-                .chars()
-                .take(inner_width.saturating_sub(3))
-                .collect();
-            format!("{}...", truncated)
-        } else {
-            line_content.to_string()
-        };
+        let content = change.value().trim_end();
 
         match change.tag() {
+            ChangeTag::Equal => {
+                // Only show context around changes
+                let near_change = idx >= start_idx && idx < start_idx + max_changes + 4;
+                if near_change {
+                    lines.push(MessageLine::DiffContext {
+                        old_num: old_line.to_string(),
+                        new_num: new_line.to_string(),
+                        text: content.to_string(),
+                    });
+                }
+                old_line += 1;
+                new_line += 1;
+            }
             ChangeTag::Delete => {
-                lines.push(format!("  - {}", display_content));
-                change_count += 1;
+                lines.push(MessageLine::DiffRemove {
+                    old_num: old_line.to_string(),
+                    text: content.to_string(),
+                });
+                old_line += 1;
+                changes_shown += 1;
             }
             ChangeTag::Insert => {
-                lines.push(format!("  + {}", display_content));
-                change_count += 1;
+                lines.push(MessageLine::DiffAdd {
+                    new_num: new_line.to_string(),
+                    text: content.to_string(),
+                });
+                new_line += 1;
+                changes_shown += 1;
             }
-            ChangeTag::Equal => {}
         }
     }
 
@@ -913,434 +666,288 @@ fn render_diff_strings(diff: &FileDiff, width: usize, lines: &mut Vec<String>) {
         .filter(|c| c.tag() != ChangeTag::Equal)
         .count();
 
-    if total_changes > 10 {
-        lines.push(format!("  ... ({} more changes)", total_changes - 10));
+    if total_changes > max_changes {
+        lines.push(MessageLine::ShellOutput {
+            text: format!("  ... {} more changes", total_changes - max_changes),
+        });
     }
 }
 
-/// Draw the input area at the bottom (Claude Code style with word wrap)
-fn draw_input(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    use ratatui::widgets::Wrap;
+// ============================================================================
+// Input Hints (above input)
+// ============================================================================
 
-    // No border, just a clean separator line
-    let separator = Block::default()
-        .borders(Borders::TOP)
-        .border_style(Style::default().fg(BORDER_DIM));
-    f.render_widget(separator, area);
-
-    let inner = Rect {
-        x: area.x + 1,
-        y: area.y + 1,
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(1),
-    };
-
-    let input_color = TEXT_PRIMARY;
-
-    // Build the full input text with prompt and cursor
-    let (before_cursor, after_cursor) = app.input.split_at(app.cursor_pos.min(app.input.len()));
-
-    // Cursor character (blinking) - must be String for consistent type
-    let cursor_char: String = if app.animation_frame % 20 < 10 {
-        if after_cursor.is_empty() {
-            "█".to_string()
-        } else {
-            // Safe first char extraction
-            after_cursor
-                .chars()
-                .next()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "█".to_string())
-        }
+fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let model_name = if app.ai_connected {
+        "Anthropic Claude Sonnet 4"
     } else {
-        if after_cursor.is_empty() {
-            " ".to_string()
-        } else {
-            after_cursor
-                .chars()
-                .next()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| " ".to_string())
-        }
+        "Not connected"
     };
 
-    // Get rest after cursor (skip first char safely)
-    let after_cursor_rest: String = after_cursor.chars().skip(1).collect();
+    let left = Span::styled("enter ", Style::default().fg(TEXT_DIM));
+    let left2 = Span::styled("send", Style::default().fg(TEXT_SECONDARY));
 
-    // Build full input string for manual wrapping
-    let full_input = format!("> {}", app.input);
+    let right = Span::styled(model_name, Style::default().fg(TEXT_SECONDARY));
 
-    // Use consistent wrap width calculation (same as height calculation)
-    let wrap_width = calculate_input_wrap_width(area.width);
+    // Calculate spacing
+    let left_len = 10; // "enter send"
+    let right_len = model_name.len();
+    let padding = area
+        .width
+        .saturating_sub(left_len as u16 + right_len as u16 + 2) as usize;
 
-    // Manually wrap the text into lines
-    let wrapped_lines: Vec<String> = if wrap_width > 0 {
-        let mut lines = Vec::new();
-        let mut current_line = String::new();
-        let mut char_count = 0;
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        left,
+        left2,
+        Span::styled(" ".repeat(padding), Style::default()),
+        right,
+        Span::styled(" ", Style::default()),
+    ]);
 
-        for ch in full_input.chars() {
-            current_line.push(ch);
-            char_count += 1;
-            if char_count >= wrap_width {
-                lines.push(current_line.clone());
-                current_line.clear();
-                char_count = 0;
-            }
-        }
-        if !current_line.is_empty() {
-            lines.push(current_line);
-        }
-        if lines.is_empty() {
-            lines.push("> ".to_string());
-        }
-        lines
+    let para = Paragraph::new(line).style(Style::default().bg(BG_PRIMARY));
+    f.render_widget(para, area);
+}
+
+// ============================================================================
+// Input Area
+// ============================================================================
+
+fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_SUBTLE))
+        .style(Style::default().bg(BG_INPUT));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Build input with cursor
+    let (before, after) = app.input.split_at(app.cursor_pos.min(app.input.len()));
+
+    // Blinking cursor
+    let cursor_visible = app.animation_frame % 16 < 10;
+    let cursor_char = if cursor_visible { "█" } else { " " };
+
+    let after_rest: String = if !after.is_empty() {
+        after.chars().skip(1).collect()
     } else {
-        vec![full_input]
+        String::new()
     };
 
-    // Now build styled lines with cursor in the right position
-    let cursor_pos_in_full = app.cursor_pos + 2; // +2 for "> "
-    let mut styled_lines: Vec<Line> = Vec::new();
-    let mut chars_processed = 0;
+    let mut spans = vec![Span::styled("> ", Style::default().fg(TEXT_DIM))];
 
-    for line_str in &wrapped_lines {
-        let line_start = chars_processed;
-        let line_end = chars_processed + line_str.chars().count();
-
-        // Check if cursor is on this line
-        if cursor_pos_in_full >= line_start && cursor_pos_in_full <= line_end {
-            // Cursor is on this line - build with cursor highlight
-            let cursor_offset = cursor_pos_in_full - line_start;
-            let before: String = line_str.chars().take(cursor_offset).collect();
-            let at_cursor: String = line_str.chars().skip(cursor_offset).take(1).collect();
-            let after: String = line_str.chars().skip(cursor_offset + 1).collect();
-
-            let cursor_display = if at_cursor.is_empty() {
-                cursor_char.clone()
-            } else {
-                at_cursor
-            };
-
-            // Style the "> " prompt differently
-            let mut spans = if line_start == 0 && cursor_offset > 2 {
-                vec![
-                    Span::styled("> ", Style::default().fg(TEXT_DIM)),
-                    Span::styled(
-                        line_str
-                            .chars()
-                            .skip(2)
-                            .take(cursor_offset - 2)
-                            .collect::<String>(),
-                        Style::default().fg(input_color),
-                    ),
-                ]
-            } else if line_start == 0 {
-                // Cursor is in or at the prompt
-                vec![Span::styled(before.clone(), Style::default().fg(TEXT_DIM))]
-            } else {
-                vec![Span::styled(
-                    before.clone(),
-                    Style::default().fg(input_color),
-                )]
-            };
-
-            spans.push(Span::styled(
-                cursor_display,
-                Style::default()
-                    .fg(input_color)
-                    .add_modifier(Modifier::REVERSED),
-            ));
-            if !after.is_empty() {
-                spans.push(Span::styled(after, Style::default().fg(input_color)));
-            }
-
-            styled_lines.push(Line::from(spans));
-        } else {
-            // No cursor on this line
-            if line_start == 0 {
-                // First line with prompt
-                let rest: String = line_str.chars().skip(2).collect();
-                styled_lines.push(Line::from(vec![
-                    Span::styled("> ", Style::default().fg(TEXT_DIM)),
-                    Span::styled(rest, Style::default().fg(input_color)),
-                ]));
-            } else {
-                styled_lines.push(Line::from(Span::styled(
-                    line_str.clone(),
-                    Style::default().fg(input_color),
-                )));
-            }
-        }
-
-        chars_processed = line_end;
-    }
-
-    let input_paragraph = Paragraph::new(styled_lines);
-    f.render_widget(input_paragraph, inner);
-
-    // Show hint on the right side of first line if there's input
-    if !app.input.is_empty() {
-        let hint_text = "↵ send";
-        let hint_x = inner.x + inner.width.saturating_sub(hint_text.len() as u16 + 1);
-        let hint_area = Rect {
-            x: hint_x,
-            y: inner.y,
-            width: hint_text.len() as u16 + 1,
-            height: 1,
-        };
-        let hint = Paragraph::new(Span::styled(hint_text, Style::default().fg(TEXT_MUTED)));
-        f.render_widget(hint, hint_area);
-    }
-
-    // Show helper text below input if empty
     if app.input.is_empty() {
-        let helper_area = Rect {
-            x: inner.x,
-            y: inner.y + 1,
-            width: inner.width,
-            height: 1,
-        };
-        let helper = Paragraph::new(Line::from(Span::styled(
-            "? for shortcuts",
+        // Show placeholder when empty, with blinking cursor after prompt
+        spans.push(Span::styled(
+            cursor_char.to_string(),
+            Style::default()
+                .fg(ACCENT_CYAN)
+                .add_modifier(Modifier::REVERSED),
+        ));
+        spans.push(Span::styled(
+            "Type a message...",
             Style::default().fg(TEXT_MUTED),
-        )));
-        f.render_widget(helper, helper_area);
+        ));
+    } else {
+        spans.push(Span::styled(
+            before.to_string(),
+            Style::default().fg(TEXT_PRIMARY),
+        ));
+        spans.push(Span::styled(
+            cursor_char.to_string(),
+            Style::default()
+                .fg(ACCENT_CYAN)
+                .add_modifier(Modifier::REVERSED),
+        ));
+        spans.push(Span::styled(after_rest, Style::default().fg(TEXT_PRIMARY)));
     }
+
+    let input_para = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false });
+
+    f.render_widget(input_para, inner);
 }
 
-/// Draw the file picker dropup menu above the input area
-fn draw_file_picker(f: &mut Frame, app: &ShellTuiApp, main_area: Rect) {
-    let filtered_entries = app.file_picker.filtered_entries();
+// ============================================================================
+// Status Bar (bottom)
+// ============================================================================
 
-    if filtered_entries.is_empty() && app.file_picker.filter.is_empty() {
+fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    // Get path, truncate if needed
+    let path = app
+        .cwd
+        .to_string_lossy()
+        .replace(&std::env::var("HOME").unwrap_or_default(), "~");
+
+    let mode = app.agent_mode.short_name();
+
+    // Build status bar like OpenCode: "safe-coder v0.1.0  ~/path/to/project    tab  BUILD MODE"
+    let version = "v0.1.0";
+    let app_info = format!("safe-coder {}  {}", version, path);
+
+    // Right side
+    let right_text = format!("tab  {} MODE", mode.to_uppercase());
+
+    let padding =
+        area.width
+            .saturating_sub(app_info.len() as u16 + right_text.len() as u16 + 2) as usize;
+
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            "safe-coder",
+            Style::default()
+                .fg(TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {}  ", version), Style::default().fg(TEXT_DIM)),
+        Span::styled(path.clone(), Style::default().fg(TEXT_SECONDARY)),
+        Span::styled(" ".repeat(padding.max(1)), Style::default()),
+        Span::styled("tab", Style::default().fg(TEXT_DIM)),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            format!("{} MODE", mode.to_uppercase()),
+            Style::default()
+                .fg(TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ", Style::default()),
+    ]);
+
+    let para = Paragraph::new(line).style(Style::default().bg(BG_STATUS));
+    f.render_widget(para, area);
+}
+
+// ============================================================================
+// Popups
+// ============================================================================
+
+fn draw_file_picker_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let filtered = app.file_picker.filtered_entries();
+    if filtered.is_empty() && app.file_picker.filter.is_empty() {
         return;
     }
 
-    // Calculate dimensions
     let max_entries = 10;
-    let entry_count = filtered_entries.len().min(max_entries);
-    let height = (entry_count + 3) as u16; // +3 for border, title, and filter line
-
-    // Find max entry width for sizing
-    let max_name_width = filtered_entries
-        .iter()
-        .map(|e| e.name.len() + 8) // Icon + size space
-        .max()
-        .unwrap_or(20);
-    let width = (max_name_width as u16 + 4)
-        .min(main_area.width.saturating_sub(4))
-        .max(30);
-
-    // Position dropup above input area
-    let x = main_area.x + 2;
-    let y = main_area.height.saturating_sub(height + 3); // +3 for input area
+    let height = (filtered.len().min(max_entries) + 3) as u16;
+    let width = 50.min(area.width.saturating_sub(10));
 
     let popup_area = Rect {
-        x,
-        y,
+        x: (area.width.saturating_sub(width)) / 2,
+        y: area.height.saturating_sub(height + 6),
         width,
         height,
     };
 
-    // Build title with path
-    let title = if app.file_picker.current_dir.is_empty() {
-        " Files ".to_string()
-    } else {
-        format!(" {} ", app.file_picker.current_dir)
-    };
+    f.render_widget(Clear, popup_area);
 
-    let popup_block = Block::default()
-        .title(title)
+    let block = Block::default()
+        .title(" Files ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT_CYAN))
-        .style(Style::default().bg(BG_DARK));
+        .style(Style::default().bg(BG_BLOCK));
 
-    let inner = popup_block.inner(popup_area);
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
 
-    // Clear the area and draw block
-    f.render_widget(ratatui::widgets::Clear, popup_area);
-    f.render_widget(popup_block, popup_area);
-
-    // Draw filter input at top of picker
-    let filter_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: 1,
-    };
-
+    // Filter input
+    let filter_area = Rect { height: 1, ..inner };
     let filter_text = if app.file_picker.filter.is_empty() {
         "Type to filter...".to_string()
     } else {
         app.file_picker.filter.clone()
     };
 
-    let filter_style = if app.file_picker.filter.is_empty() {
-        Style::default().fg(TEXT_MUTED)
-    } else {
-        Style::default().fg(ACCENT_CYAN)
-    };
-
     let filter_para = Paragraph::new(Line::from(vec![
         Span::styled("🔍 ", Style::default().fg(ACCENT_CYAN)),
-        Span::styled(filter_text, filter_style),
+        Span::styled(
+            filter_text,
+            if app.file_picker.filter.is_empty() {
+                Style::default().fg(TEXT_MUTED)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            },
+        ),
     ]));
     f.render_widget(filter_para, filter_area);
 
-    // Draw entries list
+    // File list
     let list_area = Rect {
-        x: inner.x,
         y: inner.y + 1,
-        width: inner.width,
         height: inner.height.saturating_sub(1),
+        ..inner
     };
 
-    if filtered_entries.is_empty() {
-        let no_match = Paragraph::new(Line::from(Span::styled(
-            "No matches",
-            Style::default().fg(TEXT_MUTED),
-        )));
+    if filtered.is_empty() {
+        let no_match = Paragraph::new("No matches").style(Style::default().fg(TEXT_MUTED));
         f.render_widget(no_match, list_area);
         return;
     }
 
-    let items: Vec<ListItem> = filtered_entries
+    let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
         .take(max_entries)
         .map(|(i, entry)| {
             let style = if i == app.file_picker.selected {
                 Style::default()
-                    .fg(BG_DARK)
+                    .fg(BG_PRIMARY)
                     .bg(ACCENT_CYAN)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(TEXT_PRIMARY)
             };
 
-            // Icon based on type
-            let icon = if entry.is_dir {
-                "📁 "
-            } else {
-                // File icon based on extension
-                let ext = entry.name.rsplit('.').next().unwrap_or("");
-                match ext {
-                    "rs" => "🦀 ",
-                    "js" | "ts" | "jsx" | "tsx" => "📜 ",
-                    "py" => "🐍 ",
-                    "json" | "toml" | "yaml" | "yml" => "⚙️ ",
-                    "md" => "📝 ",
-                    "html" | "css" => "🌐 ",
-                    _ => "📄 ",
-                }
-            };
-
-            // Size display for files
-            let size_str = if let Some(size) = entry.size {
-                format!(" {}", FilePicker::format_size(size))
-            } else {
-                String::new()
-            };
-
-            // Truncate name if needed (safe for UTF-8)
-            let max_name_len =
-                (list_area.width as usize).saturating_sub(icon.len() + size_str.len() + 2);
-            let display_name = if entry.name.chars().count() > max_name_len {
-                let truncated: String = entry
-                    .name
-                    .chars()
-                    .take(max_name_len.saturating_sub(3))
-                    .collect();
-                format!("{}...", truncated)
-            } else {
-                entry.name.clone()
-            };
-
-            ListItem::new(Line::from(vec![
-                Span::raw(icon),
-                Span::styled(display_name, style),
-                Span::styled(size_str, Style::default().fg(TEXT_DIM)),
-            ]))
-            .style(style)
+            let icon = if entry.is_dir { "📁" } else { "📄" };
+            ListItem::new(format!("{} {}", icon, entry.name)).style(style)
         })
         .collect();
 
     let list = List::new(items);
     f.render_widget(list, list_area);
-
-    // Show scroll indicator if more entries
-    if filtered_entries.len() > max_entries {
-        let more_text = format!("↓ {} more", filtered_entries.len() - max_entries);
-        let more_area = Rect {
-            x: popup_area.x + popup_area.width - more_text.len() as u16 - 2,
-            y: popup_area.y + popup_area.height - 1,
-            width: more_text.len() as u16 + 1,
-            height: 1,
-        };
-        let more_para = Paragraph::new(Span::styled(more_text, Style::default().fg(TEXT_MUTED)));
-        f.render_widget(more_para, more_area);
-    }
 }
 
-/// Draw the autocomplete popup above the input area
-fn draw_autocomplete(f: &mut Frame, app: &ShellTuiApp, input_area: Rect) {
+fn draw_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let suggestions = &app.autocomplete.suggestions;
-    let selected = app.autocomplete.selected;
-
     if suggestions.is_empty() {
         return;
     }
 
-    let max_width = suggestions.iter().map(|s| s.len()).max().unwrap_or(10) + 4;
-    let width = (max_width as u16)
-        .min(input_area.width.saturating_sub(4))
-        .max(15);
-    let height = (suggestions.len() as u16 + 2).min(12);
-
-    let x = input_area.x + 2;
-    let y = input_area.y.saturating_sub(height);
+    let width = suggestions.iter().map(|s| s.len()).max().unwrap_or(10) as u16 + 6;
+    let width = width.min(40);
+    let height = (suggestions.len() as u16 + 2).min(10);
 
     let popup_area = Rect {
-        x,
-        y,
+        x: 4,
+        y: area.height.saturating_sub(height + 6),
         width,
         height,
     };
 
-    let popup_block = Block::default()
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ACCENT_CYAN))
-        .style(Style::default().bg(BG_DARK));
+        .style(Style::default().bg(BG_BLOCK));
 
-    let inner = popup_block.inner(popup_area);
-
-    f.render_widget(ratatui::widgets::Clear, popup_area);
-    f.render_widget(popup_block, popup_area);
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
 
     let items: Vec<ListItem> = suggestions
         .iter()
         .enumerate()
-        .take(10)
-        .map(|(i, suggestion)| {
-            let style = if i == selected {
+        .take(8)
+        .map(|(i, s)| {
+            let style = if i == app.autocomplete.selected {
                 Style::default()
-                    .fg(BG_DARK)
+                    .fg(BG_PRIMARY)
                     .bg(ACCENT_CYAN)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(TEXT_PRIMARY)
             };
-
-            let icon = if suggestion.ends_with('/') {
-                "📁 "
-            } else if suggestion.contains('.') {
-                "📄 "
-            } else {
-                "⚡ "
-            };
-
-            ListItem::new(format!("{}{}", icon, suggestion)).style(style)
+            ListItem::new(format!("  {}", s)).style(style)
         })
         .collect();
 
