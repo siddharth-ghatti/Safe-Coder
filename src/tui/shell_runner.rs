@@ -163,31 +163,40 @@ impl ShellTuiRunner {
         }
     }
 
-    /// Initialize LSP servers
-    pub async fn init_lsp(&mut self) {
+    /// Initialize LSP servers (runs in background, non-blocking)
+    fn spawn_lsp_init(&self) -> tokio::task::JoinHandle<Option<LspManager>> {
         if !self.config.lsp.enabled {
-            return;
+            return tokio::spawn(async { None });
         }
 
-        let mut manager = LspManager::new(self.app.project_path.clone(), None);
+        let project_path = self.app.project_path.clone();
 
-        if let Err(e) = manager.initialize().await {
-            eprintln!("LSP initialization error: {}", e);
-        }
+        tokio::spawn(async move {
+            let mut manager = LspManager::new(project_path, None);
 
-        // Update app's LSP status
-        let running_servers = manager.get_running_servers();
-        for (lang, cmd, running) in &mut self.app.lsp_servers {
-            *running = running_servers.contains(&lang.as_str());
-        }
-
-        self.lsp_manager = Some(manager);
+            // Use a timeout to prevent blocking forever on downloads
+            match tokio::time::timeout(std::time::Duration::from_secs(30), manager.initialize())
+                .await
+            {
+                Ok(Ok(())) => Some(manager),
+                Ok(Err(e)) => {
+                    // LSP init failed but don't block CLI
+                    eprintln!("LSP initialization error (continuing without LSP): {}", e);
+                    Some(manager) // Return manager anyway, some servers may have started
+                }
+                Err(_) => {
+                    // Timeout - LSP init took too long
+                    eprintln!("LSP initialization timed out (continuing without LSP)");
+                    Some(manager) // Return manager anyway, some servers may have started
+                }
+            }
+        })
     }
 
     /// Run the shell TUI
     pub async fn run(&mut self) -> Result<()> {
-        // Initialize LSP servers in background
-        self.init_lsp().await;
+        // Spawn LSP initialization in background (non-blocking)
+        let lsp_handle = self.spawn_lsp_init();
 
         // Setup terminal
         enable_raw_mode()?;
@@ -196,8 +205,8 @@ impl ShellTuiRunner {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        // Run the event loop
-        let result = self.run_event_loop(&mut terminal).await;
+        // Run the event loop, passing LSP handle for background completion
+        let result = self.run_event_loop(&mut terminal, lsp_handle).await;
 
         // Restore terminal
         disable_raw_mode()?;
@@ -222,13 +231,32 @@ impl ShellTuiRunner {
     async fn run_event_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        mut lsp_handle: tokio::task::JoinHandle<Option<LspManager>>,
     ) -> Result<()> {
         // Channels for async command execution
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<CommandUpdate>();
         let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<AiUpdate>();
         let (orch_tx, mut orch_rx) = mpsc::unbounded_channel::<OrchestrationUpdate>();
 
+        // Track whether LSP initialization is complete
+        let mut lsp_init_complete = false;
+
         loop {
+            // Check if LSP initialization completed (non-blocking)
+            if !lsp_init_complete {
+                if let Some(result) = (&mut lsp_handle).now_or_never() {
+                    lsp_init_complete = true;
+                    if let Ok(Some(manager)) = result {
+                        // Update app's LSP status
+                        let running_servers = manager.get_running_servers();
+                        for (lang, _cmd, running) in &mut self.app.lsp_servers {
+                            *running = running_servers.contains(&lang.as_str());
+                        }
+                        self.lsp_manager = Some(manager);
+                        self.app.mark_dirty();
+                    }
+                }
+            }
             // Draw if needed
             if self.app.needs_redraw {
                 terminal.draw(|f| shell_ui::draw(f, &mut self.app))?;

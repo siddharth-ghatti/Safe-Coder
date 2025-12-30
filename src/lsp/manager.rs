@@ -13,6 +13,9 @@ use super::client::LspClient;
 use super::config::{
     default_lsp_configs, detect_language_id, extension_to_language_id, LspConfig, LspServerConfig,
 };
+use super::download::{
+    get_effective_binary_path, get_install_info_for_language, install_lsp_server,
+};
 use super::protocol::{LspDiagnostic, Range};
 
 /// Diagnostic severity levels
@@ -226,30 +229,109 @@ impl LspManager {
     }
 
     /// Start a language server
+    ///
+    /// This method is designed to be resilient - if a server fails to start
+    /// (due to download failures, network issues, missing dependencies, etc.),
+    /// it will log the error and return Ok(()) to allow the CLI to continue.
     async fn start_server(&mut self, language: &str) -> Result<()> {
         if self.clients.contains_key(language) {
             return Ok(());
         }
 
-        let config = self
-            .config
-            .servers
-            .get(language)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("No configuration for language: {}", language))?;
+        let mut config = match self.config.servers.get(language).cloned() {
+            Some(c) => c,
+            None => {
+                // No config for this language - not an error, just skip
+                return Ok(());
+            }
+        };
 
         if config.disabled {
             return Ok(());
         }
 
-        let mut client = LspClient::new(language.to_string(), config);
+        // Check if server is available, try auto-download if not
+        let binary_path = get_effective_binary_path(&config.command);
 
-        if !client.is_available() {
-            return Err(anyhow::anyhow!("Language server not available"));
+        if binary_path.is_none() {
+            // Try to auto-download the server with a timeout
+            if let Some(install_info) = get_install_info_for_language(language) {
+                eprintln!(
+                    "LSP server '{}' not found, attempting to install...",
+                    config.command
+                );
+
+                // Use a timeout for downloads to prevent blocking the CLI
+                let download_timeout = std::time::Duration::from_secs(60);
+                match tokio::time::timeout(download_timeout, install_lsp_server(&install_info))
+                    .await
+                {
+                    Ok(Ok(installed_path)) => {
+                        eprintln!(
+                            "Successfully installed {} to {}",
+                            config.command,
+                            installed_path.display()
+                        );
+                        // Update config to use the installed binary
+                        config.command = installed_path.to_string_lossy().to_string();
+                    }
+                    Ok(Err(e)) => {
+                        // Download failed - log and continue without this LSP
+                        eprintln!(
+                            "LSP auto-install failed for {} (continuing without LSP support for {}): {}",
+                            config.command, language, e
+                        );
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        // Download timed out - log and continue without this LSP
+                        eprintln!(
+                            "LSP auto-install timed out for {} (continuing without LSP support for {})",
+                            config.command, language
+                        );
+                        return Ok(());
+                    }
+                }
+            } else {
+                // No auto-install available - this is fine, just continue without this LSP
+                eprintln!(
+                    "LSP server '{}' not found (no auto-install available for {})",
+                    config.command, language
+                );
+                return Ok(());
+            }
+        } else if let Some(path) = binary_path {
+            // Use the effective path (could be from PATH or our install dir)
+            config.command = path.to_string_lossy().to_string();
         }
 
-        client.start(&self.root_path)?;
-        client.initialize().await?;
+        let mut client = LspClient::new(language.to_string(), config.clone());
+
+        if !client.is_available() {
+            // Server binary exists but isn't available - log and continue
+            eprintln!(
+                "LSP server '{}' not available for {} (continuing without LSP)",
+                config.command, language
+            );
+            return Ok(());
+        }
+
+        // Try to start and initialize the client
+        if let Err(e) = client.start(&self.root_path) {
+            eprintln!(
+                "Failed to start LSP server for {} (continuing without LSP): {}",
+                language, e
+            );
+            return Ok(());
+        }
+
+        if let Err(e) = client.initialize().await {
+            eprintln!(
+                "Failed to initialize LSP server for {} (continuing without LSP): {}",
+                language, e
+            );
+            return Ok(());
+        }
 
         self.clients.insert(language.to_string(), client);
         Ok(())
