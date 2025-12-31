@@ -25,7 +25,7 @@ use tokio::sync::{mpsc, Mutex};
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
 use crate::config::Config;
-use crate::lsp::{default_lsp_configs, LspManager};
+use crate::lsp::{default_lsp_configs, LspClient, LspManager};
 use crate::orchestrator::TaskPlan;
 use crate::session::{Session, SessionEvent};
 
@@ -246,15 +246,48 @@ impl ShellTuiRunner {
             if !lsp_init_complete {
                 if let Some(result) = (&mut lsp_handle).now_or_never() {
                     lsp_init_complete = true;
-                    if let Ok(Some(manager)) = result {
-                        // Update app's LSP status
-                        let running_servers = manager.get_running_servers();
-                        for (lang, _cmd, running) in &mut self.app.lsp_servers {
-                            *running = running_servers.contains(&lang.as_str());
+                    self.app.lsp_initializing = false;
+
+                    match result {
+                        Ok(Some(manager)) => {
+                            // Rebuild LSP status from actually running servers
+                            // This handles both pre-installed and auto-downloaded servers
+                            self.app.lsp_servers.clear();
+                            for (lang, client) in manager.get_clients() {
+                                if client.is_running() {
+                                    self.app.lsp_servers.push((
+                                        lang.clone(),
+                                        client.command().to_string(),
+                                        true,
+                                    ));
+                                }
+                            }
+
+                            // Set status message based on results
+                            if self.app.lsp_servers.is_empty() {
+                                self.app.lsp_status_message =
+                                    Some("LSP: no servers started".to_string());
+                            } else {
+                                // Clear any error message - status bar will show running servers
+                                self.app.lsp_status_message = None;
+                            }
+
+                            self.lsp_manager = Some(manager);
                         }
-                        self.lsp_manager = Some(manager);
-                        self.app.mark_dirty();
+                        Ok(None) => {
+                            // LSP disabled or failed completely
+                            if self.config.lsp.enabled {
+                                self.app.lsp_status_message = Some("LSP: init failed".to_string());
+                            } else {
+                                self.app.lsp_status_message = Some("LSP: disabled".to_string());
+                            }
+                        }
+                        Err(_) => {
+                            // Task panicked
+                            self.app.lsp_status_message = Some("LSP: init error".to_string());
+                        }
                     }
+                    self.app.mark_dirty();
                 }
             }
             // Draw if needed

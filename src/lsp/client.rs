@@ -61,6 +61,12 @@ impl LspClient {
             return false;
         }
 
+        // If the command is an absolute path, check if it exists and is executable
+        let path = std::path::Path::new(&self.config.command);
+        if path.is_absolute() {
+            return path.exists() && path.is_file();
+        }
+
         // Check if command exists in PATH
         which::which(&self.config.command).is_ok()
     }
@@ -355,6 +361,11 @@ impl LspClient {
     /// Check if server is running
     pub fn is_running(&self) -> bool {
         self.process.is_some() && self.initialized
+    }
+
+    /// Get the command used to start this server
+    pub fn command(&self) -> &str {
+        &self.config.command
     }
 
     /// Shutdown the server

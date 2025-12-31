@@ -483,7 +483,16 @@ impl LspManager {
 
             let client = self.clients.get(lang);
             let running = client.map(|c| c.is_running()).unwrap_or(false);
-            let available = which::which(&config.command).is_ok();
+
+            // Check availability - handle both absolute paths and command names
+            let available = {
+                let path = std::path::Path::new(&config.command);
+                if path.is_absolute() {
+                    path.exists() && path.is_file()
+                } else {
+                    which::which(&config.command).is_ok()
+                }
+            };
 
             statuses.push(LspStatus {
                 language: lang.clone(),
@@ -512,6 +521,11 @@ impl LspManager {
             .filter(|(_, c)| c.is_running())
             .map(|(lang, _)| lang.as_str())
             .collect()
+    }
+
+    /// Get all clients (for status display)
+    pub fn get_clients(&self) -> impl Iterator<Item = (&String, &LspClient)> {
+        self.clients.iter()
     }
 
     /// Shutdown all servers

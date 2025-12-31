@@ -804,10 +804,27 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         Span::styled(path.clone(), Style::default().fg(TEXT_SECONDARY)),
     ];
 
-    // Add LSP status if any servers are running
-    if !lsp_status.is_empty() {
-        spans.push(Span::styled("  │  ", Style::default().fg(TEXT_MUTED)));
+    // Add LSP status
+    spans.push(Span::styled("  │  ", Style::default().fg(TEXT_MUTED)));
+    if app.lsp_initializing {
+        // Show initializing spinner
+        let spinner_chars = ["◐", "◓", "◑", "◒"];
+        let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+        spans.push(Span::styled(
+            format!("{} LSP initializing...", spinner),
+            Style::default().fg(TEXT_DIM),
+        ));
+    } else if !lsp_status.is_empty() {
+        // Show running servers
         spans.push(Span::styled(lsp_status, Style::default().fg(ACCENT_GREEN)));
+    } else if let Some(ref msg) = app.lsp_status_message {
+        // Show error/status message
+        let color = if msg.contains("failed") || msg.contains("error") {
+            ACCENT_RED
+        } else {
+            TEXT_DIM
+        };
+        spans.push(Span::styled(msg.clone(), Style::default().fg(color)));
     }
 
     // Calculate padding for right side

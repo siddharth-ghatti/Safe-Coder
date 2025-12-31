@@ -89,16 +89,52 @@ pub fn is_lsp_installed(binary_name: &str) -> bool {
     false
 }
 
+/// Check if a binary path is valid and executable
+/// This runs the binary with --version or --help to verify it works
+fn is_binary_valid(path: &std::path::Path) -> bool {
+    use std::process::Command;
+
+    // Try running with --version first (most common)
+    if let Ok(output) = Command::new(path)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        if output.success() {
+            return true;
+        }
+    }
+
+    // Some binaries don't support --version, try --help
+    if let Ok(output) = Command::new(path)
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+    {
+        if output.success() {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Get the effective binary path (prefers PATH, falls back to our install)
+/// Validates that the binary actually works before returning it
 pub fn get_effective_binary_path(binary_name: &str) -> Option<PathBuf> {
     // Check PATH first (like Zed does)
     if let Ok(path) = which::which(binary_name) {
-        return Some(path);
+        // Verify the binary actually works (handles broken rustup shims, etc.)
+        if is_binary_valid(&path) {
+            return Some(path);
+        }
     }
 
     // Check our installation directory
     if let Ok(path) = get_lsp_binary_path(binary_name) {
-        if path.exists() {
+        if path.exists() && is_binary_valid(&path) {
             return Some(path);
         }
     }

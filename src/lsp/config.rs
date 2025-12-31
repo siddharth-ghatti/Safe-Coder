@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// LSP configuration for the application
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspConfig {
     /// Whether LSP is enabled globally
     #[serde(default = "default_true")]
@@ -15,6 +15,15 @@ pub struct LspConfig {
     /// Per-language server configurations
     #[serde(default)]
     pub servers: HashMap<String, LspServerConfig>,
+}
+
+impl Default for LspConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true, // LSP enabled by default
+            servers: HashMap::new(),
+        }
+    }
 }
 
 fn default_true() -> bool {
