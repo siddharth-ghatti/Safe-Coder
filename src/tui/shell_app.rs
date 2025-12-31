@@ -423,6 +423,14 @@ pub struct ShellTuiApp {
     pub spinner: Spinner,
     /// Start time for session
     pub start_time: DateTime<Local>,
+
+    // === LSP State ===
+    /// Running LSP servers (language name -> command)
+    pub lsp_servers: Vec<(String, String, bool)>, // (language, command, running)
+    /// LSP initialization status message (shown in status bar)
+    pub lsp_status_message: Option<String>,
+    /// Whether LSP initialization is in progress
+    pub lsp_initializing: bool,
 }
 
 impl ShellTuiApp {
@@ -468,6 +476,10 @@ impl ShellTuiApp {
             animation_frame: 0,
             spinner: Spinner::new(),
             start_time: Local::now(),
+
+            lsp_servers: Vec::new(),
+            lsp_status_message: None,
+            lsp_initializing: true,
         };
 
         // Add welcome message

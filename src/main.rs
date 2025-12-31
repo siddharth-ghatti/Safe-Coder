@@ -8,6 +8,7 @@ mod custom_commands;
 mod git;
 mod llm;
 mod loop_detector;
+mod lsp;
 mod memory;
 mod orchestrator;
 mod permissions;

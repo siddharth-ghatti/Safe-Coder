@@ -24,11 +24,10 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
-use crate::approval::ExecutionMode;
 use crate::config::Config;
-use crate::orchestrator::{Orchestrator, OrchestratorConfig, TaskPlan, WorkerKind};
+use crate::lsp::{default_lsp_configs, LspClient, LspManager};
+use crate::orchestrator::TaskPlan;
 use crate::session::{Session, SessionEvent};
-use crate::tools::AgentMode;
 
 /// Message types for async command execution
 #[derive(Debug)]
@@ -136,17 +135,69 @@ enum OrchestrationUpdate {
 pub struct ShellTuiRunner {
     app: ShellTuiApp,
     config: Config,
+    lsp_manager: Option<LspManager>,
 }
 
 impl ShellTuiRunner {
     /// Create a new shell TUI runner
     pub fn new(project_path: PathBuf, config: Config) -> Self {
-        let app = ShellTuiApp::new(project_path, config.clone());
-        Self { app, config }
+        let mut app = ShellTuiApp::new(project_path.clone(), config.clone());
+
+        // Initialize LSP servers info for display
+        let lsp_configs = default_lsp_configs();
+        for (lang, server_config) in &lsp_configs {
+            let available = which::which(&server_config.command).is_ok();
+            if available {
+                app.lsp_servers.push((
+                    lang.clone(),
+                    server_config.command.clone(),
+                    false, // Not running yet
+                ));
+            }
+        }
+
+        Self {
+            app,
+            config,
+            lsp_manager: None,
+        }
+    }
+
+    /// Initialize LSP servers (runs in background, non-blocking)
+    fn spawn_lsp_init(&self) -> tokio::task::JoinHandle<Option<LspManager>> {
+        if !self.config.lsp.enabled {
+            return tokio::spawn(async { None });
+        }
+
+        let project_path = self.app.project_path.clone();
+
+        tokio::spawn(async move {
+            let mut manager = LspManager::new(project_path, None);
+
+            // Use a timeout to prevent blocking forever on downloads
+            match tokio::time::timeout(std::time::Duration::from_secs(30), manager.initialize())
+                .await
+            {
+                Ok(Ok(())) => Some(manager),
+                Ok(Err(e)) => {
+                    // LSP init failed but don't block CLI
+                    eprintln!("LSP initialization error (continuing without LSP): {}", e);
+                    Some(manager) // Return manager anyway, some servers may have started
+                }
+                Err(_) => {
+                    // Timeout - LSP init took too long
+                    eprintln!("LSP initialization timed out (continuing without LSP)");
+                    Some(manager) // Return manager anyway, some servers may have started
+                }
+            }
+        })
     }
 
     /// Run the shell TUI
     pub async fn run(&mut self) -> Result<()> {
+        // Spawn LSP initialization in background (non-blocking)
+        let lsp_handle = self.spawn_lsp_init();
+
         // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
@@ -154,8 +205,8 @@ impl ShellTuiRunner {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        // Run the event loop
-        let result = self.run_event_loop(&mut terminal).await;
+        // Run the event loop, passing LSP handle for background completion
+        let result = self.run_event_loop(&mut terminal, lsp_handle).await;
 
         // Restore terminal
         disable_raw_mode()?;
@@ -180,13 +231,65 @@ impl ShellTuiRunner {
     async fn run_event_loop(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+        mut lsp_handle: tokio::task::JoinHandle<Option<LspManager>>,
     ) -> Result<()> {
         // Channels for async command execution
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<CommandUpdate>();
         let (ai_tx, mut ai_rx) = mpsc::unbounded_channel::<AiUpdate>();
         let (orch_tx, mut orch_rx) = mpsc::unbounded_channel::<OrchestrationUpdate>();
 
+        // Track whether LSP initialization is complete
+        let mut lsp_init_complete = false;
+
         loop {
+            // Check if LSP initialization completed (non-blocking)
+            if !lsp_init_complete {
+                if let Some(result) = (&mut lsp_handle).now_or_never() {
+                    lsp_init_complete = true;
+                    self.app.lsp_initializing = false;
+
+                    match result {
+                        Ok(Some(manager)) => {
+                            // Rebuild LSP status from actually running servers
+                            // This handles both pre-installed and auto-downloaded servers
+                            self.app.lsp_servers.clear();
+                            for (lang, client) in manager.get_clients() {
+                                if client.is_running() {
+                                    self.app.lsp_servers.push((
+                                        lang.clone(),
+                                        client.command().to_string(),
+                                        true,
+                                    ));
+                                }
+                            }
+
+                            // Set status message based on results
+                            if self.app.lsp_servers.is_empty() {
+                                self.app.lsp_status_message =
+                                    Some("LSP: no servers started".to_string());
+                            } else {
+                                // Clear any error message - status bar will show running servers
+                                self.app.lsp_status_message = None;
+                            }
+
+                            self.lsp_manager = Some(manager);
+                        }
+                        Ok(None) => {
+                            // LSP disabled or failed completely
+                            if self.config.lsp.enabled {
+                                self.app.lsp_status_message = Some("LSP: init failed".to_string());
+                            } else {
+                                self.app.lsp_status_message = Some("LSP: disabled".to_string());
+                            }
+                        }
+                        Err(_) => {
+                            // Task panicked
+                            self.app.lsp_status_message = Some("LSP: init error".to_string());
+                        }
+                    }
+                    self.app.mark_dirty();
+                }
+            }
             // Draw if needed
             if self.app.needs_redraw {
                 terminal.draw(|f| shell_ui::draw(f, &mut self.app))?;
