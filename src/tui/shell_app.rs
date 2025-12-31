@@ -113,6 +113,8 @@ pub enum BlockType {
     SystemMessage,
     /// Orchestration task
     Orchestration,
+    /// Subagent execution
+    Subagent { kind: String },
 }
 
 /// Output state of a command block

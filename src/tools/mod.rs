@@ -40,6 +40,7 @@ impl AgentMode {
                 "webfetch",
                 "todowrite",
                 "todoread",
+                "subagent",
             ],
         }
     }
@@ -88,6 +89,7 @@ pub mod glob;
 pub mod grep;
 pub mod list;
 pub mod read;
+pub mod subagent;
 pub mod todo;
 pub mod webfetch;
 pub mod write;
@@ -98,6 +100,7 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list::ListTool;
 pub use read::ReadTool;
+pub use subagent::SubagentTool;
 pub use todo::{TodoReadTool, TodoWriteTool};
 pub use webfetch::WebFetchTool;
 pub use write::WriteTool;
@@ -166,6 +169,8 @@ impl ToolRegistry {
         // Task tracking
         registry.register(Box::new(TodoWriteTool));
         registry.register(Box::new(TodoReadTool));
+        // Subagent spawning
+        registry.register(Box::new(SubagentTool::new()));
         registry
     }
 

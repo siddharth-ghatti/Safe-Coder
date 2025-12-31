@@ -16,6 +16,7 @@ mod persistence;
 mod prompts;
 mod session;
 mod shell;
+mod subagent;
 mod tools;
 mod tui;
 

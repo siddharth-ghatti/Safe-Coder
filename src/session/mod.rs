@@ -40,6 +40,26 @@ pub enum SessionEvent {
     },
     /// Text chunk from AI response
     TextChunk(String),
+    /// Subagent started
+    SubagentStarted {
+        id: String,
+        kind: String,
+        task: String,
+    },
+    /// Subagent progress update
+    SubagentProgress { id: String, message: String },
+    /// Subagent is using a tool
+    SubagentToolUsed {
+        id: String,
+        tool: String,
+        description: String,
+    },
+    /// Subagent completed
+    SubagentCompleted {
+        id: String,
+        success: bool,
+        summary: String,
+    },
 }
 
 pub struct Session {

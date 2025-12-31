@@ -463,6 +463,19 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                 }
             }
         }
+
+        BlockType::Subagent { kind } => {
+            // Render subagent like an AI tool execution
+            lines.push(MessageLine::UserHeader {
+                text: format!("Subagent: {} - {}", kind, block.input),
+            });
+
+            render_output(lines, &block.output, width);
+
+            for child in &block.children {
+                render_child_block(lines, child, width, frame);
+            }
+        }
     }
 }
 

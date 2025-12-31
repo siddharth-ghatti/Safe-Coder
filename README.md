@@ -6,6 +6,13 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 
 ## 🌟 What's New
 
+### 🧠 **LSP Integration (v2.3)**
+- **Language Server Protocol support** - Get IDE-like features directly in the terminal
+- **Automatic LSP downloads** - Automatically install and configure language servers
+- **Real-time code intelligence** - Syntax highlighting, error detection, and code completion
+- **Multi-language support** - Works with Rust, TypeScript, Python, Go, and more
+- **Shell-integrated LSP** - Access language features seamlessly in the TUI
+
 ### 🚀 **Orchestration Integration (v2.2)**
 - **Shell-integrated orchestration** - Run `@orchestrate <task>` directly from the shell TUI
 - **GitHub Copilot support** - New worker type using `gh copilot` for task execution
@@ -50,6 +57,7 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **GPU acceleration** - Automatic NVIDIA/Apple Silicon support
 
 ### 🎨 **Enhanced TUI Experience**
+- **OpenCode-inspired theme** - Modern VS Code-style interface design
 - **Dynamic ASCII banner** with neon gradient effects
 - **Cyberpunk theme** - Pulsing neon borders and glitch effects
 - **Professional dark mode** - Google CLI / Claude Code inspired styling
@@ -65,6 +73,14 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **Custom commands** - User-defined shortcuts for frequent operations
 
 ## Features
+
+### 🧠 **Language Server Protocol (LSP) Features**
+- **Automatic Setup**: Download and configure language servers automatically
+- **Code Intelligence**: Real-time syntax highlighting, error detection, and diagnostics
+- **Multi-Language**: Support for Rust, TypeScript, Python, Go, Java, C++, and more
+- **Shell Integration**: Access LSP features directly from the terminal interface
+- **Smart Completions**: Context-aware code completion suggestions
+- **Error Highlighting**: Real-time error detection and inline diagnostics
 
 ### 🖥️ **Interactive Shell Mode (Modern TUI)**
 - **Command Block Interface**: Warp-like shell with visual command blocks and streaming output
@@ -845,6 +861,8 @@ safe-coder login anthropic
 - [x] GitHub Copilot worker support
 - [x] Worker distribution strategies (round-robin, task-based, load-balanced)
 - [x] Self-orchestration (Safe-Coder as a worker)
+- [x] Language Server Protocol (LSP) support with automatic downloads
+- [x] OpenCode-inspired UI theme
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI

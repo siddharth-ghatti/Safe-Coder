@@ -1931,6 +1931,39 @@ Keyboard:
                                 block_id: block_id_inner.clone(),
                                 text,
                             },
+                            // Subagent events - treat like tool executions
+                            SessionEvent::SubagentStarted { id, kind, task } => {
+                                AiUpdate::ToolStart {
+                                    block_id: block_id_inner.clone(),
+                                    tool_name: format!("subagent:{}", id),
+                                    description: format!("{} - {}", kind, task),
+                                }
+                            }
+                            SessionEvent::SubagentProgress { id, message } => {
+                                AiUpdate::BashOutputLine {
+                                    block_id: block_id_inner.clone(),
+                                    tool_name: format!("subagent:{}", id),
+                                    line: message,
+                                }
+                            }
+                            SessionEvent::SubagentToolUsed {
+                                id,
+                                tool,
+                                description,
+                            } => AiUpdate::BashOutputLine {
+                                block_id: block_id_inner.clone(),
+                                tool_name: format!("subagent:{}", id),
+                                line: format!("  {} {}", tool, description),
+                            },
+                            SessionEvent::SubagentCompleted {
+                                id,
+                                success,
+                                summary,
+                            } => AiUpdate::ToolComplete {
+                                block_id: block_id_inner.clone(),
+                                tool_name: format!("subagent:{}", id),
+                                success,
+                            },
                         };
                         let _ = ai_tx_inner.send(update);
                     }
