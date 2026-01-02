@@ -16,6 +16,10 @@ pub struct SidebarState {
     pub active_plan: Option<PlanDisplay>,
     /// Todo list display (from TodoWrite tool) - always shown as checklist
     pub todo_plan: Option<TodoPlanDisplay>,
+    /// Tool execution steps (for build mode)
+    pub tool_steps: Vec<ToolStepDisplay>,
+    /// Scroll offset for tool steps (0 = show most recent)
+    pub tool_steps_scroll_offset: usize,
     /// Token usage tracking
     pub token_usage: TokenUsage,
     /// LSP connection status
@@ -31,6 +35,8 @@ impl Default for SidebarState {
             current_task: None,
             active_plan: None,
             todo_plan: None,
+            tool_steps: Vec::new(),
+            tool_steps_scroll_offset: 0,
             // Default to Claude's 200K context window
             token_usage: TokenUsage::with_context_window(200_000),
             connections: ConnectionStatus::default(),
@@ -205,6 +211,67 @@ impl SidebarState {
     /// Clear modified files list
     pub fn clear_modified_files(&mut self) {
         self.modified_files.clear();
+    }
+
+    /// Add a tool step to the execution list
+    pub fn add_tool_step(&mut self, tool_name: String, description: String) {
+        let step = ToolStepDisplay {
+            id: format!("tool-{}", self.tool_steps.len() + 1),
+            tool_name,
+            description,
+            status: ToolStepStatus::Running,
+            timestamp: chrono::Local::now(),
+        };
+        self.tool_steps.push(step);
+        // Reset scroll to show the new step
+        self.tool_steps_scroll_offset = 0;
+    }
+
+    /// Complete a tool step
+    pub fn complete_tool_step(&mut self, tool_name: &str, success: bool) {
+        if let Some(step) = self
+            .tool_steps
+            .iter_mut()
+            .rev()
+            .find(|s| s.tool_name == tool_name)
+        {
+            step.status = if success {
+                ToolStepStatus::Completed
+            } else {
+                ToolStepStatus::Failed
+            };
+        }
+    }
+
+    /// Clear tool steps (for new session or task)
+    pub fn clear_tool_steps(&mut self) {
+        self.tool_steps.clear();
+        self.tool_steps_scroll_offset = 0;
+    }
+
+    /// Get count of completed tool steps
+    pub fn completed_tool_steps(&self) -> usize {
+        self.tool_steps
+            .iter()
+            .filter(|s| s.status == ToolStepStatus::Completed)
+            .count()
+    }
+
+    /// Scroll tool steps up (towards older steps)
+    pub fn scroll_tool_steps_up(&mut self) {
+        if self.tool_steps_scroll_offset < self.tool_steps.len().saturating_sub(1) {
+            self.tool_steps_scroll_offset += 1;
+        }
+    }
+
+    /// Scroll tool steps down (towards newer steps)
+    pub fn scroll_tool_steps_down(&mut self) {
+        self.tool_steps_scroll_offset = self.tool_steps_scroll_offset.saturating_sub(1);
+    }
+
+    /// Reset scroll to show most recent steps
+    pub fn reset_tool_steps_scroll(&mut self) {
+        self.tool_steps_scroll_offset = 0;
     }
 }
 
@@ -385,6 +452,43 @@ impl TodoItemDisplay {
     }
 }
 
+/// Display representation of a tool execution step
+#[derive(Debug, Clone)]
+pub struct ToolStepDisplay {
+    /// Step ID
+    pub id: String,
+    /// Name of the tool being executed
+    pub tool_name: String,
+    /// Description of what the tool is doing
+    pub description: String,
+    /// Current status
+    pub status: ToolStepStatus,
+    /// When the step was started
+    pub timestamp: chrono::DateTime<chrono::Local>,
+}
+
+/// Status of a tool execution step
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolStepStatus {
+    /// Tool is currently running
+    Running,
+    /// Tool completed successfully
+    Completed,
+    /// Tool failed
+    Failed,
+}
+
+impl ToolStepStatus {
+    /// Get the display icon for this status
+    pub fn icon(&self) -> &'static str {
+        match self {
+            ToolStepStatus::Running => "◐", // Will be animated in UI
+            ToolStepStatus::Completed => "✓",
+            ToolStepStatus::Failed => "✗",
+        }
+    }
+}
+
 /// Token usage tracking
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
@@ -442,15 +546,11 @@ impl TokenUsage {
 
     /// Format for display
     pub fn format_display(&self) -> String {
-        if self.context_window > 0 {
-            format!(
-                "{} tokens ({:.0}%)",
-                format_number(self.total_tokens),
-                self.usage_percent()
-            )
-        } else {
-            format!("{} tokens", format_number(self.total_tokens))
-        }
+        format!(
+            "In: {} / Out: {}",
+            format_number(self.input_tokens),
+            format_number(self.output_tokens)
+        )
     }
 
     /// Format detailed breakdown
@@ -537,8 +637,9 @@ mod tests {
             output_tokens: 500,
             total_tokens: 2000,
             context_window: 200_000,
+            compressed_tokens: 0,
         };
-        assert_eq!(usage.format_display(), "2.0K tokens (1%)");
+        assert_eq!(usage.format_display(), "In: 1.5K / Out: 500");
     }
 
     #[test]

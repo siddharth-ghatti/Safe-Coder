@@ -1204,14 +1204,27 @@ fn draw_sidebar_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 }
 
 fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    // Check if we're in build mode to show tool steps instead of todo plan
+    let show_tool_steps = app.agent_mode == crate::tools::AgentMode::Build;
+
     let mut lines = vec![Line::from(Span::styled(
-        " PLAN",
+        if show_tool_steps { " STEPS" } else { " PLAN" },
         Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
     ))];
 
-    if let Some(ref plan) = app.sidebar.active_plan {
-        // Show progress bar
-        let percent = plan.progress_percent();
+    // In build mode, show tool execution steps
+    if show_tool_steps && !app.sidebar.tool_steps.is_empty() {
+        let tool_steps = &app.sidebar.tool_steps;
+
+        // Show progress bar based on completed vs total tool steps
+        let completed_count = app.sidebar.completed_tool_steps();
+        let total_count = tool_steps.len();
+        let percent = if total_count > 0 {
+            (completed_count as f32 / total_count as f32) * 100.0
+        } else {
+            0.0
+        };
+
         let bar_width = area.width.saturating_sub(4) as usize;
         let filled = ((percent / 100.0) * bar_width as f32) as usize;
         let empty = bar_width.saturating_sub(filled);
@@ -1223,42 +1236,68 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         ]));
 
         // Show step count
-        let progress = format!(" {}/{} steps", plan.completed_count(), plan.steps.len());
+        let progress = format!(" {}/{} tools", completed_count, total_count);
         lines.push(Line::from(Span::styled(
             progress,
             Style::default().fg(TEXT_SECONDARY),
         )));
 
-        // Show each step with status icon
-        let max_steps = area.height.saturating_sub(4) as usize;
-        for (_i, step) in plan.steps.iter().take(max_steps).enumerate() {
-            // Use animated spinner for in-progress steps
+        // Show recent tool steps (max items based on available height)
+        let max_items = area.height.saturating_sub(4) as usize;
+        let scroll_offset = app.sidebar.tool_steps_scroll_offset;
+        let total_steps = tool_steps.len();
+
+        // Calculate visible range with scroll offset
+        let visible_steps: Vec<_> = tool_steps
+            .iter()
+            .rev() // Show most recent first (index 0 in reversed list is most recent)
+            .skip(scroll_offset)
+            .take(max_items)
+            .collect();
+
+        // Show scroll indicator at top if scrolled down (showing older items)
+        if scroll_offset > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " ↑ {} newer steps (Alt+↑ to scroll)",
+                    scroll_offset.min(total_steps)
+                ),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+
+        for step in visible_steps.iter() {
+            // Use animated spinner for running steps
             let (icon, icon_color) = match step.status {
-                PlanStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
-                PlanStepStatus::InProgress => {
-                    // Animated spinner for in-progress
+                crate::tui::sidebar::ToolStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+                crate::tui::sidebar::ToolStepStatus::Running => {
                     let spinner_chars = ["◐", "◓", "◑", "◒"];
                     let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
                     (spinner.to_string(), ACCENT_CYAN)
                 }
-                PlanStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
-                PlanStepStatus::Skipped => ("−".to_string(), TEXT_MUTED),
-                PlanStepStatus::Pending => ("◯".to_string(), TEXT_DIM),
+                crate::tui::sidebar::ToolStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
             };
 
-            // Truncate step description
+            // Format tool name and description
+            let display_text = if step.description.is_empty() {
+                step.tool_name.clone()
+            } else {
+                format!("{}: {}", step.tool_name, step.description)
+            };
+
+            // Truncate if too long
             let max_len = area.width.saturating_sub(5) as usize;
-            let desc = if step.description.len() > max_len {
-                format!("{}...", &step.description[..max_len.saturating_sub(3)])
+            let desc = if display_text.len() > max_len {
+                format!("{}...", &display_text[..max_len.saturating_sub(3)])
             } else {
-                step.description.clone()
+                display_text
             };
 
-            // Highlight in-progress step
-            let desc_style = if step.status == PlanStepStatus::InProgress {
-                Style::default().fg(TEXT_PRIMARY)
-            } else {
-                Style::default().fg(TEXT_SECONDARY)
+            // Style based on status
+            let desc_style = match step.status {
+                crate::tui::sidebar::ToolStepStatus::Running => Style::default().fg(TEXT_PRIMARY),
+                crate::tui::sidebar::ToolStepStatus::Completed => Style::default().fg(TEXT_DIM),
+                crate::tui::sidebar::ToolStepStatus::Failed => Style::default().fg(ACCENT_RED),
             };
 
             lines.push(Line::from(vec![
@@ -1268,22 +1307,17 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             ]));
         }
 
-        if plan.steps.len() > max_steps {
+        // Show scroll indicator at bottom if there are more older steps
+        let items_below = total_steps.saturating_sub(scroll_offset + visible_steps.len());
+        if items_below > 0 {
             lines.push(Line::from(Span::styled(
-                format!(" ... {} more", plan.steps.len() - max_steps),
+                format!(" ↓ {} older steps (Alt+↓ to scroll)", items_below),
                 Style::default().fg(TEXT_MUTED),
             )));
         }
-
-        // Show approval status if waiting
-        if plan.awaiting_approval {
-            lines.push(Line::from(Span::styled(
-                " ⏳ Awaiting approval",
-                Style::default().fg(ACCENT_YELLOW),
-            )));
-        }
-    } else if let Some(ref todo_plan) = app.sidebar.todo_plan {
-        // Show todo items as a checklist when no active tool plan
+    }
+    // In plan mode or when no tool steps, show todo plan if available
+    else if let Some(ref todo_plan) = app.sidebar.todo_plan {
         // Show progress bar
         let percent = todo_plan.progress_percent();
         let bar_width = area.width.saturating_sub(4) as usize;
@@ -1307,9 +1341,50 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             Style::default().fg(TEXT_SECONDARY),
         )));
 
-        // Show each todo item with status icon
+        // Calculate visible items - scroll to show in_progress item or most recent
         let max_items = area.height.saturating_sub(4) as usize;
-        for item in todo_plan.items.iter().take(max_items) {
+        let total_items = todo_plan.items.len();
+
+        // Find the in_progress item index, or default to showing from the end
+        let in_progress_idx = todo_plan
+            .items
+            .iter()
+            .position(|i| i.status == "in_progress");
+
+        // Calculate scroll offset to keep in_progress item visible, or show latest items
+        let scroll_start = if let Some(idx) = in_progress_idx {
+            // Center the in-progress item if possible
+            if total_items <= max_items {
+                0
+            } else if idx < max_items / 2 {
+                0
+            } else if idx > total_items - max_items / 2 {
+                total_items.saturating_sub(max_items)
+            } else {
+                idx.saturating_sub(max_items / 2)
+            }
+        } else {
+            // No in-progress item, show from start (completed items first)
+            0
+        };
+
+        let visible_items: Vec<_> = todo_plan
+            .items
+            .iter()
+            .skip(scroll_start)
+            .take(max_items)
+            .collect();
+
+        // Show scroll indicator at top if needed
+        if scroll_start > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ↑ {} more above", scroll_start),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+
+        // Show each visible todo item with status icon
+        for item in visible_items.iter() {
             // Use animated spinner for in-progress items
             let (icon, icon_color) = match item.status.as_str() {
                 "completed" => ("✓".to_string(), ACCENT_GREEN),
@@ -1330,11 +1405,11 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 item.content.clone()
             };
 
-            // Highlight in-progress item
-            let desc_style = if item.status == "in_progress" {
-                Style::default().fg(TEXT_PRIMARY)
-            } else {
-                Style::default().fg(TEXT_SECONDARY)
+            // Highlight in-progress item, dim completed items
+            let desc_style = match item.status.as_str() {
+                "in_progress" => Style::default().fg(TEXT_PRIMARY),
+                "completed" => Style::default().fg(TEXT_DIM),
+                _ => Style::default().fg(TEXT_SECONDARY),
             };
 
             lines.push(Line::from(vec![
@@ -1344,14 +1419,16 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             ]));
         }
 
-        if todo_plan.items.len() > max_items {
+        // Show scroll indicator at bottom if needed
+        let items_below = total_items.saturating_sub(scroll_start + visible_items.len());
+        if items_below > 0 {
             lines.push(Line::from(Span::styled(
-                format!(" ... {} more", todo_plan.items.len() - max_items),
+                format!(" ↓ {} more below", items_below),
                 Style::default().fg(TEXT_MUTED),
             )));
         }
     } else if app.ai_thinking {
-        // Show thinking spinner when AI is processing but plan not yet created
+        // Show thinking spinner when AI is processing
         let spinner_chars = ["◐", "◓", "◑", "◒"];
         let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
         lines.push(Line::from(vec![
@@ -1361,7 +1438,11 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         ]));
     } else {
         lines.push(Line::from(Span::styled(
-            " No active plan",
+            if show_tool_steps {
+                " No steps"
+            } else {
+                " No tasks"
+            },
             Style::default().fg(TEXT_MUTED),
         )));
     }
@@ -1560,11 +1641,11 @@ fn draw_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 /// Draw the commands reference modal
 fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
     use crate::commands::slash::get_commands_text;
-    
+
     // Calculate modal size - take up most of the screen
     let modal_width = (area.width as f32 * 0.9) as u16;
     let modal_height = (area.height as f32 * 0.9) as u16;
-    
+
     let popup_area = Rect {
         x: (area.width - modal_width) / 2,
         y: (area.height - modal_height) / 2,
@@ -1594,33 +1675,52 @@ fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
             if line.starts_with("━") {
                 // Separator lines
                 Line::from(Span::styled(line, Style::default().fg(BORDER_ACCENT)))
-            } else if line.starts_with("🔧") || line.starts_with("💬") || line.starts_with("🧠") 
-                || line.starts_with("⚙️") || line.starts_with("📁") || line.starts_with("📋")
-                || line.starts_with("📎") || line.starts_with("🖥️") {
+            } else if line.starts_with("🔧")
+                || line.starts_with("💬")
+                || line.starts_with("🧠")
+                || line.starts_with("⚙️")
+                || line.starts_with("📁")
+                || line.starts_with("📋")
+                || line.starts_with("📎")
+                || line.starts_with("🖥️")
+            {
                 // Section headers
-                Line::from(Span::styled(line, Style::default()
-                    .fg(ACCENT_CYAN)
-                    .add_modifier(Modifier::BOLD)))
-            } else if line.trim().starts_with("/") || line.trim().starts_with("@") || line.trim().starts_with("!") {
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(ACCENT_CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else if line.trim().starts_with("/")
+                || line.trim().starts_with("@")
+                || line.trim().starts_with("!")
+            {
                 // Command lines
                 let parts: Vec<&str> = line.splitn(2, ' ').collect();
                 if parts.len() >= 2 {
                     let rest = format!(" {}", parts[1]);
                     vec![
                         Span::styled("  ", Style::default()),
-                        Span::styled(parts[0], Style::default()
-                            .fg(ACCENT_GREEN)
-                            .add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            parts[0],
+                            Style::default()
+                                .fg(ACCENT_GREEN)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(rest, Style::default().fg(TEXT_SECONDARY)),
-                    ].into()
+                    ]
+                    .into()
                 } else {
                     Line::from(Span::styled(line, Style::default().fg(ACCENT_GREEN)))
                 }
             } else if line.starts_with("💡") {
                 // Tips section
-                Line::from(Span::styled(line, Style::default()
-                    .fg(ACCENT_YELLOW)
-                    .add_modifier(Modifier::ITALIC)))
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(ACCENT_YELLOW)
+                        .add_modifier(Modifier::ITALIC),
+                ))
             } else if line.trim().starts_with("•") {
                 // Bullet points
                 Line::from(Span::styled(line, Style::default().fg(TEXT_PRIMARY)))

@@ -455,6 +455,13 @@ impl ShellTuiRunner {
                         tool_name,
                         description,
                     } => {
+                        // Track tool step in sidebar if in build mode
+                        if self.app.agent_mode == crate::tools::AgentMode::Build {
+                            self.app
+                                .sidebar
+                                .add_tool_step(tool_name.clone(), description.clone());
+                        }
+
                         // Get prompt first before mutable borrow
                         let prompt = self.app.current_prompt();
                         let child = CommandBlock::new(
@@ -532,6 +539,11 @@ impl ShellTuiRunner {
                         tool_name,
                         success,
                     } => {
+                        // Complete tool step in sidebar if in build mode
+                        if self.app.agent_mode == crate::tools::AgentMode::Build {
+                            self.app.sidebar.complete_tool_step(&tool_name, success);
+                        }
+
                         // Mark the tool block as complete
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             if let Some(child) = parent.children.iter_mut().rev().find(|c| {
@@ -992,6 +1004,12 @@ impl ShellTuiRunner {
                 if self.app.file_picker.visible {
                     self.app.file_picker.select_up();
                     self.app.mark_dirty();
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    // Alt+Up scrolls sidebar steps up (towards older steps) in build mode
+                    if self.app.agent_mode == crate::tools::AgentMode::Build {
+                        self.app.sidebar.scroll_tool_steps_up();
+                        self.app.mark_dirty();
+                    }
                 } else if modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Up scrolls up
                     self.app.scroll_up();
@@ -1005,6 +1023,12 @@ impl ShellTuiRunner {
                 if self.app.file_picker.visible {
                     self.app.file_picker.select_down();
                     self.app.mark_dirty();
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    // Alt+Down scrolls sidebar steps down (towards newer steps) in build mode
+                    if self.app.agent_mode == crate::tools::AgentMode::Build {
+                        self.app.sidebar.scroll_tool_steps_down();
+                        self.app.mark_dirty();
+                    }
                 } else if modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Down scrolls down
                     self.app.scroll_down();
