@@ -13,9 +13,11 @@ mod memory;
 mod orchestrator;
 mod permissions;
 mod persistence;
+mod planning;
 mod prompts;
 mod session;
 mod shell;
+mod subagent;
 mod tools;
 mod tui;
 
@@ -299,6 +301,12 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
                         eprintln!("Error: {}", e);
                     }
                 }
+            }
+            Ok(CommandResult::ShowCommandsModal) => {
+                // In CLI mode, just print the commands (no modal)
+                use crate::commands::slash::get_commands_text;
+                println!("\n{}", get_commands_text());
+                continue;
             }
             Ok(CommandResult::Continue) => {
                 // Continue normally - send to AI

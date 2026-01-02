@@ -27,6 +27,7 @@ use super::shell_ui;
 use crate::config::Config;
 use crate::lsp::{default_lsp_configs, LspClient, LspManager};
 use crate::orchestrator::TaskPlan;
+use crate::planning::PlanEvent;
 use crate::session::{Session, SessionEvent};
 
 /// Message types for async command execution
@@ -89,6 +90,19 @@ enum AiUpdate {
     Complete { block_id: String },
     /// AI error
     Error { block_id: String, message: String },
+    /// Plan event for sidebar updates
+    PlanEvent { block_id: String, event: PlanEvent },
+    /// Token usage update
+    TokenUsage {
+        block_id: String,
+        input_tokens: usize,
+        output_tokens: usize,
+    },
+    /// Context was compressed
+    ContextCompressed {
+        block_id: String,
+        tokens_compressed: usize,
+    },
 }
 
 /// Message types for orchestration updates
@@ -260,6 +274,8 @@ impl ShellTuiRunner {
                                         client.command().to_string(),
                                         true,
                                     ));
+                                    // Also update sidebar
+                                    self.app.sidebar.add_lsp_server(lang.clone(), true);
                                 }
                             }
 
@@ -357,10 +373,16 @@ impl ShellTuiRunner {
             // Process AI updates
             while let Ok(update) = ai_rx.try_recv() {
                 match update {
-                    AiUpdate::Thinking { block_id, message } => {
+                    AiUpdate::Thinking {
+                        block_id,
+                        message: _,
+                    } => {
+                        // Don't set output - let the block remain in "running" state
+                        // which shows the animated spinner via MessageLine::Running
                         if let Some(block) = self.app.get_block_mut(&block_id) {
+                            // Keep output empty so the "Thinking..." spinner shows
                             block.output = BlockOutput::Streaming {
-                                lines: vec![format!("💭 {}", message)],
+                                lines: vec![],
                                 complete: false,
                             };
                         }
@@ -433,6 +455,13 @@ impl ShellTuiRunner {
                         tool_name,
                         description,
                     } => {
+                        // Track tool step in sidebar if in build mode
+                        if self.app.agent_mode == crate::tools::AgentMode::Build {
+                            self.app
+                                .sidebar
+                                .add_tool_step(tool_name.clone(), description.clone());
+                        }
+
                         // Get prompt first before mutable borrow
                         let prompt = self.app.current_prompt();
                         let child = CommandBlock::new(
@@ -510,6 +539,11 @@ impl ShellTuiRunner {
                         tool_name,
                         success,
                     } => {
+                        // Complete tool step in sidebar if in build mode
+                        if self.app.agent_mode == crate::tools::AgentMode::Build {
+                            self.app.sidebar.complete_tool_step(&tool_name, success);
+                        }
+
                         // Mark the tool block as complete
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             if let Some(child) = parent.children.iter_mut().rev().find(|c| {
@@ -517,6 +551,10 @@ impl ShellTuiRunner {
                             }) {
                                 child.exit_code = Some(if success { 0 } else { 1 });
                             }
+                        }
+                        // If todo_write tool completed, sync todos to sidebar
+                        if tool_name == "todo_write" && success {
+                            self.app.sync_todos_to_sidebar();
                         }
                         self.app.mark_dirty();
                     }
@@ -526,6 +564,17 @@ impl ShellTuiRunner {
                         old_content,
                         new_content,
                     } => {
+                        // Track file modification in sidebar
+                        use crate::tui::sidebar::ModificationType;
+                        let mod_type = if old_content.is_empty() {
+                            ModificationType::Created
+                        } else {
+                            ModificationType::Edited
+                        };
+                        self.app
+                            .sidebar
+                            .track_file_modification(path.clone(), mod_type);
+
                         // Store diff in the most recent tool child block
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             if let Some(child) = parent.children.last_mut() {
@@ -553,6 +602,28 @@ impl ShellTuiRunner {
                     AiUpdate::Error { block_id, message } => {
                         self.app.fail_block(&block_id, message, String::new(), 1);
                         self.app.set_ai_thinking(false);
+                    }
+                    AiUpdate::PlanEvent { event, .. } => {
+                        // Update sidebar with plan event
+                        self.app.update_plan(&event);
+                    }
+                    AiUpdate::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        ..
+                    } => {
+                        // Update token usage in sidebar
+                        self.app.update_tokens(input_tokens, output_tokens);
+                    }
+                    AiUpdate::ContextCompressed {
+                        tokens_compressed, ..
+                    } => {
+                        // Record compressed tokens in sidebar
+                        self.app
+                            .sidebar
+                            .token_usage
+                            .record_compression(tokens_compressed);
+                        self.app.mark_dirty();
                     }
                 }
             }
@@ -756,6 +827,21 @@ impl ShellTuiRunner {
         ai_tx: &mpsc::UnboundedSender<AiUpdate>,
         orch_tx: &mpsc::UnboundedSender<OrchestrationUpdate>,
     ) -> Result<bool> {
+        // Handle commands modal first
+        if self.app.commands_modal_visible {
+            match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.app.hide_commands_modal();
+                    return Ok(false);
+                }
+                _ => {
+                    // Any other key also closes the modal
+                    self.app.hide_commands_modal();
+                    return Ok(false);
+                }
+            }
+        }
+
         match code {
             // Ctrl+C - cancel or clear
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -836,6 +922,11 @@ impl ShellTuiRunner {
                 }
             }
 
+            // Ctrl+B - toggle sidebar visibility
+            KeyCode::Char('b') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.app.toggle_sidebar();
+            }
+
             // Regular character input
             KeyCode::Char(c) => {
                 // Check if file picker is visible - send input there
@@ -913,6 +1004,12 @@ impl ShellTuiRunner {
                 if self.app.file_picker.visible {
                     self.app.file_picker.select_up();
                     self.app.mark_dirty();
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    // Alt+Up scrolls sidebar steps up (towards older steps) in build mode
+                    if self.app.agent_mode == crate::tools::AgentMode::Build {
+                        self.app.sidebar.scroll_tool_steps_up();
+                        self.app.mark_dirty();
+                    }
                 } else if modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Up scrolls up
                     self.app.scroll_up();
@@ -926,6 +1023,12 @@ impl ShellTuiRunner {
                 if self.app.file_picker.visible {
                     self.app.file_picker.select_down();
                     self.app.mark_dirty();
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    // Alt+Down scrolls sidebar steps down (towards newer steps) in build mode
+                    if self.app.agent_mode == crate::tools::AgentMode::Build {
+                        self.app.sidebar.scroll_tool_steps_down();
+                        self.app.mark_dirty();
+                    }
                 } else if modifiers.contains(KeyModifiers::SHIFT) {
                     // Shift+Down scrolls down
                     self.app.scroll_down();
@@ -1299,6 +1402,10 @@ Keyboard:
                     prompt,
                 );
                 self.app.add_block(block);
+            }
+
+            SlashCommand::Commands => {
+                self.app.show_commands_modal();
             }
 
             SlashCommand::Orchestrate(task) => {
@@ -1852,10 +1959,13 @@ Keyboard:
         };
 
         let prompt = self.app.current_prompt();
-        let block = CommandBlock::new(display_input, BlockType::AiQuery, prompt);
+        let block = CommandBlock::new(display_input.clone(), BlockType::AiQuery, prompt);
         let block_id = block.id.clone();
         self.app.add_block(block);
         self.app.set_ai_thinking(true);
+
+        // Update sidebar with current task (use the clean query without @mentions)
+        self.app.sidebar.set_task(query.clone());
 
         // Build full context
         let shell_context = self.app.build_ai_context();
@@ -1931,6 +2041,60 @@ Keyboard:
                                 block_id: block_id_inner.clone(),
                                 text,
                             },
+                            // Subagent events - treat like tool executions
+                            SessionEvent::SubagentStarted { id, kind, task } => {
+                                AiUpdate::ToolStart {
+                                    block_id: block_id_inner.clone(),
+                                    tool_name: format!("subagent:{}", id),
+                                    description: format!("{} - {}", kind, task),
+                                }
+                            }
+                            SessionEvent::SubagentProgress { id, message } => {
+                                AiUpdate::BashOutputLine {
+                                    block_id: block_id_inner.clone(),
+                                    tool_name: format!("subagent:{}", id),
+                                    line: message,
+                                }
+                            }
+                            SessionEvent::SubagentToolUsed {
+                                id,
+                                tool,
+                                description,
+                            } => AiUpdate::BashOutputLine {
+                                block_id: block_id_inner.clone(),
+                                tool_name: format!("subagent:{}", id),
+                                line: format!("  {} {}", tool, description),
+                            },
+                            SessionEvent::SubagentCompleted {
+                                id,
+                                success,
+                                summary,
+                            } => AiUpdate::ToolComplete {
+                                block_id: block_id_inner.clone(),
+                                tool_name: format!("subagent:{}", id),
+                                success,
+                            },
+                            // Plan events - forward for sidebar updates
+                            SessionEvent::Plan(plan_event) => AiUpdate::PlanEvent {
+                                block_id: block_id_inner.clone(),
+                                event: plan_event,
+                            },
+                            // Token usage updates
+                            SessionEvent::TokenUsage {
+                                input_tokens,
+                                output_tokens,
+                            } => AiUpdate::TokenUsage {
+                                block_id: block_id_inner.clone(),
+                                input_tokens,
+                                output_tokens,
+                            },
+                            // Context compression updates
+                            SessionEvent::ContextCompressed { tokens_compressed } => {
+                                AiUpdate::ContextCompressed {
+                                    block_id: block_id_inner.clone(),
+                                    tokens_compressed,
+                                }
+                            }
                         };
                         let _ = ai_tx_inner.send(update);
                     }

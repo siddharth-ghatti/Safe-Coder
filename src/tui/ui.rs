@@ -45,24 +45,31 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 /// Calculate the required height for the input area based on wrapped content
 fn calculate_input_height(app: &App, terminal_width: u16) -> u16 {
-    // Account for borders and padding, then be more aggressive with wrapping
-    // Use 65% of available width to account for send button and UI elements
-    let available_width = terminal_width.saturating_sub(6); // 6 for borders and padding
-    let effective_width = (available_width as usize * 65) / 100; // Use only 65% of width
-    let effective_width = effective_width.max(10); // Minimum usable width
+    // Account for borders and padding
+    let available_width = terminal_width.saturating_sub(4); // 4 for borders and padding
+    let available_width = available_width.max(20); // Ensure minimum usable width
     
-    // Calculate input character count including prompt
-    let input_char_count = app.input.chars().count() + 2; // +2 for "> " prompt
+    if available_width == 0 {
+        return 3; // Minimum height
+    }
     
-    // Calculate required lines
-    let input_lines = if effective_width > 0 {
-        ((input_char_count / effective_width) + 1).max(1).min(5) as u16 // max 5 lines
+    let prompt_prefix = "> ";
+    let input_with_cursor = format!("{} ", app.input); // Add space for cursor
+    
+    // Calculate wrapped lines using textwrap
+    let content_width = (available_width as usize).saturating_sub(prompt_prefix.len());
+    let content_width = content_width.max(10); // Ensure reasonable minimum
+    
+    let wrapped_lines = if app.input.is_empty() {
+        1 // Just the prompt line
     } else {
-        1
+        let wrapped = wrap(&input_with_cursor, content_width);
+        wrapped.len().max(1)
     };
     
-    // Add 2 for border and padding, ensure minimum height
-    input_lines + 2 
+    // Add 2 for border, ensure minimum height of 3, maximum of 8
+    let height = (wrapped_lines as u16 + 2).max(3).min(8);
+    height
 }
 
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
@@ -207,65 +214,6 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Calculate available width for input text (use same logic as height calculation)
-    let available_width = inner.width.saturating_sub(2); // Account for padding
-    let effective_width = (available_width as usize * 65) / 100; // Use only 65% of width for more aggressive wrapping
-    let effective_width = effective_width.max(10); // Ensure minimum width
-    
-    // Create the full input string
-    let full_input = format!("> {}", app.input);
-    
-    // Wrap the text
-    let wrapped_lines = wrap(&full_input, effective_width);
-    
-    // Convert wrapped lines to styled lines
-    let mut styled_lines: Vec<Line> = Vec::new();
-    
-    for (i, line) in wrapped_lines.iter().enumerate() {
-        if i == 0 {
-            // First line - style the prompt differently
-            if line.len() > 2 {
-                styled_lines.push(Line::from(vec![
-                    Span::styled(
-                        "> ",
-                        Style::default()
-                            .fg(ACCENT_BLUE)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(line[2..].to_string(), Style::default().fg(TEXT_PRIMARY)),
-                ]));
-            } else {
-                styled_lines.push(Line::from(vec![
-                    Span::styled(
-                        line.to_string(),
-                        Style::default()
-                            .fg(ACCENT_BLUE)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-            }
-        } else {
-            // Continuation lines - just the content without prompt
-            styled_lines.push(Line::from(vec![
-                Span::styled(line.to_string(), Style::default().fg(TEXT_PRIMARY)),
-            ]));
-        }
-    }
-    
-    // Add cursor to the last line
-    if let Some(last_line) = styled_lines.last_mut() {
-        let cursor = if app.animation_frame % 20 < 10 {
-            "█"
-        } else {
-            " "
-        };
-        
-        last_line.spans.push(Span::styled(cursor, Style::default().fg(ACCENT_BLUE)));
-    }
-
-    let paragraph = Paragraph::new(styled_lines)
-        .wrap(Wrap { trim: false });
-
     // Add some left padding
     let input_area = Rect {
         x: inner.x + 1,
@@ -273,6 +221,68 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         width: inner.width.saturating_sub(2),
         height: inner.height,
     };
+
+    // Create input text with prompt and cursor
+    let cursor = if app.animation_frame % 20 < 10 { "█" } else { " " };
+
+    // Split the input into lines for proper wrapping
+    let available_width = input_area.width as usize;
+    if available_width == 0 {
+        return;
+    }
+
+    // Create lines with proper wrapping
+    let mut lines = Vec::new();
+    let prompt_prefix = "> ";
+    
+    if app.input.is_empty() {
+        // Just show prompt and cursor
+        lines.push(Line::from(vec![
+            Span::styled(
+                prompt_prefix,
+                Style::default()
+                    .fg(ACCENT_BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(cursor, Style::default().fg(ACCENT_BLUE)),
+        ]));
+    } else {
+        // Wrap the input text properly
+        let input_with_cursor = format!("{}{}", app.input, cursor);
+        let wrapped_lines = wrap(&input_with_cursor, available_width.saturating_sub(prompt_prefix.len()));
+        
+        for (i, line) in wrapped_lines.iter().enumerate() {
+            if i == 0 {
+                // First line gets the prompt prefix
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        prompt_prefix,
+                        Style::default()
+                            .fg(ACCENT_BLUE)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        line.to_string(),
+                        Style::default().fg(TEXT_PRIMARY),
+                    ),
+                ]));
+            } else {
+                // Continuation lines get proper indentation
+                let indent = " ".repeat(prompt_prefix.len());
+                lines.push(Line::from(vec![
+                    Span::styled(indent, Style::default()),
+                    Span::styled(
+                        line.to_string(),
+                        Style::default().fg(TEXT_PRIMARY),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    // Use Paragraph with the wrapped lines
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, input_area);
 }

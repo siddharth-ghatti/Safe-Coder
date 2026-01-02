@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
+use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 use crate::auth::anthropic::get_oauth_beta_headers;
 use crate::auth::{StoredToken, TokenManager};
 
@@ -79,9 +79,17 @@ struct AnthropicTool {
 }
 
 #[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: usize,
+    output_tokens: usize,
+}
+
+#[derive(Debug, Deserialize)]
 struct AnthropicResponse {
     content: Vec<AnthropicContent>,
+    #[allow(dead_code)]
     stop_reason: Option<String>,
+    usage: Option<AnthropicUsage>,
 }
 
 impl AnthropicClient {
@@ -91,7 +99,10 @@ impl AnthropicClient {
             auth: AuthType::ApiKey(api_key),
             model,
             max_tokens,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             claude_code_compat: false,
         }
     }
@@ -120,7 +131,10 @@ impl AnthropicClient {
             auth,
             model,
             max_tokens,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             claude_code_compat,
         }
     }
@@ -137,7 +151,10 @@ impl AnthropicClient {
             model,
             claude_code_compat,
             max_tokens,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -219,7 +236,7 @@ impl LlmClient for AnthropicClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_prompt: Option<&str>,
-    ) -> Result<Message> {
+    ) -> Result<LlmResponse> {
         // Build the system prompt:
         // For OAuth with Claude Code compat, we MUST use ONLY the Claude Code system prompt.
         // Anthropic's API rejects OAuth tokens if the system prompt is anything other than
@@ -312,8 +329,15 @@ impl LlmClient for AnthropicClient {
             .await
             .context("Failed to parse Anthropic response")?;
 
-        Ok(Self::convert_anthropic_to_message(
-            anthropic_response.content,
-        ))
+        // Extract token usage if available
+        let usage = anthropic_response.usage.map(|u| TokenUsage {
+            input_tokens: u.input_tokens,
+            output_tokens: u.output_tokens,
+        });
+
+        Ok(LlmResponse {
+            message: Self::convert_anthropic_to_message(anthropic_response.content),
+            usage,
+        })
     }
 }

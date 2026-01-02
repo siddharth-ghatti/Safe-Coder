@@ -1,10 +1,37 @@
 # Safe Coder
 
-A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, and can also delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces.
+A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and now includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
 
 ![Safe Coder CLI](assets/cli-screenshot.png)
 
 ## 🌟 What's New
+
+### 🤖 **Subagent System (v2.4)**
+- **Specialized AI agents** - Deploy focused agents for specific tasks (analysis, testing, refactoring, documentation)
+- **Tool-restricted agents** - Each subagent type has carefully curated tool access for safety
+- **Autonomous execution** - Subagents work independently with their own reasoning loops
+- **Real-time monitoring** - Track subagent progress with live status updates
+- **Smart delegation** - Automatically choose the right subagent type for complex tasks
+- **Five subagent types**:
+  - 🔍 **Code Analyzer** - Read-only code analysis and insights
+  - 🧪 **Tester** - Create and run comprehensive test suites
+  - 🔧 **Refactorer** - Make targeted code improvements
+  - 📝 **Documenter** - Generate and update documentation
+  - 🤖 **Custom Agent** - User-defined specialized roles
+
+### 🧠 **Enhanced Planning (v2.4)**
+- **Complexity scoring** - Automatic assessment of task difficulty and scope
+- **Intelligent agent assignment** - Match tasks to the most appropriate subagent type
+- **Multi-step planning** - Break down complex requests into manageable subagent tasks
+- **Dependency tracking** - Ensure proper execution order for dependent steps
+- **Progress visualization** - Real-time status updates across all active subagents
+
+### 🧠 **LSP Integration (v2.3)**
+- **Language Server Protocol support** - Get IDE-like features directly in the terminal
+- **Automatic LSP downloads** - Automatically install and configure language servers
+- **Real-time code intelligence** - Syntax highlighting, error detection, and code completion
+- **Multi-language support** - Works with Rust, TypeScript, Python, Go, and more
+- **Shell-integrated LSP** - Access language features seamlessly in the TUI
 
 ### 🚀 **Orchestration Integration (v2.2)**
 - **Shell-integrated orchestration** - Run `@orchestrate <task>` directly from the shell TUI
@@ -50,6 +77,7 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **GPU acceleration** - Automatic NVIDIA/Apple Silicon support
 
 ### 🎨 **Enhanced TUI Experience**
+- **OpenCode-inspired theme** - Modern VS Code-style interface design
 - **Dynamic ASCII banner** with neon gradient effects
 - **Cyberpunk theme** - Pulsing neon borders and glitch effects
 - **Professional dark mode** - Google CLI / Claude Code inspired styling
@@ -65,6 +93,27 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **Custom commands** - User-defined shortcuts for frequent operations
 
 ## Features
+
+### 🧠 **Language Server Protocol (LSP) Features**
+- **Automatic Setup**: Download and configure language servers automatically
+- **Code Intelligence**: Real-time syntax highlighting, error detection, and diagnostics
+- **Multi-Language**: Support for Rust, TypeScript, Python, Go, Java, C++, and more
+- **Shell Integration**: Access LSP features directly from the terminal interface
+- **Smart Completions**: Context-aware code completion suggestions
+- **Error Highlighting**: Real-time error detection and inline diagnostics
+
+### 🤖 **Subagent System Features**
+- **Specialized Agents**: Deploy focused AI agents for specific development tasks
+- **Tool Access Control**: Each agent type has carefully curated tool permissions for safety
+- **Autonomous Operation**: Subagents work independently with their own reasoning and execution loops
+- **Real-time Monitoring**: Track progress with live status updates and event streaming
+- **Smart Task Assignment**: Automatically choose the best agent type based on task complexity
+- **Five Agent Types**:
+  - 🔍 **Code Analyzer**: Read-only analysis of code structure, patterns, and issues
+  - 🧪 **Tester**: Create comprehensive test suites and run validation
+  - 🔧 **Refactorer**: Make targeted code improvements and structural changes
+  - 📝 **Documenter**: Generate and maintain project documentation
+  - 🤖 **Custom Agent**: User-defined roles with flexible tool access
 
 ### 🖥️ **Interactive Shell Mode (Modern TUI)**
 - **Command Block Interface**: Warp-like shell with visual command blocks and streaming output
@@ -157,6 +206,51 @@ Safe Coder now uses a simplified, high-performance architecture focused on **Git
 - ✅ **Cross-platform compatibility** (works everywhere Git does)
 - 🔧 **Better IDE integration** (file watchers, language servers work)
 - 🎯 **Industry-standard safety** (Git-based rollback)
+
+### Subagent System Architecture
+
+Safe Coder includes a specialized subagent system for focused AI assistance:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Subagent Orchestrator                        │
+│                                                                  │
+│  ┌──────────────┐    ┌──────────────────────────────────────┐   │
+│  │   Planner    │───►│         Task Analyzer                │   │
+│  │  (Analyze    │    │  ┌──────────────────────────────────┐│   │
+│  │   request)   │    │  │   Complexity Scoring Engine     ││   │
+│  └──────────────┘    │  │   - Code analysis: simple       ││   │
+│                       │  │   - Testing: medium            ││   │
+│                       │  │   - Refactoring: complex       ││   │
+│                       │  └──────────────────────────────────┘│   │
+│                       └──────────────────────────────────────┘   │
+│                                    │                             │
+│         ┌──────────────────────────┼─────────────────────┐      │
+│         ▼                          ▼                     ▼      │
+│  ┌─────────────┐           ┌─────────────┐        ┌──────────┐ │
+│  │🔍 Analyzer  │           │🧪 Tester    │        │🔧 Refactor│ │
+│  │(Read-only)  │           │(Create tests│        │(Edit code)│ │
+│  │- read_file  │           │- read/write │        │- read/edit│ │
+│  │- glob/grep  │           │- bash       │        │- bash     │ │
+│  │- bash       │           │)            │        │)          │ │
+│  └─────────────┘           └─────────────┘        └──────────┘ │
+│                                                                  │
+│  ┌─────────────┐           ┌─────────────┐                     │
+│  │📝 Documenter│           │🤖 Custom    │                     │
+│  │(Write docs) │           │(User-defined│                     │
+│  │- read/write │           │- read_file  │                     │
+│  │- edit_file  │           │- glob/grep  │                     │
+│  │- bash       │           │- bash)      │                     │
+│  └─────────────┘           └─────────────┘                     │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Subagent Safety Model:**
+- 🔒 **Tool Restrictions**: Each subagent type has limited tool access
+- 🔍 **Read-Only Analysis**: Code Analyzer cannot modify files
+- ⏱️ **Timeout Control**: Maximum execution time per subagent (5 min default)
+- 🔄 **Iteration Limits**: Maximum reasoning loops to prevent runaway processes
+- 📊 **Progress Monitoring**: Real-time status updates and event streaming
 
 ### Multi-Agent Orchestration
 
@@ -350,6 +444,46 @@ safe-coder orchestrate --worker gemini --task "Fix the typo in README.md"
 # Disable worktrees (use branches instead)
 safe-coder orchestrate --worktrees false
 ```
+
+### Subagent Mode (Specialized AI Assistants)
+
+Deploy specialized AI subagents for focused tasks:
+
+```bash
+# Analyze code structure and patterns (read-only)
+safe-coder subagent analyze "Review the authentication system for security issues"
+
+# Create comprehensive tests
+safe-coder subagent test "Add unit tests for the user service module"
+
+# Refactor existing code
+safe-coder subagent refactor "Extract the database logic into a separate module"
+
+# Generate documentation
+safe-coder subagent document "Create API documentation for all endpoints"
+
+# Custom subagent with specific role
+safe-coder subagent custom --role "security auditor" "Check for SQL injection vulnerabilities"
+
+# Specify file patterns to focus on
+safe-coder subagent analyze --files "src/**/*.rs" "Find performance bottlenecks in Rust code"
+```
+
+**Subagent Commands in Chat Mode:**
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `/subagent <type> <task>` | Deploy a specialized subagent | `/subagent test "Add tests for auth module"` |
+| `/analyze <task>` | Quick code analysis (read-only) | `/analyze "Find potential bugs"` |
+| `/test <task>` | Create and run tests | `/test "Cover edge cases for user login"` |
+| `/refactor <task>` | Refactor existing code | `/refactor "Simplify error handling"` |
+| `/document <task>` | Generate documentation | `/document "Create README for this module"` |
+
+**Subagent Safety Features:**
+- **Tool Restrictions**: Each subagent type has limited tool access for safety
+- **Read-Only Analysis**: Code Analyzer can only read files, never modify
+- **Isolated Execution**: Each subagent runs in its own context
+- **Progress Monitoring**: Real-time updates on subagent status and actions
 
 ### Local AI with Ollama
 
@@ -545,6 +679,73 @@ Tasks: 2 total, 2 successful, 0 failed
 ✨ Orchestrator session ended. Goodbye!
 ```
 
+### Subagent Mode
+
+```
+🤖 Safe Coder Subagent System
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Project: /home/user/my-project
+Available agents: Analyzer, Tester, Refactorer, Documenter, Custom
+
+chat> /subagent analyze "Review the authentication system for security issues"
+
+🔍 Deploying Code Analyzer subagent...
+┌─ Subagent: analyzer-a1b2c3 ─────────────────────────────────┐
+│ 🧠 Analyzing codebase for security issues in auth system... │
+│                                                              │
+│ ✓ Reading src/auth/mod.rs                                   │
+│ ✓ Reading src/auth/tokens.rs                               │
+│ ✓ Analyzing password hashing implementation                │
+│ ✓ Checking session management                              │
+│                                                              │
+│ 📊 Analysis Results:                                        │
+│ ┌─ Security Issues Found ─────────────────────────────────┐ │
+│ │ ⚠️  Hardcoded JWT secret in tokens.rs:42               │ │  
+│ │ ⚠️  Missing rate limiting on login endpoint            │ │
+│ │ ⚠️  Session tokens never expire                        │ │
+│ │ ✓  Password hashing uses bcrypt (good)                 │ │
+│ │ ✓  SQL injection protection in place                   │ │
+│ └─────────────────────────────────────────────────────────┘ │
+│                                                              │
+│ 📝 Recommendations:                                         │
+│ • Move JWT secret to environment variable                   │
+│ • Implement login rate limiting                             │
+│ • Add session expiration (24hr recommended)                 │
+└──────────────────────────────────────────────────────────────┘
+
+✓ Analyzer completed in 45 seconds (5 files read, 0 modified)
+
+chat> /subagent test "Add unit tests for the auth module"
+
+🧪 Deploying Tester subagent...
+┌─ Subagent: tester-d4e5f6 ──────────────────────────────────┐
+│ 🧠 Creating comprehensive tests for auth module...         │
+│                                                              │
+│ ✓ Reading existing auth code                               │
+│ ✓ Analyzing test coverage gaps                             │
+│ ✓ Writing tests/auth_test.rs                               │
+│ ✓ Adding password validation tests                         │
+│ ✓ Adding token generation tests                            │
+│ ✓ Adding login flow tests                                  │
+│                                                              │
+│ 🏃 Running tests...                                         │
+│ ┌─ Test Results ──────────────────────────────────────────┐ │
+│ │ test auth::test_password_hashing ... ok                 │ │
+│ │ test auth::test_invalid_password ... ok                 │ │
+│ │ test auth::test_token_generation ... ok                 │ │
+│ │ test auth::test_login_success ... ok                    │ │
+│ │ test auth::test_login_failure ... ok                    │ │
+│ │                                                          │ │
+│ │ test result: ok. 5 passed; 0 failed; 0 ignored         │ │
+│ └──────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────┘
+
+✓ Tester completed in 2 minutes (8 files read, 1 modified)
+  Created: tests/auth_test.rs (156 lines, 5 test functions)
+
+chat> exit
+```
+
 ## TUI Orchestration
 
 Within the TUI chat mode, you can spin off background tasks using the `/orchestrate` (or `/orch`) command:
@@ -671,6 +872,25 @@ The shell now features a modern Warp-like TUI interface with enhanced functional
 4. **Parallel Execution**: Workers execute tasks concurrently (up to 3 at once)
 5. **Result Merging**: Successful changes are merged back to the main branch
 6. **Cleanup**: Temporary worktrees are removed
+
+### 🤖 **Subagent System Flow**
+
+1. **Task Analysis**: Request is analyzed for complexity and categorized by task type
+2. **Agent Selection**: The most appropriate subagent type is chosen automatically:
+   - Simple analysis → Code Analyzer (read-only)
+   - Test creation → Tester (read/write/bash)
+   - Code changes → Refactorer (read/edit/bash)
+   - Documentation → Documenter (read/write/edit/bash)
+3. **Tool Restriction**: Subagent is limited to only its allowed tools for safety
+4. **Autonomous Execution**: Subagent works independently with its own reasoning loop
+5. **Progress Monitoring**: Real-time events track subagent thinking, tool use, and progress
+6. **Result Collection**: Summary and detailed results are collected upon completion
+
+**Subagent Safety Controls:**
+- ⏱️ **Timeout Protection**: 5-minute default timeout prevents runaway processes
+- 🔄 **Iteration Limits**: Maximum 15 reasoning loops to prevent infinite cycles
+- 🔒 **Tool Sandboxing**: Each subagent type has restricted tool access
+- 📊 **Activity Monitoring**: All tool calls and outputs are logged and displayed
 
 ### ⚡ **Parallel Execution with Throttling**
 
@@ -845,6 +1065,11 @@ safe-coder login anthropic
 - [x] GitHub Copilot worker support
 - [x] Worker distribution strategies (round-robin, task-based, load-balanced)
 - [x] Self-orchestration (Safe-Coder as a worker)
+- [x] Language Server Protocol (LSP) support with automatic downloads
+- [x] OpenCode-inspired UI theme
+- [x] **Specialized subagent system** - Deploy focused AI agents for specific tasks
+- [x] **Enhanced task planning** - Complexity scoring and intelligent agent assignment
+- [x] **Tool-restricted agents** - Safety through limited tool access per agent type
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI

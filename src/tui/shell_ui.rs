@@ -24,6 +24,8 @@ use super::file_picker::FilePicker;
 use super::shell_app::{
     BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
 };
+use super::sidebar::PlanStepDisplay;
+use crate::planning::PlanStepStatus;
 
 // ============================================================================
 // Color Palette - OpenCode inspired, dark and minimal
@@ -66,7 +68,19 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     let bg = Block::default().style(Style::default().bg(BG_PRIMARY));
     f.render_widget(bg, size);
 
-    // Main layout: [title] [messages] [input hints] [input] [status bar]
+    // Horizontal layout: [main content] [sidebar] (if visible)
+    let sidebar_width = if app.sidebar.visible { 28 } else { 0 };
+
+    let horizontal = Layout::horizontal([
+        Constraint::Min(40),               // Main content area
+        Constraint::Length(sidebar_width), // Sidebar (fixed width)
+    ])
+    .split(size);
+
+    let main_area = horizontal[0];
+    let sidebar_area = horizontal[1];
+
+    // Main content layout: [title] [messages] [input hints] [input] [status bar]
     let chunks = Layout::vertical([
         Constraint::Length(1),                           // Title bar
         Constraint::Min(5),                              // Messages
@@ -74,13 +88,18 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
         Constraint::Length(calculate_input_height(app)), // Input area
         Constraint::Length(1),                           // Status bar
     ])
-    .split(size);
+    .split(main_area);
 
     draw_title_bar(f, app, chunks[0]);
     draw_messages(f, app, chunks[1]);
     draw_input_hints(f, app, chunks[2]);
     draw_input_area(f, app, chunks[3]);
     draw_status_bar(f, app, chunks[4]);
+
+    // Draw sidebar if visible
+    if app.sidebar.visible {
+        draw_sidebar(f, app, sidebar_area);
+    }
 
     // Popups on top
     if app.file_picker.visible {
@@ -90,10 +109,30 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
         draw_autocomplete_popup(f, app, size);
     }
+
+    if app.commands_modal_visible {
+        draw_commands_modal(f, app, size);
+    }
 }
 
 fn calculate_input_height(app: &ShellTuiApp) -> u16 {
-    let lines = app.input.lines().count().max(1).min(5) as u16;
+    // Estimate wrapped lines (assume ~80 char width, accounting for sidebar)
+    let estimated_width = 60usize; // Conservative estimate
+    let wrapped_count = if app.input.is_empty() {
+        1
+    } else {
+        // Count wrapped lines
+        let mut count = 0;
+        for line in app.input.lines() {
+            count += ((line.len() / estimated_width) + 1).max(1);
+        }
+        // Handle case where input has no newlines but is long
+        if count == 0 {
+            count = ((app.input.len() / estimated_width) + 1).max(1);
+        }
+        count
+    };
+    let lines = wrapped_count.min(5) as u16;
     lines + 2 // borders
 }
 
@@ -370,10 +409,12 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
         }
 
         BlockType::ShellCommand => {
-            // User command header
-            lines.push(MessageLine::UserHeader {
-                text: block.input.clone(),
-            });
+            // User command header - wrap long commands
+            for wrapped in wrap(&block.input, width.saturating_sub(4)) {
+                lines.push(MessageLine::UserHeader {
+                    text: wrapped.to_string(),
+                });
+            }
 
             if block.is_running() {
                 lines.push(MessageLine::Running {
@@ -387,10 +428,12 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
         }
 
         BlockType::AiQuery => {
-            // User query header (like "# Change button color to danger...")
-            lines.push(MessageLine::UserHeader {
-                text: block.input.clone(),
-            });
+            // User query header (like "# Change button color to danger...") - wrap long queries
+            for wrapped in wrap(&block.input, width.saturating_sub(4)) {
+                lines.push(MessageLine::UserHeader {
+                    text: wrapped.to_string(),
+                });
+            }
 
             if block.is_running() && block.children.is_empty() && block.output.get_text().is_empty()
             {
@@ -463,6 +506,19 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                 }
             }
         }
+
+        BlockType::Subagent { kind } => {
+            // Render subagent like an AI tool execution
+            lines.push(MessageLine::UserHeader {
+                text: format!("Subagent: {} - {}", kind, block.input),
+            });
+
+            render_output(lines, &block.output, width);
+
+            for child in &block.children {
+                render_child_block(lines, child, width, frame);
+            }
+        }
     }
 }
 
@@ -511,7 +567,10 @@ fn render_child_block(
             // Show diff if present (OpenCode-style with line numbers)
             if let Some(diff) = &block.diff {
                 render_diff_opencode(lines, diff, width);
-            } else if tool_name == "bash" || tool_name.starts_with("task-") {
+            } else if tool_name == "bash"
+                || tool_name.starts_with("task-")
+                || tool_name.starts_with("subagent:")
+            {
                 render_tool_output(lines, &block.output, width);
             }
         }
@@ -584,21 +643,35 @@ fn render_tool_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width:
             lines: output_lines,
             ..
         } => {
-            for line in output_lines.iter().take(10) {
+            // Show more lines for subagent streaming output
+            let max_lines = 50;
+            for line in output_lines.iter().take(max_lines) {
                 for wrapped in wrap(line, width.saturating_sub(14)) {
                     lines.push(MessageLine::ShellOutput {
                         text: format!("  {}", wrapped),
                     });
                 }
             }
+            if output_lines.len() > max_lines {
+                lines.push(MessageLine::ShellOutput {
+                    text: format!("  ... {} more lines", output_lines.len() - max_lines),
+                });
+            }
         }
         BlockOutput::Success(text) if !text.is_empty() => {
-            for line in text.lines().take(8) {
+            let max_lines = 30;
+            let text_lines: Vec<&str> = text.lines().collect();
+            for line in text_lines.iter().take(max_lines) {
                 for wrapped in wrap(line, width.saturating_sub(14)) {
                     lines.push(MessageLine::ShellOutput {
                         text: format!("  {}", wrapped),
                     });
                 }
+            }
+            if text_lines.len() > max_lines {
+                lines.push(MessageLine::ShellOutput {
+                    text: format!("  ... {} more lines", text_lines.len() - max_lines),
+                });
             }
         }
         _ => {}
@@ -722,50 +795,98 @@ fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Build input with cursor
-    let (before, after) = app.input.split_at(app.cursor_pos.min(app.input.len()));
+    let available_width = inner.width.saturating_sub(3) as usize; // Account for "> " prefix
+    let available_height = inner.height as usize;
 
     // Blinking cursor
     let cursor_visible = app.animation_frame % 16 < 10;
     let cursor_char = if cursor_visible { "█" } else { " " };
 
-    let after_rest: String = if !after.is_empty() {
-        after.chars().skip(1).collect()
-    } else {
-        String::new()
-    };
-
-    let mut spans = vec![Span::styled("> ", Style::default().fg(TEXT_DIM))];
-
     if app.input.is_empty() {
-        // Show placeholder when empty, with blinking cursor after prompt
-        spans.push(Span::styled(
-            cursor_char.to_string(),
-            Style::default()
-                .fg(ACCENT_CYAN)
-                .add_modifier(Modifier::REVERSED),
-        ));
-        spans.push(Span::styled(
-            "Type a message...",
-            Style::default().fg(TEXT_MUTED),
-        ));
-    } else {
-        spans.push(Span::styled(
-            before.to_string(),
-            Style::default().fg(TEXT_PRIMARY),
-        ));
-        spans.push(Span::styled(
-            cursor_char.to_string(),
-            Style::default()
-                .fg(ACCENT_CYAN)
-                .add_modifier(Modifier::REVERSED),
-        ));
-        spans.push(Span::styled(after_rest, Style::default().fg(TEXT_PRIMARY)));
+        // Show placeholder when empty
+        let spans = vec![
+            Span::styled("> ", Style::default().fg(TEXT_DIM)),
+            Span::styled(
+                cursor_char.to_string(),
+                Style::default()
+                    .fg(ACCENT_CYAN)
+                    .add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled("Type a message...", Style::default().fg(TEXT_MUTED)),
+        ];
+        let para = Paragraph::new(Line::from(spans));
+        f.render_widget(para, inner);
+        return;
     }
 
-    let input_para = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false });
+    // For non-empty input, we need to handle wrapping manually to track cursor position
+    let input_with_cursor = format!(
+        "{}{}{}",
+        &app.input[..app.cursor_pos.min(app.input.len())],
+        "\x00", // Cursor marker
+        &app.input[app.cursor_pos.min(app.input.len())..]
+    );
 
-    f.render_widget(input_para, inner);
+    // Wrap the text with cursor marker
+    let wrapped_lines: Vec<String> = wrap(&input_with_cursor, available_width)
+        .into_iter()
+        .map(|cow| cow.to_string())
+        .collect();
+
+    // Find which line contains the cursor and scroll to show it
+    let mut cursor_line = 0;
+    for (i, line) in wrapped_lines.iter().enumerate() {
+        if line.contains('\x00') {
+            cursor_line = i;
+            break;
+        }
+    }
+
+    // Calculate visible range to keep cursor in view
+    let visible_start = if cursor_line >= available_height {
+        cursor_line - available_height + 1
+    } else {
+        0
+    };
+    let visible_end = (visible_start + available_height).min(wrapped_lines.len());
+
+    // Build the display lines
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, line) in wrapped_lines
+        .iter()
+        .enumerate()
+        .skip(visible_start)
+        .take(visible_end - visible_start)
+    {
+        let prefix = if i == 0 { "> " } else { "  " };
+
+        if line.contains('\x00') {
+            // This line contains the cursor
+            let parts: Vec<&str> = line.splitn(2, '\x00').collect();
+            let before = parts.get(0).unwrap_or(&"");
+            let after = parts.get(1).unwrap_or(&"");
+
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(TEXT_DIM)),
+                Span::styled(before.to_string(), Style::default().fg(TEXT_PRIMARY)),
+                Span::styled(
+                    cursor_char.to_string(),
+                    Style::default()
+                        .fg(ACCENT_CYAN)
+                        .add_modifier(Modifier::REVERSED),
+                ),
+                Span::styled(after.to_string(), Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(TEXT_DIM)),
+                Span::styled(line.clone(), Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
 }
 
 // ============================================================================
@@ -782,16 +903,7 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let mode = app.agent_mode.short_name();
     let version = "v0.1.0";
 
-    // Build LSP status string (like Crush: "● Go gopls  ● Rust rust-analyzer")
-    let lsp_status: String = app
-        .lsp_servers
-        .iter()
-        .filter(|(_, _, running)| *running)
-        .map(|(lang, cmd, _)| format!("● {} {}", lang, cmd))
-        .collect::<Vec<_>>()
-        .join("  ");
-
-    // Build spans
+    // Build spans (removed LSP status - it's shown in sidebar instead)
     let mut spans = vec![
         Span::styled(" ", Style::default()),
         Span::styled(
@@ -803,29 +915,6 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         Span::styled(format!(" {}  ", version), Style::default().fg(TEXT_DIM)),
         Span::styled(path.clone(), Style::default().fg(TEXT_SECONDARY)),
     ];
-
-    // Add LSP status
-    spans.push(Span::styled("  │  ", Style::default().fg(TEXT_MUTED)));
-    if app.lsp_initializing {
-        // Show initializing spinner
-        let spinner_chars = ["◐", "◓", "◑", "◒"];
-        let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
-        spans.push(Span::styled(
-            format!("{} LSP initializing...", spinner),
-            Style::default().fg(TEXT_DIM),
-        ));
-    } else if !lsp_status.is_empty() {
-        // Show running servers
-        spans.push(Span::styled(lsp_status, Style::default().fg(ACCENT_GREEN)));
-    } else if let Some(ref msg) = app.lsp_status_message {
-        // Show error/status message
-        let color = if msg.contains("failed") || msg.contains("error") {
-            ACCENT_RED
-        } else {
-            TEXT_DIM
-        };
-        spans.push(Span::styled(msg.clone(), Style::default().fg(color)));
-    }
 
     // Calculate padding for right side
     let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
@@ -847,6 +936,568 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     let line = Line::from(spans);
     let para = Paragraph::new(line).style(Style::default().bg(BG_STATUS));
+    f.render_widget(para, area);
+}
+
+// ============================================================================
+// Sidebar (OpenCode-style)
+// ============================================================================
+
+fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    // Sidebar background with left border
+    let sidebar_block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(BORDER_SUBTLE))
+        .style(Style::default().bg(BG_PRIMARY));
+
+    let inner = sidebar_block.inner(area);
+    f.render_widget(sidebar_block, area);
+
+    // Calculate modified files section height (dynamic based on file count)
+    let modified_count = app.sidebar.modified_files.len();
+    let modified_height = if modified_count == 0 {
+        2 // Just header + "No changes"
+    } else {
+        (modified_count.min(5) + 2) as u16 // Header + files (max 5) + potential overflow
+    };
+
+    // Sidebar sections: [TASK] [CONTEXT] [FILES] [PLAN] [LSP]
+    let sections = Layout::vertical([
+        Constraint::Length(4),               // TASK section
+        Constraint::Length(5),               // CONTEXT (token usage with dual progress bar)
+        Constraint::Length(modified_height), // FILES (modified files)
+        Constraint::Min(6),                  // PLAN (variable height)
+        Constraint::Length(5),               // LSP connections
+    ])
+    .split(inner);
+
+    draw_sidebar_task(f, app, sections[0]);
+    draw_sidebar_context(f, app, sections[1]);
+    draw_sidebar_files(f, app, sections[2]);
+    draw_sidebar_plan(f, app, sections[3]);
+    draw_sidebar_lsp(f, app, sections[4]);
+}
+
+fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        " TASK",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    if let Some(ref task) = app.sidebar.current_task {
+        // Truncate task if too long
+        let max_len = area.width.saturating_sub(4) as usize; // Leave room for spinner
+        let display = if task.len() > max_len {
+            format!("{}...", &task[..max_len.saturating_sub(3)])
+        } else {
+            task.clone()
+        };
+
+        // Show animated spinner when AI is thinking
+        if app.ai_thinking {
+            let spinner_chars = ["◐", "◓", "◑", "◒"];
+            let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+                Span::styled(display, Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", display),
+                Style::default().fg(TEXT_PRIMARY),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            " No active task",
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    // Show step description if in progress
+    if let Some(ref plan) = app.sidebar.active_plan {
+        if let Some(ref desc) = plan.current_step_description {
+            let max_len = area.width.saturating_sub(2) as usize;
+            let display = if desc.len() > max_len {
+                format!("{}...", &desc[..max_len.saturating_sub(3)])
+            } else {
+                desc.clone()
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" {}", display),
+                Style::default().fg(ACCENT_CYAN),
+            )));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let usage = &app.sidebar.token_usage;
+
+    let mut lines = vec![Line::from(Span::styled(
+        " CONTEXT",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    // Token count - show live tokens and compressed tokens if any
+    if usage.compressed_tokens > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} (+{} compressed)",
+                usage.format_display(),
+                format_number(usage.compressed_tokens)
+            ),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", usage.format_display()),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    }
+
+    // Progress bar if we have context window info
+    // Shows both current tokens and compressed tokens
+    if usage.context_window > 0 {
+        let bar_width = area.width.saturating_sub(4) as usize;
+
+        // Calculate current usage portion
+        let current_percent = usage.usage_percent();
+        let current_filled = ((current_percent / 100.0) * bar_width as f32) as usize;
+
+        // Calculate compressed portion (shown in different color)
+        let compressed_percent = usage.compressed_percent();
+        let compressed_filled = ((compressed_percent / 100.0) * bar_width as f32) as usize;
+
+        // Total filled cannot exceed bar width
+        let total_filled = (current_filled + compressed_filled).min(bar_width);
+        let empty = bar_width.saturating_sub(total_filled);
+
+        // Color for current tokens
+        let current_color = if current_percent > 80.0 {
+            ACCENT_RED
+        } else if current_percent > 60.0 {
+            ACCENT_YELLOW
+        } else {
+            ACCENT_GREEN
+        };
+
+        // Compressed tokens shown in magenta/purple
+        let compressed_color = ACCENT_MAGENTA;
+
+        // Build the progress bar with two colors
+        let mut spans = vec![Span::styled(" ", Style::default())];
+
+        if compressed_filled > 0 {
+            // Compressed tokens first (leftmost, as they represent "history")
+            spans.push(Span::styled(
+                "▓".repeat(compressed_filled.min(bar_width)),
+                Style::default().fg(compressed_color),
+            ));
+        }
+
+        if current_filled > 0 {
+            // Current tokens after compressed
+            spans.push(Span::styled(
+                "█".repeat(current_filled.min(bar_width.saturating_sub(compressed_filled))),
+                Style::default().fg(current_color),
+            ));
+        }
+
+        // Empty portion
+        if empty > 0 {
+            spans.push(Span::styled(
+                "░".repeat(empty),
+                Style::default().fg(TEXT_MUTED),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+
+        // Legend line
+        if usage.compressed_tokens > 0 {
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled("█", Style::default().fg(current_color)),
+                Span::styled(" live ", Style::default().fg(TEXT_DIM)),
+                Span::styled("▓", Style::default().fg(compressed_color)),
+                Span::styled(" compressed", Style::default().fg(TEXT_DIM)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+/// Format large numbers with K/M suffixes (duplicated here for shell_ui)
+fn format_number(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+fn draw_sidebar_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    use super::sidebar::ModificationType;
+
+    let mut lines = vec![Line::from(Span::styled(
+        " FILES",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    let files = &app.sidebar.modified_files;
+
+    if files.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " No changes",
+            Style::default().fg(TEXT_MUTED),
+        )));
+    } else {
+        let max_files = 5;
+        for file in files.iter().take(max_files) {
+            // Icon and color based on modification type
+            let (icon, color) = match file.modification_type {
+                ModificationType::Created => ("+", ACCENT_GREEN),
+                ModificationType::Edited => ("~", ACCENT_YELLOW),
+                ModificationType::Deleted => ("-", ACCENT_RED),
+            };
+
+            // Get just the filename, not the full path
+            let filename = std::path::Path::new(&file.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| file.path.clone());
+
+            // Truncate if too long
+            let max_len = area.width.saturating_sub(5) as usize;
+            let display = if filename.len() > max_len {
+                format!("{}...", &filename[..max_len.saturating_sub(3)])
+            } else {
+                filename
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
+            ]));
+        }
+
+        if files.len() > max_files {
+            lines.push(Line::from(Span::styled(
+                format!(" ... {} more", files.len() - max_files),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    // Check if we're in build mode to show tool steps instead of todo plan
+    let show_tool_steps = app.agent_mode == crate::tools::AgentMode::Build;
+
+    let mut lines = vec![Line::from(Span::styled(
+        if show_tool_steps { " STEPS" } else { " PLAN" },
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    // In build mode, show tool execution steps
+    if show_tool_steps && !app.sidebar.tool_steps.is_empty() {
+        let tool_steps = &app.sidebar.tool_steps;
+
+        // Show progress bar based on completed vs total tool steps
+        let completed_count = app.sidebar.completed_tool_steps();
+        let total_count = tool_steps.len();
+        let percent = if total_count > 0 {
+            (completed_count as f32 / total_count as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+
+        // Show step count
+        let progress = format!(" {}/{} tools", completed_count, total_count);
+        lines.push(Line::from(Span::styled(
+            progress,
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+
+        // Show recent tool steps (max items based on available height)
+        let max_items = area.height.saturating_sub(4) as usize;
+        let scroll_offset = app.sidebar.tool_steps_scroll_offset;
+        let total_steps = tool_steps.len();
+
+        // Calculate visible range with scroll offset
+        let visible_steps: Vec<_> = tool_steps
+            .iter()
+            .rev() // Show most recent first (index 0 in reversed list is most recent)
+            .skip(scroll_offset)
+            .take(max_items)
+            .collect();
+
+        // Show scroll indicator at top if scrolled down (showing older items)
+        if scroll_offset > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    " ↑ {} newer steps (Alt+↑ to scroll)",
+                    scroll_offset.min(total_steps)
+                ),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+
+        for step in visible_steps.iter() {
+            // Use animated spinner for running steps
+            let (icon, icon_color) = match step.status {
+                crate::tui::sidebar::ToolStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+                crate::tui::sidebar::ToolStepStatus::Running => {
+                    let spinner_chars = ["◐", "◓", "◑", "◒"];
+                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                    (spinner.to_string(), ACCENT_CYAN)
+                }
+                crate::tui::sidebar::ToolStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
+            };
+
+            // Format tool name and description
+            let display_text = if step.description.is_empty() {
+                step.tool_name.clone()
+            } else {
+                format!("{}: {}", step.tool_name, step.description)
+            };
+
+            // Truncate if too long
+            let max_len = area.width.saturating_sub(5) as usize;
+            let desc = if display_text.len() > max_len {
+                format!("{}...", &display_text[..max_len.saturating_sub(3)])
+            } else {
+                display_text
+            };
+
+            // Style based on status
+            let desc_style = match step.status {
+                crate::tui::sidebar::ToolStepStatus::Running => Style::default().fg(TEXT_PRIMARY),
+                crate::tui::sidebar::ToolStepStatus::Completed => Style::default().fg(TEXT_DIM),
+                crate::tui::sidebar::ToolStepStatus::Failed => Style::default().fg(ACCENT_RED),
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                Span::styled(desc, desc_style),
+            ]));
+        }
+
+        // Show scroll indicator at bottom if there are more older steps
+        let items_below = total_steps.saturating_sub(scroll_offset + visible_steps.len());
+        if items_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ↓ {} older steps (Alt+↓ to scroll)", items_below),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+    }
+    // In plan mode or when no tool steps, show todo plan if available
+    else if let Some(ref todo_plan) = app.sidebar.todo_plan {
+        // Show progress bar
+        let percent = todo_plan.progress_percent();
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+
+        // Show item count
+        let progress = format!(
+            " {}/{} tasks",
+            todo_plan.completed_count(),
+            todo_plan.items.len()
+        );
+        lines.push(Line::from(Span::styled(
+            progress,
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+
+        // Calculate visible items - scroll to show in_progress item or most recent
+        let max_items = area.height.saturating_sub(4) as usize;
+        let total_items = todo_plan.items.len();
+
+        // Find the in_progress item index, or default to showing from the end
+        let in_progress_idx = todo_plan
+            .items
+            .iter()
+            .position(|i| i.status == "in_progress");
+
+        // Calculate scroll offset to keep in_progress item visible, or show latest items
+        let scroll_start = if let Some(idx) = in_progress_idx {
+            // Center the in-progress item if possible
+            if total_items <= max_items {
+                0
+            } else if idx < max_items / 2 {
+                0
+            } else if idx > total_items - max_items / 2 {
+                total_items.saturating_sub(max_items)
+            } else {
+                idx.saturating_sub(max_items / 2)
+            }
+        } else {
+            // No in-progress item, show from start (completed items first)
+            0
+        };
+
+        let visible_items: Vec<_> = todo_plan
+            .items
+            .iter()
+            .skip(scroll_start)
+            .take(max_items)
+            .collect();
+
+        // Show scroll indicator at top if needed
+        if scroll_start > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ↑ {} more above", scroll_start),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+
+        // Show each visible todo item with status icon
+        for item in visible_items.iter() {
+            // Use animated spinner for in-progress items
+            let (icon, icon_color) = match item.status.as_str() {
+                "completed" => ("✓".to_string(), ACCENT_GREEN),
+                "in_progress" => {
+                    let spinner_chars = ["◐", "◓", "◑", "◒"];
+                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                    (spinner.to_string(), ACCENT_CYAN)
+                }
+                "pending" => ("◯".to_string(), TEXT_DIM),
+                _ => ("?".to_string(), TEXT_MUTED),
+            };
+
+            // Truncate item content
+            let max_len = area.width.saturating_sub(5) as usize;
+            let desc = if item.content.len() > max_len {
+                format!("{}...", &item.content[..max_len.saturating_sub(3)])
+            } else {
+                item.content.clone()
+            };
+
+            // Highlight in-progress item, dim completed items
+            let desc_style = match item.status.as_str() {
+                "in_progress" => Style::default().fg(TEXT_PRIMARY),
+                "completed" => Style::default().fg(TEXT_DIM),
+                _ => Style::default().fg(TEXT_SECONDARY),
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                Span::styled(desc, desc_style),
+            ]));
+        }
+
+        // Show scroll indicator at bottom if needed
+        let items_below = total_items.saturating_sub(scroll_start + visible_items.len());
+        if items_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ↓ {} more below", items_below),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+    } else if app.ai_thinking {
+        // Show thinking spinner when AI is processing
+        let spinner_chars = ["◐", "◓", "◑", "◒"];
+        let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Thinking...", Style::default().fg(TEXT_SECONDARY)),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            if show_tool_steps {
+                " No steps"
+            } else {
+                " No tasks"
+            },
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_lsp(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        " LSP",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    let connections = &app.sidebar.connections;
+
+    if connections.lsp_servers.is_empty() {
+        if app.lsp_initializing {
+            let spinner_chars = ["◐", "◓", "◑", "◒"];
+            let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+            lines.push(Line::from(Span::styled(
+                format!(" {} Initializing...", spinner),
+                Style::default().fg(TEXT_DIM),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                " No servers",
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+    } else {
+        for (name, connected) in &connections.lsp_servers {
+            let (icon, color) = if *connected {
+                ("●", ACCENT_GREEN)
+            } else {
+                ("○", ACCENT_RED)
+            };
+
+            // Truncate server name if needed
+            let max_len = area.width.saturating_sub(5) as usize;
+            let display = if name.len() > max_len {
+                format!("{}...", &name[..max_len.saturating_sub(3)])
+            } else {
+                name.clone()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
     f.render_widget(para, area);
 }
 
@@ -985,4 +1636,108 @@ fn draw_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+/// Draw the commands reference modal
+fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
+    use crate::commands::slash::get_commands_text;
+
+    // Calculate modal size - take up most of the screen
+    let modal_width = (area.width as f32 * 0.9) as u16;
+    let modal_height = (area.height as f32 * 0.9) as u16;
+
+    let popup_area = Rect {
+        x: (area.width - modal_width) / 2,
+        y: (area.height - modal_height) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the background
+    f.render_widget(Clear, popup_area);
+
+    // Create the modal block
+    let block = Block::default()
+        .title(" Commands Reference (press any key to close) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_ACCENT))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Get the commands text and parse it into lines
+    let commands_text = get_commands_text();
+    let lines: Vec<Line> = commands_text
+        .lines()
+        .map(|line| {
+            // Apply styling based on line content
+            if line.starts_with("━") {
+                // Separator lines
+                Line::from(Span::styled(line, Style::default().fg(BORDER_ACCENT)))
+            } else if line.starts_with("🔧")
+                || line.starts_with("💬")
+                || line.starts_with("🧠")
+                || line.starts_with("⚙️")
+                || line.starts_with("📁")
+                || line.starts_with("📋")
+                || line.starts_with("📎")
+                || line.starts_with("🖥️")
+            {
+                // Section headers
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(ACCENT_CYAN)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            } else if line.trim().starts_with("/")
+                || line.trim().starts_with("@")
+                || line.trim().starts_with("!")
+            {
+                // Command lines
+                let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                if parts.len() >= 2 {
+                    let rest = format!(" {}", parts[1]);
+                    vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(
+                            parts[0],
+                            Style::default()
+                                .fg(ACCENT_GREEN)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(rest, Style::default().fg(TEXT_SECONDARY)),
+                    ]
+                    .into()
+                } else {
+                    Line::from(Span::styled(line, Style::default().fg(ACCENT_GREEN)))
+                }
+            } else if line.starts_with("💡") {
+                // Tips section
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(ACCENT_YELLOW)
+                        .add_modifier(Modifier::ITALIC),
+                ))
+            } else if line.trim().starts_with("•") {
+                // Bullet points
+                Line::from(Span::styled(line, Style::default().fg(TEXT_PRIMARY)))
+            } else if line.trim().is_empty() {
+                // Empty lines
+                Line::from("")
+            } else {
+                // Regular text
+                Line::from(Span::styled(line, Style::default().fg(TEXT_SECONDARY)))
+            }
+        })
+        .collect();
+
+    // Create scrollable paragraph
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0)); // TODO: Add scrolling support with arrow keys
+
+    f.render_widget(paragraph, inner);
 }

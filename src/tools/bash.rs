@@ -188,10 +188,10 @@ impl Tool for BashTool {
                             match result {
                                 Ok(0) => {}, // EOF on stderr, continue
                                 Ok(_) => {
-                                    let line = format!("stderr: {}", stderr_line.trim_end_matches('\n'));
-                                    if !line.trim().is_empty() {
+                                    if !stderr_line.trim().is_empty() {
+                                        let formatted_line = format!("stderr: {}", stderr_line.trim_end_matches('\n'));
                                         combined_output.push_str(&stderr_line);
-                                        callback(line);
+                                        callback(formatted_line);
                                     }
                                     stderr_line.clear();
                                 }
@@ -211,10 +211,10 @@ impl Tool for BashTool {
                             }
                             while let Ok(n) = stderr_reader.read_line(&mut stderr_line).await {
                                 if n == 0 { break; }
-                                let line = format!("stderr: {}", stderr_line.trim_end_matches('\n'));
-                                if !line.trim().is_empty() {
+                                if !stderr_line.trim().is_empty() {
+                                    let formatted_line = format!("stderr: {}", stderr_line.trim_end_matches('\n'));
                                     combined_output.push_str(&stderr_line);
-                                    callback(line);
+                                    callback(formatted_line);
                                 }
                                 stderr_line.clear();
                             }

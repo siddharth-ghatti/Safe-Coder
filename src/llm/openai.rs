@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
+use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, ToolDefinition};
 
 pub struct OpenAiClient {
     api_key: String,
@@ -150,7 +150,7 @@ impl LlmClient for OpenAiClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_prompt: Option<&str>,
-    ) -> Result<Message> {
+    ) -> Result<LlmResponse> {
         // Build messages, prepending system prompt if provided
         let mut openai_messages = Vec::new();
 
@@ -241,9 +241,12 @@ impl LlmClient for OpenAiClient {
             });
         }
 
-        Ok(Message {
-            role: Role::Assistant,
-            content: content_blocks,
+        Ok(LlmResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content_blocks,
+            },
+            usage: None, // OpenAI client doesn't track usage yet
         })
     }
 }

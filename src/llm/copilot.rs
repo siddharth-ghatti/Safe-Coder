@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
+use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, ToolDefinition};
 
 // Helper function to get Copilot token from GitHub token
 pub async fn get_copilot_token(github_token: &str) -> Result<String> {
@@ -170,7 +170,7 @@ impl LlmClient for CopilotClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_prompt: Option<&str>,
-    ) -> Result<Message> {
+    ) -> Result<LlmResponse> {
         // Build messages, prepending system prompt if provided
         let mut copilot_messages = Vec::new();
 
@@ -261,9 +261,12 @@ impl LlmClient for CopilotClient {
             });
         }
 
-        Ok(Message {
-            role: Role::Assistant,
-            content: content_blocks,
+        Ok(LlmResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content_blocks,
+            },
+            usage: None, // Copilot client doesn't track usage yet
         })
     }
 }

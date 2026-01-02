@@ -16,7 +16,9 @@ use crate::loop_detector::{DoomLoopAction, LoopDetector};
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
+use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan};
 use crate::prompts;
+use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 
 /// Events emitted during AI message processing for real-time UI updates
@@ -40,6 +42,35 @@ pub enum SessionEvent {
     },
     /// Text chunk from AI response
     TextChunk(String),
+    /// Subagent started
+    SubagentStarted {
+        id: String,
+        kind: String,
+        task: String,
+    },
+    /// Subagent progress update
+    SubagentProgress { id: String, message: String },
+    /// Subagent is using a tool
+    SubagentToolUsed {
+        id: String,
+        tool: String,
+        description: String,
+    },
+    /// Subagent completed
+    SubagentCompleted {
+        id: String,
+        success: bool,
+        summary: String,
+    },
+    /// Plan event (from planning system)
+    Plan(PlanEvent),
+    /// Token usage update from LLM response
+    TokenUsage {
+        input_tokens: usize,
+        output_tokens: usize,
+    },
+    /// Context was compressed - tokens_compressed is the estimated tokens that were compressed
+    ContextCompressed { tokens_compressed: usize },
 }
 
 pub struct Session {
@@ -67,12 +98,34 @@ pub struct Session {
     session_start: chrono::DateTime<Utc>,
     current_session_id: Option<String>,
     last_output: String,
+
+    // Event channel for subagent streaming
+    subagent_event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
 }
 
 impl Session {
     pub async fn new(config: Config, project_path: PathBuf) -> Result<Self> {
+        Self::new_with_events(config, project_path, None).await
+    }
+
+    /// Create a new session with an optional event channel for subagent streaming
+    pub async fn new_with_events(
+        config: Config,
+        project_path: PathBuf,
+        event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
+    ) -> Result<Self> {
         let llm_client = create_client(&config).await?;
-        let tool_registry = ToolRegistry::new();
+
+        // Initialize tool registry with subagent support
+        let tool_registry = if let Some(ref tx) = event_tx {
+            ToolRegistry::new()
+                .with_subagent_support_and_events(config.clone(), project_path.clone(), tx.clone())
+                .await
+        } else {
+            ToolRegistry::new()
+                .with_subagent_support(config.clone(), project_path.clone())
+                .await
+        };
 
         // Initialize git for safety
         let git_manager = GitManager::new(project_path.clone());
@@ -106,6 +159,7 @@ impl Session {
             session_start: Utc::now(),
             current_session_id: None,
             last_output: String::new(),
+            subagent_event_tx: event_tx,
         })
     }
 
@@ -211,13 +265,20 @@ impl Session {
                 .collect();
 
             // Send to LLM with hierarchical system prompt
-            let assistant_message = self
+            let llm_response = self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
                 .await?;
 
-            // Track stats (approximate token counting)
-            self.stats.total_tokens_sent += user_message.len() / 4; // Rough estimate
+            let assistant_message = llm_response.message;
+
+            // Track stats from actual token usage if available
+            if let Some(usage) = &llm_response.usage {
+                self.stats.total_tokens_sent += usage.input_tokens;
+            } else {
+                // Fall back to approximate token counting
+                self.stats.total_tokens_sent += user_message.len() / 4;
+            }
             self.stats.total_messages += 1;
 
             // Check if there are any tool calls
@@ -427,9 +488,16 @@ impl Session {
 
         // Check if context compaction is needed
         if self.context_manager.needs_compaction(&self.messages) {
+            // Get stats before compaction to calculate tokens compressed
+            let stats_before = self.context_manager.analyze(&self.messages);
             let (compacted, summary) = self
                 .context_manager
                 .compact(std::mem::take(&mut self.messages));
+            let stats_after = self.context_manager.analyze(&compacted);
+            let tokens_compressed = stats_before
+                .estimated_tokens
+                .saturating_sub(stats_after.estimated_tokens);
+
             self.messages = compacted;
             if !summary.is_empty() {
                 tracing::info!("Context compacted: {}", summary);
@@ -437,6 +505,8 @@ impl Session {
                     "\n📦 Context compacted: {}\n",
                     summary
                 )));
+                // Send compression event for sidebar token tracking
+                let _ = event_tx.send(SessionEvent::ContextCompressed { tokens_compressed });
             }
         }
 
@@ -446,6 +516,11 @@ impl Session {
         let project_context = self.memory.get_system_prompt().await.ok();
         let system_prompt =
             prompts::build_system_prompt(self.agent_mode, project_context.as_deref(), None);
+
+        // Create a persistent plan ID for this task - will accumulate steps across LLM calls
+        let task_plan_id = format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let mut plan_created = false;
+        let mut total_step_count = 0usize;
 
         loop {
             // Notify UI that we're thinking
@@ -465,13 +540,25 @@ impl Session {
                 .collect();
 
             // Send to LLM with hierarchical system prompt
-            let assistant_message = self
+            let llm_response = self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
                 .await?;
 
-            // Track stats
-            self.stats.total_tokens_sent += user_message.len() / 4;
+            let assistant_message = llm_response.message;
+
+            // Track stats and emit token usage event
+            if let Some(usage) = &llm_response.usage {
+                self.stats.total_tokens_sent += usage.input_tokens;
+                // Emit token usage event for sidebar
+                let _ = event_tx.send(SessionEvent::TokenUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                });
+            } else {
+                // Fall back to approximate token counting
+                self.stats.total_tokens_sent += user_message.len() / 4;
+            }
             self.stats.total_messages += 1;
 
             // Check if there are any tool calls
@@ -500,6 +587,60 @@ impl Session {
             let mut tool_results = Vec::new();
             let mut tools_executed = Vec::new();
 
+            // Create a dynamic plan from tool calls for sidebar display
+            let tool_calls: Vec<_> = assistant_message
+                .content
+                .iter()
+                .filter_map(|block| {
+                    if let ContentBlock::ToolUse { id, name, input } = block {
+                        Some((id.clone(), name.clone(), input.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Track plan ID for step events - accumulate steps across LLM calls
+            let plan_id = if !tool_calls.is_empty() {
+                // Create steps from tool calls
+                let mut new_steps = Vec::new();
+                for (i, (_, name, input)) in tool_calls.iter().enumerate() {
+                    let description = self.describe_tool_action(name, input);
+                    let step =
+                        PlanStep::new(format!("step-{}", total_step_count + i + 1), description);
+                    new_steps.push(step);
+                }
+
+                if !plan_created {
+                    // First time - create the plan with initial steps
+                    let mut plan = TaskPlan::new(task_plan_id.clone(), user_message.clone());
+                    plan.title = "Executing task".to_string();
+                    plan.status = PlanStatus::Executing;
+                    plan.steps = new_steps.clone();
+
+                    let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCreated {
+                        plan: plan.clone(),
+                    }));
+                    plan_created = true;
+                } else {
+                    // Subsequent calls - add steps to existing plan
+                    let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepsAdded {
+                        plan_id: task_plan_id.clone(),
+                        steps: new_steps.clone(),
+                    }));
+                }
+
+                Some(task_plan_id.clone())
+            } else {
+                None
+            };
+
+            // Track the step offset for this iteration (before incrementing total_step_count)
+            let step_offset = total_step_count;
+            // Update total_step_count with number of tools in this batch
+            total_step_count += tool_calls.len();
+
+            let mut step_index = 0usize;
             for block in &assistant_message.content {
                 if let ContentBlock::ToolUse { id, name, input } = block {
                     // Track stats
@@ -594,6 +735,16 @@ impl Session {
                         description: description.clone(),
                     });
 
+                    // Emit step started event for plan sidebar
+                    if let Some(ref pid) = plan_id {
+                        let step_id = format!("step-{}", step_offset + step_index + 1);
+                        let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepStarted {
+                            plan_id: pid.clone(),
+                            step_id: step_id.clone(),
+                            description: description.clone(),
+                        }));
+                    }
+
                     // For edit_file, capture old content for diff
                     // Note: edit_file uses "file_path", write_file uses "path"
                     let old_content = if name == "edit_file" {
@@ -615,6 +766,7 @@ impl Session {
                     };
 
                     // Create tool context - use streaming callback for bash commands
+                    // Also pass session event channel for subagent streaming
                     let tool_ctx = if name == "bash" {
                         // Create a streaming callback for bash output
                         let event_tx_clone = event_tx.clone();
@@ -631,8 +783,10 @@ impl Session {
                             &self.config.tools,
                             callback,
                         )
+                        .with_session_events(event_tx.clone())
                     } else {
                         ToolContext::new(&self.project_path, &self.config.tools)
+                            .with_session_events(event_tx.clone())
                     };
 
                     let (result, success) = match self.tool_registry.get_tool(name) {
@@ -695,11 +849,40 @@ impl Session {
                         success,
                     });
 
+                    // Emit step completed event for plan sidebar
+                    if let Some(ref pid) = plan_id {
+                        let step_id = format!("step-{}", step_offset + step_index + 1);
+                        let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepCompleted {
+                            plan_id: pid.clone(),
+                            step_id,
+                            success,
+                            output: if success { Some(result.clone()) } else { None },
+                            error: if !success { Some(result.clone()) } else { None },
+                        }));
+                    }
+                    step_index += 1;
+
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
                         content: result,
                     });
                 }
+            }
+
+            // Emit plan completed event
+            if let Some(ref pid) = plan_id {
+                let all_success = tool_results.iter().all(|r| {
+                    if let ContentBlock::ToolResult { content, .. } = r {
+                        !content.starts_with("Error:")
+                    } else {
+                        true
+                    }
+                });
+                let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCompleted {
+                    plan_id: pid.clone(),
+                    success: all_success,
+                    summary: format!("Completed {} tool(s)", tools_executed.len()),
+                }));
             }
 
             // Auto-commit if enabled
@@ -716,6 +899,26 @@ impl Session {
                     role: crate::llm::Role::User,
                     content: tool_results,
                 });
+            }
+        }
+
+        // Increment turns without todo update counter
+        increment_turns_without_update();
+
+        // Check if we should show a soft reminder about todo updates
+        if should_show_reminder() {
+            let todos = get_todo_list();
+            if !todos.is_empty() {
+                // Only remind if there are actual todos to update
+                let in_progress_count = todos.iter().filter(|t| t.status == "in_progress").count();
+                let pending_count = todos.iter().filter(|t| t.status == "pending").count();
+                if in_progress_count > 0 || pending_count > 0 {
+                    let reminder = format!(
+                        "\n📋 Reminder: You have {} in-progress and {} pending tasks. Consider updating your todo list.",
+                        in_progress_count, pending_count
+                    );
+                    let _ = event_tx.send(SessionEvent::TextChunk(reminder));
+                }
             }
         }
 
