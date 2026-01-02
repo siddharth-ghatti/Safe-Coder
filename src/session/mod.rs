@@ -87,12 +87,34 @@ pub struct Session {
     session_start: chrono::DateTime<Utc>,
     current_session_id: Option<String>,
     last_output: String,
+
+    // Event channel for subagent streaming
+    subagent_event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
 }
 
 impl Session {
     pub async fn new(config: Config, project_path: PathBuf) -> Result<Self> {
+        Self::new_with_events(config, project_path, None).await
+    }
+
+    /// Create a new session with an optional event channel for subagent streaming
+    pub async fn new_with_events(
+        config: Config,
+        project_path: PathBuf,
+        event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
+    ) -> Result<Self> {
         let llm_client = create_client(&config).await?;
-        let tool_registry = ToolRegistry::new();
+
+        // Initialize tool registry with subagent support
+        let tool_registry = if let Some(ref tx) = event_tx {
+            ToolRegistry::new()
+                .with_subagent_support_and_events(config.clone(), project_path.clone(), tx.clone())
+                .await
+        } else {
+            ToolRegistry::new()
+                .with_subagent_support(config.clone(), project_path.clone())
+                .await
+        };
 
         // Initialize git for safety
         let git_manager = GitManager::new(project_path.clone());
@@ -126,6 +148,7 @@ impl Session {
             session_start: Utc::now(),
             current_session_id: None,
             last_output: String::new(),
+            subagent_event_tx: event_tx,
         })
     }
 
@@ -635,6 +658,7 @@ impl Session {
                     };
 
                     // Create tool context - use streaming callback for bash commands
+                    // Also pass session event channel for subagent streaming
                     let tool_ctx = if name == "bash" {
                         // Create a streaming callback for bash output
                         let event_tx_clone = event_tx.clone();
@@ -651,8 +675,10 @@ impl Session {
                             &self.config.tools,
                             callback,
                         )
+                        .with_session_events(event_tx.clone())
                     } else {
                         ToolContext::new(&self.project_path, &self.config.tools)
+                            .with_session_events(event_tx.clone())
                     };
 
                     let (result, success) = match self.tool_registry.get_tool(name) {

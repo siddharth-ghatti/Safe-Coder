@@ -145,13 +145,84 @@ impl Tool for SubagentTool {
         // Create event channel
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SubagentEvent>();
 
-        // Forward events to parent if available
-        let forwarder_tx = event_forwarder.clone();
+        // Forward events to session for live streaming
+        // Prefer the session_event_tx from context (per-message) over the stored one
+        use crate::session::SessionEvent;
+        let forward_tx: Option<tokio::sync::mpsc::UnboundedSender<SessionEvent>> =
+            ctx.session_event_tx.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                // Just drop events - the subagent tool doesn't have a parent forwarder in this simple implementation
-                // Events are captured in the result instead
-                drop(event);
+                if let Some(ref tx) = forward_tx {
+                    // Convert SubagentEvent to SessionEvent and forward
+                    let session_event: SessionEvent = match &event {
+                        SubagentEvent::Started { id, kind, task } => {
+                            SessionEvent::SubagentStarted {
+                                id: id.clone(),
+                                kind: kind.display_name().to_string(),
+                                task: task.clone(),
+                            }
+                        }
+                        SubagentEvent::Thinking { id, message } => SessionEvent::SubagentProgress {
+                            id: id.clone(),
+                            message: message.clone(),
+                        },
+                        SubagentEvent::ToolStart {
+                            id,
+                            tool_name,
+                            description,
+                        } => SessionEvent::SubagentToolUsed {
+                            id: id.clone(),
+                            tool: tool_name.clone(),
+                            description: description.clone(),
+                        },
+                        SubagentEvent::ToolOutput {
+                            id,
+                            tool_name,
+                            output,
+                        } => SessionEvent::SubagentProgress {
+                            id: id.clone(),
+                            message: format!("{}: {}", tool_name, output),
+                        },
+                        SubagentEvent::ToolComplete {
+                            id,
+                            tool_name,
+                            success,
+                        } => SessionEvent::SubagentProgress {
+                            id: id.clone(),
+                            message: format!(
+                                "{} {}",
+                                tool_name,
+                                if *success { "done" } else { "failed" }
+                            ),
+                        },
+                        SubagentEvent::TextChunk { id, text } => SessionEvent::SubagentProgress {
+                            id: id.clone(),
+                            message: text.clone(),
+                        },
+                        SubagentEvent::IterationComplete {
+                            id,
+                            iteration,
+                            max_iterations,
+                        } => SessionEvent::SubagentProgress {
+                            id: id.clone(),
+                            message: format!("Iteration {}/{}", iteration, max_iterations),
+                        },
+                        SubagentEvent::Completed {
+                            id,
+                            success,
+                            summary,
+                        } => SessionEvent::SubagentCompleted {
+                            id: id.clone(),
+                            success: *success,
+                            summary: summary.clone(),
+                        },
+                        SubagentEvent::Error { id, error } => SessionEvent::SubagentProgress {
+                            id: id.clone(),
+                            message: format!("Error: {}", error),
+                        },
+                    };
+                    let _ = tx.send(session_event);
+                }
             }
         });
 

@@ -663,12 +663,18 @@ mod tests {
         let config = OrchestratorConfig {
             claude_cli_path: Some("claude".to_string()),
             gemini_cli_path: Some("gemini".to_string()),
+            safe_coder_cli_path: Some("safe-coder".to_string()),
+            gh_cli_path: Some("gh".to_string()),
             max_workers: 3,
             default_worker: WorkerKind::ClaudeCode,
+            worker_strategy: WorkerStrategy::SingleWorker,
+            enabled_workers: vec![WorkerKind::ClaudeCode],
             use_worktrees: false,
             throttle_limits: ThrottleLimits {
                 claude_max_concurrent: 2,
                 gemini_max_concurrent: 1,
+                safe_coder_max_concurrent: 1,
+                copilot_max_concurrent: 1,
                 start_delay_ms: 50,
             },
             execution_mode: ExecutionMode::default(),
@@ -690,12 +696,18 @@ mod tests {
         let config = OrchestratorConfig {
             claude_cli_path: Some("echo".to_string()), // Use echo as mock CLI
             gemini_cli_path: Some("echo".to_string()),
+            safe_coder_cli_path: Some("echo".to_string()),
+            gh_cli_path: Some("echo".to_string()),
             max_workers: 2, // Limit to 2 concurrent workers
             default_worker: WorkerKind::ClaudeCode,
+            worker_strategy: WorkerStrategy::SingleWorker,
+            enabled_workers: vec![WorkerKind::ClaudeCode],
             use_worktrees: false,
             throttle_limits: ThrottleLimits {
                 claude_max_concurrent: 2,
                 gemini_max_concurrent: 2,
+                safe_coder_max_concurrent: 2,
+                copilot_max_concurrent: 2,
                 start_delay_ms: 0,
             },
             execution_mode: ExecutionMode::default(),

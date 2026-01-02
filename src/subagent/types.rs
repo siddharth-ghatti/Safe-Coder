@@ -25,25 +25,32 @@ impl SubagentKind {
     /// Get allowed tools for this subagent kind
     pub fn allowed_tools(&self) -> &'static [&'static str] {
         match self {
-            SubagentKind::CodeAnalyzer => &["read_file", "list_file", "glob", "grep"],
+            // CodeAnalyzer is read-only
+            SubagentKind::CodeAnalyzer => &["read_file", "list", "glob", "grep", "bash"],
+            // Tester needs to write tests and run them
             SubagentKind::Tester => &[
                 "read_file",
-                "list_file",
-                "glob",
-                "grep",
-                "write_file",
-                "bash",
-            ],
-            SubagentKind::Refactorer => &["read_file", "list_file", "glob", "grep", "edit_file"],
-            SubagentKind::Documenter => &[
-                "read_file",
-                "list_file",
+                "list",
                 "glob",
                 "grep",
                 "write_file",
                 "edit_file",
+                "bash",
             ],
-            SubagentKind::Custom => &["read_file", "list_file", "glob", "grep"],
+            // Refactorer needs to edit existing files
+            SubagentKind::Refactorer => &["read_file", "list", "glob", "grep", "edit_file", "bash"],
+            // Documenter needs to write and edit docs
+            SubagentKind::Documenter => &[
+                "read_file",
+                "list",
+                "glob",
+                "grep",
+                "write_file",
+                "edit_file",
+                "bash",
+            ],
+            // Custom gets basic tools plus bash for flexibility
+            SubagentKind::Custom => &["read_file", "list", "glob", "grep", "bash"],
         }
     }
 

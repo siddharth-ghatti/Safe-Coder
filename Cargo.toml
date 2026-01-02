@@ -3,6 +3,14 @@ name = "safe-coder"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "safe-coder"
+path = "src/main.rs"
+
+[lib]
+name = "safe_coder"
+path = "src/lib.rs"
+
 [dependencies]
 tokio = { version = "1.41", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }

@@ -524,7 +524,10 @@ fn render_child_block(
             // Show diff if present (OpenCode-style with line numbers)
             if let Some(diff) = &block.diff {
                 render_diff_opencode(lines, diff, width);
-            } else if tool_name == "bash" || tool_name.starts_with("task-") {
+            } else if tool_name == "bash"
+                || tool_name.starts_with("task-")
+                || tool_name.starts_with("subagent:")
+            {
                 render_tool_output(lines, &block.output, width);
             }
         }
@@ -597,21 +600,35 @@ fn render_tool_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width:
             lines: output_lines,
             ..
         } => {
-            for line in output_lines.iter().take(10) {
+            // Show more lines for subagent streaming output
+            let max_lines = 50;
+            for line in output_lines.iter().take(max_lines) {
                 for wrapped in wrap(line, width.saturating_sub(14)) {
                     lines.push(MessageLine::ShellOutput {
                         text: format!("  {}", wrapped),
                     });
                 }
             }
+            if output_lines.len() > max_lines {
+                lines.push(MessageLine::ShellOutput {
+                    text: format!("  ... {} more lines", output_lines.len() - max_lines),
+                });
+            }
         }
         BlockOutput::Success(text) if !text.is_empty() => {
-            for line in text.lines().take(8) {
+            let max_lines = 30;
+            let text_lines: Vec<&str> = text.lines().collect();
+            for line in text_lines.iter().take(max_lines) {
                 for wrapped in wrap(line, width.saturating_sub(14)) {
                     lines.push(MessageLine::ShellOutput {
                         text: format!("  {}", wrapped),
                     });
                 }
+            }
+            if text_lines.len() > max_lines {
+                lines.push(MessageLine::ShellOutput {
+                    text: format!("  ... {} more lines", text_lines.len() - max_lines),
+                });
             }
         }
         _ => {}

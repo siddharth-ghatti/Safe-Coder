@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use crate::config::ToolConfig;
 
@@ -115,6 +116,8 @@ pub struct ToolContext<'a> {
     pub config: &'a ToolConfig,
     /// Optional callback for streaming output (used by bash tool)
     pub output_callback: Option<OutputCallback>,
+    /// Optional session event sender for subagent streaming
+    pub session_event_tx: Option<mpsc::UnboundedSender<crate::session::SessionEvent>>,
 }
 
 impl<'a> ToolContext<'a> {
@@ -123,6 +126,7 @@ impl<'a> ToolContext<'a> {
             working_dir,
             config,
             output_callback: None,
+            session_event_tx: None,
         }
     }
 
@@ -135,7 +139,16 @@ impl<'a> ToolContext<'a> {
             working_dir,
             config,
             output_callback: Some(callback),
+            session_event_tx: None,
         }
+    }
+
+    pub fn with_session_events(
+        mut self,
+        tx: mpsc::UnboundedSender<crate::session::SessionEvent>,
+    ) -> Self {
+        self.session_event_tx = Some(tx);
+        self
     }
 }
 
@@ -149,11 +162,23 @@ pub trait Tool: Send + Sync {
 
 pub struct ToolRegistry {
     tools: Vec<Box<dyn Tool>>,
+    subagent_tool: Option<Arc<SubagentTool>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        let mut registry = Self { tools: vec![] };
+        Self {
+            tools: vec![],
+            subagent_tool: None,
+        }
+    }
+
+    /// Create a registry without subagent support (for use in subagents themselves)
+    pub fn new_without_subagents() -> Self {
+        let mut registry = Self {
+            tools: vec![],
+            subagent_tool: None,
+        };
         // File operations
         registry.register(Box::new(ReadTool));
         registry.register(Box::new(WriteTool));
@@ -169,9 +194,140 @@ impl ToolRegistry {
         // Task tracking
         registry.register(Box::new(TodoWriteTool));
         registry.register(Box::new(TodoReadTool));
-        // Subagent spawning
-        registry.register(Box::new(SubagentTool::new()));
         registry
+    }
+
+    /// Initialize the registry with subagent support
+    /// Optionally accepts a session event sender for live streaming of subagent output
+    pub async fn with_subagent_support(
+        mut self,
+        config: crate::config::Config,
+        project_path: std::path::PathBuf,
+    ) -> Self {
+        self.init_subagent_support(config, project_path, None).await
+    }
+
+    /// Initialize the registry with subagent support and session event forwarding
+    pub async fn with_subagent_support_and_events(
+        mut self,
+        config: crate::config::Config,
+        project_path: std::path::PathBuf,
+        session_event_tx: mpsc::UnboundedSender<crate::session::SessionEvent>,
+    ) -> Self {
+        self.init_subagent_support(config, project_path, Some(session_event_tx))
+            .await
+    }
+
+    async fn init_subagent_support(
+        mut self,
+        config: crate::config::Config,
+        project_path: std::path::PathBuf,
+        session_event_tx: Option<mpsc::UnboundedSender<crate::session::SessionEvent>>,
+    ) -> Self {
+        use crate::session::SessionEvent;
+        use crate::subagent::SubagentEvent;
+
+        // Create event channel for subagent communication
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SubagentEvent>();
+
+        // Spawn background task to forward subagent events to session
+        let forward_tx: Option<mpsc::UnboundedSender<SessionEvent>> = session_event_tx;
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                // Convert SubagentEvent to SessionEvent and forward
+                if let Some(ref tx) = forward_tx {
+                    let session_event: SessionEvent = match event {
+                        SubagentEvent::Started { id, kind, task } => {
+                            SessionEvent::SubagentStarted {
+                                id,
+                                kind: kind.display_name().to_string(),
+                                task,
+                            }
+                        }
+                        SubagentEvent::Thinking { id, message } => {
+                            SessionEvent::SubagentProgress { id, message }
+                        }
+                        SubagentEvent::ToolStart {
+                            id,
+                            tool_name,
+                            description,
+                        } => SessionEvent::SubagentToolUsed {
+                            id,
+                            tool: tool_name,
+                            description,
+                        },
+                        SubagentEvent::ToolOutput {
+                            id,
+                            tool_name,
+                            output,
+                        } => SessionEvent::SubagentProgress {
+                            id,
+                            message: format!(
+                                "{}: {}",
+                                tool_name,
+                                if output.len() > 200 {
+                                    format!("{}...", &output[..200])
+                                } else {
+                                    output
+                                }
+                            ),
+                        },
+                        SubagentEvent::ToolComplete {
+                            id,
+                            tool_name,
+                            success,
+                        } => SessionEvent::SubagentProgress {
+                            id,
+                            message: format!("{} {}", tool_name, if success { "✓" } else { "✗" }),
+                        },
+                        SubagentEvent::TextChunk { id, text } => SessionEvent::SubagentProgress {
+                            id,
+                            message: if text.len() > 300 {
+                                format!("{}...", &text[..300])
+                            } else {
+                                text
+                            },
+                        },
+                        SubagentEvent::IterationComplete {
+                            id,
+                            iteration,
+                            max_iterations,
+                        } => SessionEvent::SubagentProgress {
+                            id,
+                            message: format!("Iteration {}/{}", iteration, max_iterations),
+                        },
+                        SubagentEvent::Completed {
+                            id,
+                            success,
+                            summary,
+                        } => SessionEvent::SubagentCompleted {
+                            id,
+                            success,
+                            summary,
+                        },
+                        SubagentEvent::Error { id, error } => SessionEvent::SubagentProgress {
+                            id,
+                            message: format!("Error: {}", error),
+                        },
+                    };
+                    let _ = tx.send(session_event);
+                }
+            }
+        });
+
+        // Create and initialize subagent tool
+        let subagent_tool = Arc::new(SubagentTool::new());
+        subagent_tool
+            .initialize(config, project_path, event_tx)
+            .await;
+
+        // Store reference and register
+        self.subagent_tool = Some(subagent_tool.clone());
+        self.register(Box::new(SubagentToolWrapper {
+            inner: subagent_tool,
+        }));
+
+        self
     }
 
     pub fn register(&mut self, tool: Box<dyn Tool>) {
@@ -223,5 +379,29 @@ impl ToolRegistry {
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Wrapper to make Arc<SubagentTool> usable as Box<dyn Tool>
+struct SubagentToolWrapper {
+    inner: Arc<SubagentTool>,
+}
+
+#[async_trait]
+impl Tool for SubagentToolWrapper {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext<'_>) -> Result<String> {
+        self.inner.execute(params, ctx).await
     }
 }

@@ -3,13 +3,13 @@
 //! Runs a bounded conversation loop for a subagent, executing tools
 //! and streaming progress back to the parent.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::context::{ContextConfig, ContextManager};
 use crate::llm::{create_client, ContentBlock, LlmClient, Message, ToolDefinition};
 use crate::tools::{ToolContext, ToolRegistry};
 
@@ -36,6 +36,8 @@ pub struct SubagentExecutor {
     event_tx: mpsc::UnboundedSender<SubagentEvent>,
     /// Message history
     messages: Vec<Message>,
+    /// Context manager for compaction
+    context_manager: ContextManager,
     /// Files read during execution
     files_read: Vec<String>,
     /// Files modified during execution
@@ -53,7 +55,19 @@ impl SubagentExecutor {
     ) -> Result<Self> {
         let id = format!("subagent-{}", Uuid::new_v4().to_string()[..8].to_string());
         let llm_client = create_client(config).await?;
-        let tool_registry = ToolRegistry::new();
+        // Subagents don't spawn other subagents - use registry without subagent support
+        let tool_registry = ToolRegistry::new_without_subagents();
+
+        // Create context manager with smaller limits for subagents
+        // Subagents should be more aggressive about compaction since they're focused tasks
+        let context_config = ContextConfig {
+            max_tokens: 80_000,           // Smaller window for subagents
+            compact_threshold_pct: 40,    // Compact earlier (at 40%)
+            preserve_recent_messages: 10, // Keep fewer messages
+            preserve_tool_results: 5,     // Keep fewer tool results
+            chars_per_token: 4,
+        };
+        let context_manager = ContextManager::with_config(context_config);
 
         Ok(Self {
             id,
@@ -65,6 +79,7 @@ impl SubagentExecutor {
             tool_config: config.tools.clone(),
             event_tx,
             messages: Vec::new(),
+            context_manager,
             files_read: Vec::new(),
             files_modified: Vec::new(),
         })
@@ -110,6 +125,26 @@ impl SubagentExecutor {
                 break;
             }
 
+            // Check if context needs compaction before sending to LLM
+            if self.context_manager.needs_compaction(&self.messages) {
+                let _ = self.event_tx.send(SubagentEvent::Thinking {
+                    id: self.id.clone(),
+                    message: "Compacting context...".to_string(),
+                });
+
+                let (compacted, summary) = self
+                    .context_manager
+                    .compact(std::mem::take(&mut self.messages));
+                self.messages = compacted;
+
+                if !summary.is_empty() {
+                    let _ = self.event_tx.send(SubagentEvent::Thinking {
+                        id: self.id.clone(),
+                        message: format!("Context compacted: {}", summary),
+                    });
+                }
+            }
+
             // Send thinking event
             let _ = self.event_tx.send(SubagentEvent::Thinking {
                 id: self.id.clone(),
@@ -118,6 +153,13 @@ impl SubagentExecutor {
 
             // Get available tools for this subagent kind
             let tools = self.get_filtered_tools();
+
+            // Log available tools for debugging
+            let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+            let _ = self.event_tx.send(SubagentEvent::Thinking {
+                id: self.id.clone(),
+                message: format!("Available tools: {:?}", tool_names),
+            });
 
             // Send to LLM
             let response = match self
@@ -142,6 +184,18 @@ impl SubagentExecutor {
                 .iter()
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
+            // Count tool calls for logging
+            let tool_call_count = response
+                .content
+                .iter()
+                .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
+                .count();
+
+            let _ = self.event_tx.send(SubagentEvent::Thinking {
+                id: self.id.clone(),
+                message: format!("Response has {} tool calls", tool_call_count),
+            });
+
             // Extract and send text chunks
             for block in &response.content {
                 if let ContentBlock::Text { text } = block {
@@ -158,6 +212,10 @@ impl SubagentExecutor {
 
             // If no tool calls, we're done
             if !has_tool_calls {
+                let _ = self.event_tx.send(SubagentEvent::Thinking {
+                    id: self.id.clone(),
+                    message: "No tool calls in response, finishing".to_string(),
+                });
                 break;
             }
 
@@ -208,17 +266,12 @@ impl SubagentExecutor {
                                 // Track file operations
                                 self.track_file_operation(name, input);
 
-                                // Truncate output for display
-                                let display_output = if output.len() > 1000 {
-                                    format!("{}...[truncated]", &output[..1000])
-                                } else {
-                                    output.clone()
-                                };
-
+                                // Truncate output for display (safely handle UTF-8 boundaries)
+                                // Send full output for streaming display
                                 let _ = self.event_tx.send(SubagentEvent::ToolOutput {
                                     id: self.id.clone(),
                                     tool_name: name.clone(),
-                                    output: display_output,
+                                    output: output.clone(),
                                 });
                                 let _ = self.event_tx.send(SubagentEvent::ToolComplete {
                                     id: self.id.clone(),
