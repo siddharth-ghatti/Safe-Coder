@@ -109,6 +109,10 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
         draw_autocomplete_popup(f, app, size);
     }
+
+    if app.commands_modal_visible {
+        draw_commands_modal(f, app, size);
+    }
 }
 
 fn calculate_input_height(app: &ShellTuiApp) -> u16 {
@@ -1551,4 +1555,89 @@ fn draw_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     let list = List::new(items);
     f.render_widget(list, inner);
+}
+
+/// Draw the commands reference modal
+fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
+    use crate::commands::slash::get_commands_text;
+    
+    // Calculate modal size - take up most of the screen
+    let modal_width = (area.width as f32 * 0.9) as u16;
+    let modal_height = (area.height as f32 * 0.9) as u16;
+    
+    let popup_area = Rect {
+        x: (area.width - modal_width) / 2,
+        y: (area.height - modal_height) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the background
+    f.render_widget(Clear, popup_area);
+
+    // Create the modal block
+    let block = Block::default()
+        .title(" Commands Reference (press any key to close) ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_ACCENT))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Get the commands text and parse it into lines
+    let commands_text = get_commands_text();
+    let lines: Vec<Line> = commands_text
+        .lines()
+        .map(|line| {
+            // Apply styling based on line content
+            if line.starts_with("━") {
+                // Separator lines
+                Line::from(Span::styled(line, Style::default().fg(BORDER_ACCENT)))
+            } else if line.starts_with("🔧") || line.starts_with("💬") || line.starts_with("🧠") 
+                || line.starts_with("⚙️") || line.starts_with("📁") || line.starts_with("📋")
+                || line.starts_with("📎") || line.starts_with("🖥️") {
+                // Section headers
+                Line::from(Span::styled(line, Style::default()
+                    .fg(ACCENT_CYAN)
+                    .add_modifier(Modifier::BOLD)))
+            } else if line.trim().starts_with("/") || line.trim().starts_with("@") || line.trim().starts_with("!") {
+                // Command lines
+                let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                if parts.len() >= 2 {
+                    let rest = format!(" {}", parts[1]);
+                    vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(parts[0], Style::default()
+                            .fg(ACCENT_GREEN)
+                            .add_modifier(Modifier::BOLD)),
+                        Span::styled(rest, Style::default().fg(TEXT_SECONDARY)),
+                    ].into()
+                } else {
+                    Line::from(Span::styled(line, Style::default().fg(ACCENT_GREEN)))
+                }
+            } else if line.starts_with("💡") {
+                // Tips section
+                Line::from(Span::styled(line, Style::default()
+                    .fg(ACCENT_YELLOW)
+                    .add_modifier(Modifier::ITALIC)))
+            } else if line.trim().starts_with("•") {
+                // Bullet points
+                Line::from(Span::styled(line, Style::default().fg(TEXT_PRIMARY)))
+            } else if line.trim().is_empty() {
+                // Empty lines
+                Line::from("")
+            } else {
+                // Regular text
+                Line::from(Span::styled(line, Style::default().fg(TEXT_SECONDARY)))
+            }
+        })
+        .collect();
+
+    // Create scrollable paragraph
+    let paragraph = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0)); // TODO: Add scrolling support with arrow keys
+
+    f.render_widget(paragraph, inner);
 }

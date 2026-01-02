@@ -417,6 +417,8 @@ pub struct ShellTuiApp {
     pub autocomplete: Autocomplete,
     /// File picker for @mentions
     pub file_picker: FilePicker,
+    /// Commands modal visibility
+    pub commands_modal_visible: bool,
 
     // === Animation/Render State ===
     /// Whether UI needs to be redrawn
@@ -479,6 +481,7 @@ impl ShellTuiApp {
             search_result_pos: 0,
             autocomplete: Autocomplete::new(),
             file_picker: FilePicker::new(),
+            commands_modal_visible: false,
 
             needs_redraw: true,
             animation_frame: 0,
@@ -1094,6 +1097,18 @@ impl ShellTuiApp {
         Ok(())
     }
 
+    /// Show the commands modal
+    pub fn show_commands_modal(&mut self) {
+        self.commands_modal_visible = true;
+        self.needs_redraw = true;
+    }
+
+    /// Hide the commands modal
+    pub fn hide_commands_modal(&mut self) {
+        self.commands_modal_visible = false;
+        self.needs_redraw = true;
+    }
+
     /// Check if input is a slash command (e.g., /connect, /help)
     pub fn is_slash_command(input: &str) -> bool {
         input.starts_with('/')
@@ -1169,6 +1184,7 @@ impl ShellTuiApp {
             "help" => Some(SlashCommand::Help),
             "tools" => Some(SlashCommand::Tools),
             "mode" => Some(SlashCommand::Mode),
+            "commands" => Some(SlashCommand::Commands),
             _ => None,
         }
     }
@@ -1207,4 +1223,6 @@ pub enum SlashCommand {
     Tools,
     /// Show/toggle permission mode
     Mode,
+    /// Show commands reference
+    Commands,
 }

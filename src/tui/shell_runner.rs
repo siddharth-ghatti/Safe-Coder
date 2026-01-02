@@ -815,6 +815,21 @@ impl ShellTuiRunner {
         ai_tx: &mpsc::UnboundedSender<AiUpdate>,
         orch_tx: &mpsc::UnboundedSender<OrchestrationUpdate>,
     ) -> Result<bool> {
+        // Handle commands modal first
+        if self.app.commands_modal_visible {
+            match code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                    self.app.hide_commands_modal();
+                    return Ok(false);
+                }
+                _ => {
+                    // Any other key also closes the modal
+                    self.app.hide_commands_modal();
+                    return Ok(false);
+                }
+            }
+        }
+
         match code {
             // Ctrl+C - cancel or clear
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1363,6 +1378,10 @@ Keyboard:
                     prompt,
                 );
                 self.app.add_block(block);
+            }
+
+            SlashCommand::Commands => {
+                self.app.show_commands_modal();
             }
 
             SlashCommand::Orchestrate(task) => {

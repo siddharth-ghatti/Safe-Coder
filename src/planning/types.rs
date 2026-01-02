@@ -325,6 +325,11 @@ impl TaskPlan {
 pub enum PlanEvent {
     /// Plan has been created and is ready
     PlanCreated { plan: TaskPlan },
+    /// New steps added to an existing plan (for accumulating steps across LLM calls)
+    StepsAdded {
+        plan_id: String,
+        steps: Vec<PlanStep>,
+    },
     /// Waiting for user approval (PLAN mode)
     AwaitingApproval { plan_id: String },
     /// User approved the plan

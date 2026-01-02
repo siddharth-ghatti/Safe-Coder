@@ -24,6 +24,7 @@ pub enum SlashCommand {
     Copy,
     Directory(DirectorySubcommand),
     Init,
+    Commands,
     Unknown(String),
 }
 
@@ -81,6 +82,7 @@ impl SlashCommand {
             "copy" => SlashCommand::Copy,
             "directory" | "dir" => Self::parse_directory_subcommand(args),
             "init" => SlashCommand::Init,
+            "commands" => SlashCommand::Commands,
             _ => SlashCommand::Unknown(input.to_string()),
         }
     }
@@ -255,6 +257,9 @@ pub async fn execute_slash_command(cmd: SlashCommand, session: &mut Session) -> 
             session.init_project_context().await?;
             Ok(CommandResult::Message("✓ Created project context file".to_string()))
         },
+        SlashCommand::Commands => {
+            Ok(CommandResult::ShowCommandsModal)
+        },
         SlashCommand::Unknown(cmd) => {
             Ok(CommandResult::Message(format!("Unknown command: /{}. Type /help for available commands.", cmd)))
         },
@@ -321,6 +326,7 @@ fn get_help_text() -> String {
 
 SLASH COMMANDS (/)
   /help, /?           Show this help message
+  /commands           Show detailed commands reference
   /quit, /exit        Exit the session
   /clear              Clear the screen
   /stats              Show session statistics (tokens, time, etc.)
@@ -391,4 +397,77 @@ Features:
 Repository: https://github.com/siddharth-ghatti/safe-coder
 License: MIT
 "#, env!("CARGO_PKG_VERSION"))
+}
+
+pub fn get_commands_text() -> String {
+    r#"📋 Available Commands Reference
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔧 SYSTEM COMMANDS
+  /help, /?             Show main help message
+  /commands             Show this commands reference (you are here!)
+  /quit, /exit          Exit the application
+  /clear                Clear the terminal screen
+  /stats                Display session statistics and token usage
+  /about                Show version and application information
+
+💬 SESSION & CHAT MANAGEMENT
+  /chat save [name]     Save current conversation with optional name
+  /chat resume <id>     Resume a previously saved conversation
+  /chat list            List all saved conversations
+  /chat delete <id>     Delete a saved conversation
+  /chat share <id>      Generate a shareable link for a conversation
+
+🧠 MEMORY & CONTEXT
+  /memory add <text>    Add custom instructions to AI memory
+  /memory show          Display current memory and instructions
+  /memory refresh       Reload instructions from SAFE_CODER.md
+
+⚙️  CONFIGURATION & SETTINGS  
+  /mode [plan|act]      Set execution mode:
+                        • plan - Deep planning with user approval
+                        • act  - Auto-execution with brief summaries
+  /model [name]         Switch AI model or show current model
+  /approval-mode [mode] Set approval mode:
+                        • plan    - Show execution plan before running
+                        • default - Ask before each tool use  
+                        • auto-edit - Auto-approve edits, ask for others
+                        • yolo    - Auto-approve everything (⚠️ use with caution)
+  /settings             Show all current configuration settings
+
+📁 PROJECT & WORKSPACE
+  /summary              Generate a summary of the current project
+  /compress             Compress conversation history to save tokens
+  /restore [file]       Restore file(s) from git checkpoint
+  /tools                List all available development tools
+  /dir add <path>       Add directory to current workspace
+  /dir show             Show all directories in workspace
+  /init                 Create a project context file (SAFE_CODER.md)
+
+📋 OTHER UTILITIES
+  /copy                 Copy the last AI response to clipboard
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📎 FILE ATTACHMENT (@-commands)
+  @file.rs              Attach a single file to your message
+  @src/**/*.rs          Attach multiple files using glob patterns
+  @README.md @src/      Attach multiple files and directories
+
+🖥️  SHELL PASSTHROUGH (!-commands)
+  !ls -la               Execute shell commands in a secure sandbox
+  !git status           Run git commands safely within the project
+  !cargo build          Execute build tools and development commands
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 Tips:
+  • Use Tab for autocompletion of commands and file paths
+  • Use Ctrl+R for command history search
+  • Most commands have short aliases (e.g., /? for /help)
+  • Commands are case-insensitive
+  • Use /help for a quick overview, /commands for this detailed reference
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"#.to_string()
 }

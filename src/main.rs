@@ -302,6 +302,12 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
                     }
                 }
             }
+            Ok(CommandResult::ShowCommandsModal) => {
+                // In CLI mode, just print the commands (no modal)
+                use crate::commands::slash::get_commands_text;
+                println!("\n{}", get_commands_text());
+                continue;
+            }
             Ok(CommandResult::Continue) => {
                 // Continue normally - send to AI
                 match session.send_message(input.to_string()).await {

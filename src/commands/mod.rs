@@ -1,5 +1,5 @@
 mod parser;
-mod slash;
+pub mod slash;
 mod at_command;
 mod shell;
 
@@ -24,6 +24,8 @@ pub enum CommandResult {
     Clear,
     /// Execute with modified input
     ModifiedInput(String),
+    /// Show commands modal
+    ShowCommandsModal,
 }
 
 /// Execute a parsed command

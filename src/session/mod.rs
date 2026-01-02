@@ -517,6 +517,11 @@ impl Session {
         let system_prompt =
             prompts::build_system_prompt(self.agent_mode, project_context.as_deref(), None);
 
+        // Create a persistent plan ID for this task - will accumulate steps across LLM calls
+        let task_plan_id = format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let mut plan_created = false;
+        let mut total_step_count = 0usize;
+
         loop {
             // Notify UI that we're thinking
             let _ = event_tx.send(SessionEvent::Thinking("Processing...".to_string()));
@@ -595,28 +600,45 @@ impl Session {
                 })
                 .collect();
 
-            // Track plan ID for step events
+            // Track plan ID for step events - accumulate steps across LLM calls
             let plan_id = if !tool_calls.is_empty() {
-                let id = format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
-                let mut plan = TaskPlan::new(id.clone(), user_message.clone());
-                plan.title = "Executing task".to_string();
-                plan.status = PlanStatus::Executing;
-
                 // Create steps from tool calls
+                let mut new_steps = Vec::new();
                 for (i, (_, name, input)) in tool_calls.iter().enumerate() {
                     let description = self.describe_tool_action(name, input);
-                    let step = PlanStep::new(format!("step-{}", i + 1), description);
-                    plan.steps.push(step);
+                    let step =
+                        PlanStep::new(format!("step-{}", total_step_count + i + 1), description);
+                    new_steps.push(step);
                 }
 
-                // Emit plan created event
-                let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCreated {
-                    plan: plan.clone(),
-                }));
-                Some(id)
+                if !plan_created {
+                    // First time - create the plan with initial steps
+                    let mut plan = TaskPlan::new(task_plan_id.clone(), user_message.clone());
+                    plan.title = "Executing task".to_string();
+                    plan.status = PlanStatus::Executing;
+                    plan.steps = new_steps.clone();
+
+                    let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCreated {
+                        plan: plan.clone(),
+                    }));
+                    plan_created = true;
+                } else {
+                    // Subsequent calls - add steps to existing plan
+                    let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepsAdded {
+                        plan_id: task_plan_id.clone(),
+                        steps: new_steps.clone(),
+                    }));
+                }
+
+                Some(task_plan_id.clone())
             } else {
                 None
             };
+
+            // Track the step offset for this iteration (before incrementing total_step_count)
+            let step_offset = total_step_count;
+            // Update total_step_count with number of tools in this batch
+            total_step_count += tool_calls.len();
 
             let mut step_index = 0usize;
             for block in &assistant_message.content {
@@ -715,7 +737,7 @@ impl Session {
 
                     // Emit step started event for plan sidebar
                     if let Some(ref pid) = plan_id {
-                        let step_id = format!("step-{}", step_index + 1);
+                        let step_id = format!("step-{}", step_offset + step_index + 1);
                         let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepStarted {
                             plan_id: pid.clone(),
                             step_id: step_id.clone(),
@@ -829,7 +851,7 @@ impl Session {
 
                     // Emit step completed event for plan sidebar
                     if let Some(ref pid) = plan_id {
-                        let step_id = format!("step-{}", step_index + 1);
+                        let step_id = format!("step-{}", step_offset + step_index + 1);
                         let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepCompleted {
                             plan_id: pid.clone(),
                             step_id,

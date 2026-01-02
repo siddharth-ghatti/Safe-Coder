@@ -83,6 +83,19 @@ impl SidebarState {
                 // The plan title is shown in the PLAN section instead
                 self.active_plan = Some(PlanDisplay::from_plan(plan));
             }
+            PlanEvent::StepsAdded { steps, .. } => {
+                // Add new steps to the existing plan
+                if let Some(ref mut display) = self.active_plan {
+                    for step in steps {
+                        display.steps.push(PlanStepDisplay {
+                            id: step.id.clone(),
+                            description: step.description.clone(),
+                            active_description: step.active_description.clone(),
+                            status: step.status,
+                        });
+                    }
+                }
+            }
             PlanEvent::StepStarted {
                 step_id,
                 description,
