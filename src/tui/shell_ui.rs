@@ -899,16 +899,7 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let mode = app.agent_mode.short_name();
     let version = "v0.1.0";
 
-    // Build LSP status string (like Crush: "● Go gopls  ● Rust rust-analyzer")
-    let lsp_status: String = app
-        .lsp_servers
-        .iter()
-        .filter(|(_, _, running)| *running)
-        .map(|(lang, cmd, _)| format!("● {} {}", lang, cmd))
-        .collect::<Vec<_>>()
-        .join("  ");
-
-    // Build spans
+    // Build spans (removed LSP status - it's shown in sidebar instead)
     let mut spans = vec![
         Span::styled(" ", Style::default()),
         Span::styled(
@@ -920,29 +911,6 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         Span::styled(format!(" {}  ", version), Style::default().fg(TEXT_DIM)),
         Span::styled(path.clone(), Style::default().fg(TEXT_SECONDARY)),
     ];
-
-    // Add LSP status
-    spans.push(Span::styled("  │  ", Style::default().fg(TEXT_MUTED)));
-    if app.lsp_initializing {
-        // Show initializing spinner
-        let spinner_chars = ["◐", "◓", "◑", "◒"];
-        let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
-        spans.push(Span::styled(
-            format!("{} LSP initializing...", spinner),
-            Style::default().fg(TEXT_DIM),
-        ));
-    } else if !lsp_status.is_empty() {
-        // Show running servers
-        spans.push(Span::styled(lsp_status, Style::default().fg(ACCENT_GREEN)));
-    } else if let Some(ref msg) = app.lsp_status_message {
-        // Show error/status message
-        let color = if msg.contains("failed") || msg.contains("error") {
-            ACCENT_RED
-        } else {
-            TEXT_DIM
-        };
-        spans.push(Span::styled(msg.clone(), Style::default().fg(color)));
-    }
 
     // Calculate padding for right side
     let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
