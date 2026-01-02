@@ -79,7 +79,8 @@ impl SidebarState {
     pub fn update_from_event(&mut self, event: &PlanEvent) {
         match event {
             PlanEvent::PlanCreated { plan } => {
-                self.current_task = Some(plan.title.clone());
+                // Don't overwrite current_task - keep the user's original query
+                // The plan title is shown in the PLAN section instead
                 self.active_plan = Some(PlanDisplay::from_plan(plan));
             }
             PlanEvent::StepStarted {
