@@ -981,19 +981,29 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let inner = sidebar_block.inner(area);
     f.render_widget(sidebar_block, area);
 
-    // Sidebar sections: [TASK] [CONTEXT] [PLAN] [LSP]
+    // Calculate modified files section height (dynamic based on file count)
+    let modified_count = app.sidebar.modified_files.len();
+    let modified_height = if modified_count == 0 {
+        2 // Just header + "No changes"
+    } else {
+        (modified_count.min(5) + 2) as u16 // Header + files (max 5) + potential overflow
+    };
+
+    // Sidebar sections: [TASK] [CONTEXT] [FILES] [PLAN] [LSP]
     let sections = Layout::vertical([
-        Constraint::Length(4), // TASK section
-        Constraint::Length(4), // CONTEXT (token usage)
-        Constraint::Min(6),    // PLAN (variable height)
-        Constraint::Length(5), // LSP connections
+        Constraint::Length(4),               // TASK section
+        Constraint::Length(5),               // CONTEXT (token usage with dual progress bar)
+        Constraint::Length(modified_height), // FILES (modified files)
+        Constraint::Min(6),                  // PLAN (variable height)
+        Constraint::Length(5),               // LSP connections
     ])
     .split(inner);
 
     draw_sidebar_task(f, app, sections[0]);
     draw_sidebar_context(f, app, sections[1]);
-    draw_sidebar_plan(f, app, sections[2]);
-    draw_sidebar_lsp(f, app, sections[3]);
+    draw_sidebar_files(f, app, sections[2]);
+    draw_sidebar_plan(f, app, sections[3]);
+    draw_sidebar_lsp(f, app, sections[4]);
 }
 
 fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
@@ -1004,16 +1014,28 @@ fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     if let Some(ref task) = app.sidebar.current_task {
         // Truncate task if too long
-        let max_len = area.width.saturating_sub(2) as usize;
+        let max_len = area.width.saturating_sub(4) as usize; // Leave room for spinner
         let display = if task.len() > max_len {
             format!("{}...", &task[..max_len.saturating_sub(3)])
         } else {
             task.clone()
         };
-        lines.push(Line::from(Span::styled(
-            format!(" {}", display),
-            Style::default().fg(TEXT_PRIMARY),
-        )));
+
+        // Show animated spinner when AI is thinking
+        if app.ai_thinking {
+            let spinner_chars = ["◐", "◓", "◑", "◒"];
+            let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+                Span::styled(display, Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!(" {}", display),
+                Style::default().fg(TEXT_PRIMARY),
+            )));
+        }
     } else {
         lines.push(Line::from(Span::styled(
             " No active task",
@@ -1049,32 +1071,160 @@ fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
     ))];
 
-    // Token count
-    lines.push(Line::from(Span::styled(
-        format!(" {}", usage.format_display()),
-        Style::default().fg(TEXT_SECONDARY),
-    )));
+    // Token count - show live tokens and compressed tokens if any
+    if usage.compressed_tokens > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} (+{} compressed)",
+                usage.format_display(),
+                format_number(usage.compressed_tokens)
+            ),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", usage.format_display()),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    }
 
     // Progress bar if we have context window info
+    // Shows both current tokens and compressed tokens
     if usage.context_window > 0 {
-        let percent = usage.usage_percent();
         let bar_width = area.width.saturating_sub(4) as usize;
-        let filled = ((percent / 100.0) * bar_width as f32) as usize;
-        let empty = bar_width.saturating_sub(filled);
 
-        let bar_color = if percent > 80.0 {
+        // Calculate current usage portion
+        let current_percent = usage.usage_percent();
+        let current_filled = ((current_percent / 100.0) * bar_width as f32) as usize;
+
+        // Calculate compressed portion (shown in different color)
+        let compressed_percent = usage.compressed_percent();
+        let compressed_filled = ((compressed_percent / 100.0) * bar_width as f32) as usize;
+
+        // Total filled cannot exceed bar width
+        let total_filled = (current_filled + compressed_filled).min(bar_width);
+        let empty = bar_width.saturating_sub(total_filled);
+
+        // Color for current tokens
+        let current_color = if current_percent > 80.0 {
             ACCENT_RED
-        } else if percent > 60.0 {
+        } else if current_percent > 60.0 {
             ACCENT_YELLOW
         } else {
             ACCENT_GREEN
         };
 
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
-            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
-        ]));
+        // Compressed tokens shown in magenta/purple
+        let compressed_color = ACCENT_MAGENTA;
+
+        // Build the progress bar with two colors
+        let mut spans = vec![Span::styled(" ", Style::default())];
+
+        if compressed_filled > 0 {
+            // Compressed tokens first (leftmost, as they represent "history")
+            spans.push(Span::styled(
+                "▓".repeat(compressed_filled.min(bar_width)),
+                Style::default().fg(compressed_color),
+            ));
+        }
+
+        if current_filled > 0 {
+            // Current tokens after compressed
+            spans.push(Span::styled(
+                "█".repeat(current_filled.min(bar_width.saturating_sub(compressed_filled))),
+                Style::default().fg(current_color),
+            ));
+        }
+
+        // Empty portion
+        if empty > 0 {
+            spans.push(Span::styled(
+                "░".repeat(empty),
+                Style::default().fg(TEXT_MUTED),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+
+        // Legend line
+        if usage.compressed_tokens > 0 {
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled("█", Style::default().fg(current_color)),
+                Span::styled(" live ", Style::default().fg(TEXT_DIM)),
+                Span::styled("▓", Style::default().fg(compressed_color)),
+                Span::styled(" compressed", Style::default().fg(TEXT_DIM)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+/// Format large numbers with K/M suffixes (duplicated here for shell_ui)
+fn format_number(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+fn draw_sidebar_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    use super::sidebar::ModificationType;
+
+    let mut lines = vec![Line::from(Span::styled(
+        " FILES",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    let files = &app.sidebar.modified_files;
+
+    if files.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " No changes",
+            Style::default().fg(TEXT_MUTED),
+        )));
+    } else {
+        let max_files = 5;
+        for file in files.iter().take(max_files) {
+            // Icon and color based on modification type
+            let (icon, color) = match file.modification_type {
+                ModificationType::Created => ("+", ACCENT_GREEN),
+                ModificationType::Edited => ("~", ACCENT_YELLOW),
+                ModificationType::Deleted => ("-", ACCENT_RED),
+            };
+
+            // Get just the filename, not the full path
+            let filename = std::path::Path::new(&file.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| file.path.clone());
+
+            // Truncate if too long
+            let max_len = area.width.saturating_sub(5) as usize;
+            let display = if filename.len() > max_len {
+                format!("{}...", &filename[..max_len.saturating_sub(3)])
+            } else {
+                filename
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
+            ]));
+        }
+
+        if files.len() > max_files {
+            lines.push(Line::from(Span::styled(
+                format!(" ... {} more", files.len() - max_files),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
     }
 
     let para = Paragraph::new(lines);
@@ -1158,6 +1308,74 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             lines.push(Line::from(Span::styled(
                 " ⏳ Awaiting approval",
                 Style::default().fg(ACCENT_YELLOW),
+            )));
+        }
+    } else if let Some(ref todo_plan) = app.sidebar.todo_plan {
+        // Show todo items as a checklist when no active tool plan
+        // Show progress bar
+        let percent = todo_plan.progress_percent();
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+
+        // Show item count
+        let progress = format!(
+            " {}/{} tasks",
+            todo_plan.completed_count(),
+            todo_plan.items.len()
+        );
+        lines.push(Line::from(Span::styled(
+            progress,
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+
+        // Show each todo item with status icon
+        let max_items = area.height.saturating_sub(4) as usize;
+        for item in todo_plan.items.iter().take(max_items) {
+            // Use animated spinner for in-progress items
+            let (icon, icon_color) = match item.status.as_str() {
+                "completed" => ("✓".to_string(), ACCENT_GREEN),
+                "in_progress" => {
+                    let spinner_chars = ["◐", "◓", "◑", "◒"];
+                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                    (spinner.to_string(), ACCENT_CYAN)
+                }
+                "pending" => ("◯".to_string(), TEXT_DIM),
+                _ => ("?".to_string(), TEXT_MUTED),
+            };
+
+            // Truncate item content
+            let max_len = area.width.saturating_sub(5) as usize;
+            let desc = if item.content.len() > max_len {
+                format!("{}...", &item.content[..max_len.saturating_sub(3)])
+            } else {
+                item.content.clone()
+            };
+
+            // Highlight in-progress item
+            let desc_style = if item.status == "in_progress" {
+                Style::default().fg(TEXT_PRIMARY)
+            } else {
+                Style::default().fg(TEXT_SECONDARY)
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                Span::styled(desc, desc_style),
+            ]));
+        }
+
+        if todo_plan.items.len() > max_items {
+            lines.push(Line::from(Span::styled(
+                format!(" ... {} more", todo_plan.items.len() - max_items),
+                Style::default().fg(TEXT_MUTED),
             )));
         }
     } else if app.ai_thinking {

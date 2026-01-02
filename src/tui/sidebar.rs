@@ -3,6 +3,7 @@
 //! Displays task info, plan progress, token usage, and connection status.
 
 use crate::planning::{PlanEvent, PlanStatus, PlanStepStatus, TaskPlan};
+use crate::tools::todo::TodoItem;
 
 /// Sidebar visibility and content state
 #[derive(Debug, Clone)]
@@ -11,12 +12,16 @@ pub struct SidebarState {
     pub visible: bool,
     /// Current task title/description
     pub current_task: Option<String>,
-    /// Active plan display info
+    /// Active plan display info (from tool executions)
     pub active_plan: Option<PlanDisplay>,
+    /// Todo list display (from TodoWrite tool) - always shown as checklist
+    pub todo_plan: Option<TodoPlanDisplay>,
     /// Token usage tracking
     pub token_usage: TokenUsage,
     /// LSP connection status
     pub connections: ConnectionStatus,
+    /// Modified files in this session
+    pub modified_files: Vec<ModifiedFile>,
 }
 
 impl Default for SidebarState {
@@ -25,9 +30,11 @@ impl Default for SidebarState {
             visible: true, // Visible by default
             current_task: None,
             active_plan: None,
+            todo_plan: None,
             // Default to Claude's 200K context window
             token_usage: TokenUsage::with_context_window(200_000),
             connections: ConnectionStatus::default(),
+            modified_files: Vec::new(),
         }
     }
 }
@@ -51,6 +58,21 @@ impl SidebarState {
     pub fn clear_task(&mut self) {
         self.current_task = None;
         self.active_plan = None;
+        // Note: We don't clear todo_plan here as todos persist across tasks
+    }
+
+    /// Update todo plan from current todo list
+    pub fn update_todos(&mut self, todos: &[TodoItem]) {
+        if todos.is_empty() {
+            self.todo_plan = None;
+        } else {
+            self.todo_plan = Some(TodoPlanDisplay::from_todos(todos));
+        }
+    }
+
+    /// Clear todo plan
+    pub fn clear_todos(&mut self) {
+        self.todo_plan = None;
     }
 
     /// Update from a plan event
@@ -142,6 +164,33 @@ impl SidebarState {
     /// Remove LSP server
     pub fn remove_lsp_server(&mut self, name: &str) {
         self.connections.lsp_servers.retain(|(n, _)| n != name);
+    }
+
+    /// Track a file modification
+    pub fn track_file_modification(&mut self, path: String, mod_type: ModificationType) {
+        // Check if we already have this file
+        if let Some(existing) = self.modified_files.iter_mut().find(|f| f.path == path) {
+            // Update the modification type and timestamp
+            existing.modification_type = mod_type;
+            existing.timestamp = chrono::Local::now();
+        } else {
+            // Add new file
+            self.modified_files.push(ModifiedFile {
+                path,
+                modification_type: mod_type,
+                timestamp: chrono::Local::now(),
+            });
+        }
+    }
+
+    /// Get count of modified files
+    pub fn modified_files_count(&self) -> usize {
+        self.modified_files.len()
+    }
+
+    /// Clear modified files list
+    pub fn clear_modified_files(&mut self) {
+        self.modified_files.clear();
     }
 }
 
@@ -245,6 +294,83 @@ impl PlanStepDisplay {
     }
 }
 
+/// Display representation of todo items as a plan checklist
+#[derive(Debug, Clone)]
+pub struct TodoPlanDisplay {
+    /// Title for the todo section
+    pub title: String,
+    /// Todo items as steps
+    pub items: Vec<TodoItemDisplay>,
+}
+
+impl TodoPlanDisplay {
+    /// Create from a list of TodoItems
+    pub fn from_todos(todos: &[TodoItem]) -> Self {
+        let items = todos
+            .iter()
+            .enumerate()
+            .map(|(i, todo)| TodoItemDisplay {
+                id: format!("todo-{}", i + 1),
+                content: todo.content.clone(),
+                active_form: todo.active_form.clone(),
+                status: todo.status.clone(),
+            })
+            .collect();
+
+        Self {
+            title: "Tasks".to_string(),
+            items,
+        }
+    }
+
+    /// Get count of completed items
+    pub fn completed_count(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| i.status == "completed")
+            .count()
+    }
+
+    /// Get progress as percentage
+    pub fn progress_percent(&self) -> f32 {
+        if self.items.is_empty() {
+            0.0
+        } else {
+            (self.completed_count() as f32 / self.items.len() as f32) * 100.0
+        }
+    }
+
+    /// Check if any item is in progress
+    pub fn has_in_progress(&self) -> bool {
+        self.items.iter().any(|i| i.status == "in_progress")
+    }
+}
+
+/// Display info for a single todo item
+#[derive(Debug, Clone)]
+pub struct TodoItemDisplay {
+    /// Item ID
+    pub id: String,
+    /// Content/description
+    pub content: String,
+    /// Active form (present tense)
+    pub active_form: String,
+    /// Status: pending, in_progress, completed
+    pub status: String,
+}
+
+impl TodoItemDisplay {
+    /// Get the display icon for this item
+    pub fn icon(&self) -> &'static str {
+        match self.status.as_str() {
+            "completed" => "✓",
+            "in_progress" => "◐", // Will be animated in UI
+            "pending" => "◯",
+            _ => "?",
+        }
+    }
+}
+
 /// Token usage tracking
 #[derive(Debug, Clone, Default)]
 pub struct TokenUsage {
@@ -256,6 +382,8 @@ pub struct TokenUsage {
     pub total_tokens: usize,
     /// Context window size (model dependent)
     pub context_window: usize,
+    /// Tokens that have been compressed/summarized (to show history)
+    pub compressed_tokens: usize,
 }
 
 impl TokenUsage {
@@ -266,7 +394,27 @@ impl TokenUsage {
             output_tokens: 0,
             total_tokens: 0,
             context_window,
+            compressed_tokens: 0,
         }
+    }
+
+    /// Record that tokens were compressed
+    pub fn record_compression(&mut self, tokens_compressed: usize) {
+        self.compressed_tokens += tokens_compressed;
+    }
+
+    /// Calculate compressed usage percentage (for the secondary bar)
+    pub fn compressed_percent(&self) -> f32 {
+        if self.context_window == 0 {
+            0.0
+        } else {
+            (self.compressed_tokens as f32 / self.context_window as f32) * 100.0
+        }
+    }
+
+    /// Get total tokens including compressed (for display purposes)
+    pub fn total_with_compressed(&self) -> usize {
+        self.total_tokens + self.compressed_tokens
     }
 
     /// Calculate usage percentage
@@ -318,6 +466,28 @@ fn format_number(n: usize) -> String {
 pub struct ConnectionStatus {
     /// LSP servers (name, connected)
     pub lsp_servers: Vec<(String, bool)>,
+}
+
+/// A file that was modified during the session
+#[derive(Debug, Clone)]
+pub struct ModifiedFile {
+    /// Path to the file (relative to project root)
+    pub path: String,
+    /// Type of modification
+    pub modification_type: ModificationType,
+    /// When the file was last modified
+    pub timestamp: chrono::DateTime<chrono::Local>,
+}
+
+/// Type of file modification
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModificationType {
+    /// File was created
+    Created,
+    /// File was edited
+    Edited,
+    /// File was deleted
+    Deleted,
 }
 
 impl ConnectionStatus {

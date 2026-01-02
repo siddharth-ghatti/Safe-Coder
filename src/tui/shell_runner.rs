@@ -98,6 +98,11 @@ enum AiUpdate {
         input_tokens: usize,
         output_tokens: usize,
     },
+    /// Context was compressed
+    ContextCompressed {
+        block_id: String,
+        tokens_compressed: usize,
+    },
 }
 
 /// Message types for orchestration updates
@@ -368,10 +373,16 @@ impl ShellTuiRunner {
             // Process AI updates
             while let Ok(update) = ai_rx.try_recv() {
                 match update {
-                    AiUpdate::Thinking { block_id, message } => {
+                    AiUpdate::Thinking {
+                        block_id,
+                        message: _,
+                    } => {
+                        // Don't set output - let the block remain in "running" state
+                        // which shows the animated spinner via MessageLine::Running
                         if let Some(block) = self.app.get_block_mut(&block_id) {
+                            // Keep output empty so the "Thinking..." spinner shows
                             block.output = BlockOutput::Streaming {
-                                lines: vec![format!("💭 {}", message)],
+                                lines: vec![],
                                 complete: false,
                             };
                         }
@@ -529,6 +540,10 @@ impl ShellTuiRunner {
                                 child.exit_code = Some(if success { 0 } else { 1 });
                             }
                         }
+                        // If todo_write tool completed, sync todos to sidebar
+                        if tool_name == "todo_write" && success {
+                            self.app.sync_todos_to_sidebar();
+                        }
                         self.app.mark_dirty();
                     }
                     AiUpdate::FileDiff {
@@ -537,6 +552,17 @@ impl ShellTuiRunner {
                         old_content,
                         new_content,
                     } => {
+                        // Track file modification in sidebar
+                        use crate::tui::sidebar::ModificationType;
+                        let mod_type = if old_content.is_empty() {
+                            ModificationType::Created
+                        } else {
+                            ModificationType::Edited
+                        };
+                        self.app
+                            .sidebar
+                            .track_file_modification(path.clone(), mod_type);
+
                         // Store diff in the most recent tool child block
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             if let Some(child) = parent.children.last_mut() {
@@ -576,6 +602,16 @@ impl ShellTuiRunner {
                     } => {
                         // Update token usage in sidebar
                         self.app.update_tokens(input_tokens, output_tokens);
+                    }
+                    AiUpdate::ContextCompressed {
+                        tokens_compressed, ..
+                    } => {
+                        // Record compressed tokens in sidebar
+                        self.app
+                            .sidebar
+                            .token_usage
+                            .record_compression(tokens_compressed);
+                        self.app.mark_dirty();
                     }
                 }
             }
@@ -1885,8 +1921,8 @@ Keyboard:
         self.app.add_block(block);
         self.app.set_ai_thinking(true);
 
-        // Update sidebar with current task
-        self.app.sidebar.set_task(display_input);
+        // Update sidebar with current task (use the clean query without @mentions)
+        self.app.sidebar.set_task(query.clone());
 
         // Build full context
         let shell_context = self.app.build_ai_context();
@@ -2009,6 +2045,13 @@ Keyboard:
                                 input_tokens,
                                 output_tokens,
                             },
+                            // Context compression updates
+                            SessionEvent::ContextCompressed { tokens_compressed } => {
+                                AiUpdate::ContextCompressed {
+                                    block_id: block_id_inner.clone(),
+                                    tokens_compressed,
+                                }
+                            }
                         };
                         let _ = ai_tx_inner.send(update);
                     }

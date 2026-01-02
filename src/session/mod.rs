@@ -18,6 +18,7 @@ use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
 use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan};
 use crate::prompts;
+use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 
 /// Events emitted during AI message processing for real-time UI updates
@@ -68,6 +69,8 @@ pub enum SessionEvent {
         input_tokens: usize,
         output_tokens: usize,
     },
+    /// Context was compressed - tokens_compressed is the estimated tokens that were compressed
+    ContextCompressed { tokens_compressed: usize },
 }
 
 pub struct Session {
@@ -485,9 +488,16 @@ impl Session {
 
         // Check if context compaction is needed
         if self.context_manager.needs_compaction(&self.messages) {
+            // Get stats before compaction to calculate tokens compressed
+            let stats_before = self.context_manager.analyze(&self.messages);
             let (compacted, summary) = self
                 .context_manager
                 .compact(std::mem::take(&mut self.messages));
+            let stats_after = self.context_manager.analyze(&compacted);
+            let tokens_compressed = stats_before
+                .estimated_tokens
+                .saturating_sub(stats_after.estimated_tokens);
+
             self.messages = compacted;
             if !summary.is_empty() {
                 tracing::info!("Context compacted: {}", summary);
@@ -495,6 +505,8 @@ impl Session {
                     "\n📦 Context compacted: {}\n",
                     summary
                 )));
+                // Send compression event for sidebar token tracking
+                let _ = event_tx.send(SessionEvent::ContextCompressed { tokens_compressed });
             }
         }
 
@@ -865,6 +877,26 @@ impl Session {
                     role: crate::llm::Role::User,
                     content: tool_results,
                 });
+            }
+        }
+
+        // Increment turns without todo update counter
+        increment_turns_without_update();
+
+        // Check if we should show a soft reminder about todo updates
+        if should_show_reminder() {
+            let todos = get_todo_list();
+            if !todos.is_empty() {
+                // Only remind if there are actual todos to update
+                let in_progress_count = todos.iter().filter(|t| t.status == "in_progress").count();
+                let pending_count = todos.iter().filter(|t| t.status == "pending").count();
+                if in_progress_count > 0 || pending_count > 0 {
+                    let reminder = format!(
+                        "\n📋 Reminder: You have {} in-progress and {} pending tasks. Consider updating your todo list.",
+                        in_progress_count, pending_count
+                    );
+                    let _ = event_tx.send(SessionEvent::TextChunk(reminder));
+                }
             }
         }
 

@@ -893,6 +893,14 @@ impl ShellTuiApp {
         self.needs_redraw = true;
     }
 
+    /// Sync todos to sidebar for checklist display
+    pub fn sync_todos_to_sidebar(&mut self) {
+        use crate::tools::todo::get_todo_list;
+        let todos = get_todo_list();
+        self.sidebar.update_todos(&todos);
+        self.needs_redraw = true;
+    }
+
     /// Build AI context from recent shell activity
     pub fn build_ai_context(&self) -> String {
         let mut context = String::new();
