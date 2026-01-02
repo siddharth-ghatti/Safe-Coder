@@ -16,6 +16,7 @@ pub mod memory;
 pub mod orchestrator;
 pub mod permissions;
 pub mod persistence;
+pub mod planning;
 pub mod prompts;
 pub mod session;
 pub mod shell;

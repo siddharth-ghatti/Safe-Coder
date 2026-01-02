@@ -19,6 +19,7 @@ mod autocomplete;
 mod banner;
 mod file_picker;
 mod messages;
+mod sidebar;
 mod spinner;
 mod ui;
 
@@ -26,6 +27,8 @@ mod ui;
 mod shell_app;
 mod shell_runner;
 mod shell_ui;
+
+pub use sidebar::{ConnectionStatus, PlanDisplay, SidebarState, TokenUsage};
 
 pub use file_picker::FilePicker;
 

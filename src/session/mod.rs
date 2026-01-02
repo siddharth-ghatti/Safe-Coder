@@ -16,6 +16,7 @@ use crate::loop_detector::{DoomLoopAction, LoopDetector};
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
+use crate::planning::{PlanEvent, TaskPlan, TaskPlanner};
 use crate::prompts;
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 
@@ -59,6 +60,13 @@ pub enum SessionEvent {
         id: String,
         success: bool,
         summary: String,
+    },
+    /// Plan event (from planning system)
+    Plan(PlanEvent),
+    /// Token usage update from LLM response
+    TokenUsage {
+        input_tokens: usize,
+        output_tokens: usize,
     },
 }
 

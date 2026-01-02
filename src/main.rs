@@ -13,6 +13,7 @@ mod memory;
 mod orchestrator;
 mod permissions;
 mod persistence;
+mod planning;
 mod prompts;
 mod session;
 mod shell;

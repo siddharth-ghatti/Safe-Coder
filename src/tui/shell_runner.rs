@@ -27,6 +27,7 @@ use super::shell_ui;
 use crate::config::Config;
 use crate::lsp::{default_lsp_configs, LspClient, LspManager};
 use crate::orchestrator::TaskPlan;
+use crate::planning::PlanEvent;
 use crate::session::{Session, SessionEvent};
 
 /// Message types for async command execution
@@ -89,6 +90,14 @@ enum AiUpdate {
     Complete { block_id: String },
     /// AI error
     Error { block_id: String, message: String },
+    /// Plan event for sidebar updates
+    PlanEvent { block_id: String, event: PlanEvent },
+    /// Token usage update
+    TokenUsage {
+        block_id: String,
+        input_tokens: usize,
+        output_tokens: usize,
+    },
 }
 
 /// Message types for orchestration updates
@@ -554,6 +563,18 @@ impl ShellTuiRunner {
                         self.app.fail_block(&block_id, message, String::new(), 1);
                         self.app.set_ai_thinking(false);
                     }
+                    AiUpdate::PlanEvent { event, .. } => {
+                        // Update sidebar with plan event
+                        self.app.update_plan(&event);
+                    }
+                    AiUpdate::TokenUsage {
+                        input_tokens,
+                        output_tokens,
+                        ..
+                    } => {
+                        // Update token usage in sidebar
+                        self.app.update_tokens(input_tokens, output_tokens);
+                    }
                 }
             }
 
@@ -834,6 +855,11 @@ impl ShellTuiRunner {
                         session.set_agent_mode(agent_mode);
                     });
                 }
+            }
+
+            // Ctrl+B - toggle sidebar visibility
+            KeyCode::Char('b') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.app.toggle_sidebar();
             }
 
             // Regular character input
@@ -1963,6 +1989,20 @@ Keyboard:
                                 block_id: block_id_inner.clone(),
                                 tool_name: format!("subagent:{}", id),
                                 success,
+                            },
+                            // Plan events - forward for sidebar updates
+                            SessionEvent::Plan(plan_event) => AiUpdate::PlanEvent {
+                                block_id: block_id_inner.clone(),
+                                event: plan_event,
+                            },
+                            // Token usage updates
+                            SessionEvent::TokenUsage {
+                                input_tokens,
+                                output_tokens,
+                            } => AiUpdate::TokenUsage {
+                                block_id: block_id_inner.clone(),
+                                input_tokens,
+                                output_tokens,
                             },
                         };
                         let _ = ai_tx_inner.send(update);

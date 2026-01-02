@@ -24,6 +24,8 @@ use super::file_picker::FilePicker;
 use super::shell_app::{
     BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
 };
+use super::sidebar::PlanStepDisplay;
+use crate::planning::PlanStepStatus;
 
 // ============================================================================
 // Color Palette - OpenCode inspired, dark and minimal
@@ -66,7 +68,19 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     let bg = Block::default().style(Style::default().bg(BG_PRIMARY));
     f.render_widget(bg, size);
 
-    // Main layout: [title] [messages] [input hints] [input] [status bar]
+    // Horizontal layout: [main content] [sidebar] (if visible)
+    let sidebar_width = if app.sidebar.visible { 28 } else { 0 };
+
+    let horizontal = Layout::horizontal([
+        Constraint::Min(40),               // Main content area
+        Constraint::Length(sidebar_width), // Sidebar (fixed width)
+    ])
+    .split(size);
+
+    let main_area = horizontal[0];
+    let sidebar_area = horizontal[1];
+
+    // Main content layout: [title] [messages] [input hints] [input] [status bar]
     let chunks = Layout::vertical([
         Constraint::Length(1),                           // Title bar
         Constraint::Min(5),                              // Messages
@@ -74,13 +88,18 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
         Constraint::Length(calculate_input_height(app)), // Input area
         Constraint::Length(1),                           // Status bar
     ])
-    .split(size);
+    .split(main_area);
 
     draw_title_bar(f, app, chunks[0]);
     draw_messages(f, app, chunks[1]);
     draw_input_hints(f, app, chunks[2]);
     draw_input_area(f, app, chunks[3]);
     draw_status_bar(f, app, chunks[4]);
+
+    // Draw sidebar if visible
+    if app.sidebar.visible {
+        draw_sidebar(f, app, sidebar_area);
+    }
 
     // Popups on top
     if app.file_picker.visible {
@@ -877,6 +896,236 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     let line = Line::from(spans);
     let para = Paragraph::new(line).style(Style::default().bg(BG_STATUS));
+    f.render_widget(para, area);
+}
+
+// ============================================================================
+// Sidebar (OpenCode-style)
+// ============================================================================
+
+fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    // Sidebar background with left border
+    let sidebar_block = Block::default()
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(BORDER_SUBTLE))
+        .style(Style::default().bg(BG_PRIMARY));
+
+    let inner = sidebar_block.inner(area);
+    f.render_widget(sidebar_block, area);
+
+    // Sidebar sections: [TASK] [CONTEXT] [PLAN] [LSP]
+    let sections = Layout::vertical([
+        Constraint::Length(4), // TASK section
+        Constraint::Length(4), // CONTEXT (token usage)
+        Constraint::Min(6),    // PLAN (variable height)
+        Constraint::Length(5), // LSP connections
+    ])
+    .split(inner);
+
+    draw_sidebar_task(f, app, sections[0]);
+    draw_sidebar_context(f, app, sections[1]);
+    draw_sidebar_plan(f, app, sections[2]);
+    draw_sidebar_lsp(f, app, sections[3]);
+}
+
+fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        " TASK",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    if let Some(ref task) = app.sidebar.current_task {
+        // Truncate task if too long
+        let max_len = area.width.saturating_sub(2) as usize;
+        let display = if task.len() > max_len {
+            format!("{}...", &task[..max_len.saturating_sub(3)])
+        } else {
+            task.clone()
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {}", display),
+            Style::default().fg(TEXT_PRIMARY),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " No active task",
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    // Show step description if in progress
+    if let Some(ref plan) = app.sidebar.active_plan {
+        if let Some(ref desc) = plan.current_step_description {
+            let max_len = area.width.saturating_sub(2) as usize;
+            let display = if desc.len() > max_len {
+                format!("{}...", &desc[..max_len.saturating_sub(3)])
+            } else {
+                desc.clone()
+            };
+            lines.push(Line::from(Span::styled(
+                format!(" {}", display),
+                Style::default().fg(ACCENT_CYAN),
+            )));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let usage = &app.sidebar.token_usage;
+
+    let mut lines = vec![Line::from(Span::styled(
+        " CONTEXT",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    // Token count
+    lines.push(Line::from(Span::styled(
+        format!(" {}", usage.format_display()),
+        Style::default().fg(TEXT_SECONDARY),
+    )));
+
+    // Progress bar if we have context window info
+    if usage.context_window > 0 {
+        let percent = usage.usage_percent();
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        let bar_color = if percent > 80.0 {
+            ACCENT_RED
+        } else if percent > 60.0 {
+            ACCENT_YELLOW
+        } else {
+            ACCENT_GREEN
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        " PLAN",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    if let Some(ref plan) = app.sidebar.active_plan {
+        // Show progress
+        let progress = format!(" {}/{} steps", plan.completed_count(), plan.steps.len());
+        lines.push(Line::from(Span::styled(
+            progress,
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+
+        // Show each step with status icon
+        let max_steps = area.height.saturating_sub(3) as usize;
+        for (i, step) in plan.steps.iter().take(max_steps).enumerate() {
+            let icon = step.icon();
+            let icon_color = match step.status {
+                PlanStepStatus::Completed => ACCENT_GREEN,
+                PlanStepStatus::InProgress => ACCENT_CYAN,
+                PlanStepStatus::Failed => ACCENT_RED,
+                PlanStepStatus::Skipped => TEXT_MUTED,
+                PlanStepStatus::Pending => TEXT_DIM,
+            };
+
+            // Truncate step description
+            let max_len = area.width.saturating_sub(5) as usize;
+            let desc = if step.description.len() > max_len {
+                format!("{}...", &step.description[..max_len.saturating_sub(3)])
+            } else {
+                step.description.clone()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                Span::styled(desc, Style::default().fg(TEXT_SECONDARY)),
+            ]));
+        }
+
+        if plan.steps.len() > max_steps {
+            lines.push(Line::from(Span::styled(
+                format!(" ... {} more", plan.steps.len() - max_steps),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+
+        // Show approval status if waiting
+        if plan.awaiting_approval {
+            lines.push(Line::from(Span::styled(
+                " ⏳ Awaiting approval",
+                Style::default().fg(ACCENT_YELLOW),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            " No active plan",
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_lsp(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        " LSP",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    let connections = &app.sidebar.connections;
+
+    if connections.lsp_servers.is_empty() {
+        if app.lsp_initializing {
+            let spinner_chars = ["◐", "◓", "◑", "◒"];
+            let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+            lines.push(Line::from(Span::styled(
+                format!(" {} Initializing...", spinner),
+                Style::default().fg(TEXT_DIM),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                " No servers",
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+    } else {
+        for (name, connected) in &connections.lsp_servers {
+            let (icon, color) = if *connected {
+                ("●", ACCENT_GREEN)
+            } else {
+                ("○", ACCENT_RED)
+            };
+
+            // Truncate server name if needed
+            let max_len = area.width.saturating_sub(5) as usize;
+            let display = if name.len() > max_len {
+                format!("{}...", &name[..max_len.saturating_sub(3)])
+            } else {
+                name.clone()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
     f.render_widget(para, area);
 }
 

@@ -1,0 +1,291 @@
+//! Plan executor
+//!
+//! Executes plan steps, delegating to subagents for complex steps.
+
+use anyhow::Result;
+use chrono::Utc;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::{mpsc, Mutex};
+
+use crate::config::Config;
+use crate::subagent::{SubagentExecutor, SubagentScope};
+
+use super::types::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, StepAssignment, TaskPlan};
+
+/// Executes a task plan step-by-step
+pub struct PlanExecutor {
+    /// Project path for tool execution
+    project_path: PathBuf,
+    /// Configuration
+    config: Config,
+    /// Event sender for progress updates
+    event_tx: mpsc::UnboundedSender<PlanEvent>,
+}
+
+impl PlanExecutor {
+    /// Create a new plan executor
+    pub fn new(
+        project_path: PathBuf,
+        config: Config,
+        event_tx: mpsc::UnboundedSender<PlanEvent>,
+    ) -> Self {
+        Self {
+            project_path,
+            config,
+            event_tx,
+        }
+    }
+
+    /// Execute a plan
+    pub async fn execute(&self, plan: &mut TaskPlan) -> Result<()> {
+        plan.status = PlanStatus::Executing;
+        plan.started_at = Some(Utc::now());
+
+        // Execute steps in order, respecting dependencies
+        let total_steps = plan.steps.len();
+        for i in 0..total_steps {
+            // Check if dependencies are met
+            if !plan.dependencies_met(&plan.steps[i]) {
+                // Skip for now, will be handled in a more sophisticated scheduler later
+                continue;
+            }
+
+            // Get step info for events
+            let step_id = plan.steps[i].id.clone();
+            let step_description = plan.steps[i].active_description.clone();
+            let step_instructions = plan.steps[i].instructions.clone();
+            let step_assignment = plan.steps[i].assignment.clone();
+
+            // Mark step as in progress
+            plan.steps[i].status = PlanStepStatus::InProgress;
+
+            // Emit step started event
+            let _ = self.event_tx.send(PlanEvent::StepStarted {
+                plan_id: plan.id.clone(),
+                step_id: step_id.clone(),
+                description: step_description.clone(),
+            });
+
+            let start_time = Instant::now();
+
+            // Execute the step
+            let result = match &step_assignment {
+                StepAssignment::Inline => {
+                    // For inline execution, we'll return the instructions
+                    // The session will handle the actual execution
+                    self.execute_inline(&step_instructions).await
+                }
+                StepAssignment::Subagent { kind, reason } => {
+                    let _ = self.event_tx.send(PlanEvent::StepProgress {
+                        plan_id: plan.id.clone(),
+                        step_id: step_id.clone(),
+                        message: format!("Spawning {} subagent: {}", kind.display_name(), reason),
+                    });
+
+                    self.execute_with_subagent(&plan.steps[i], kind.clone())
+                        .await
+                }
+            };
+
+            let duration = start_time.elapsed().as_millis() as u64;
+
+            // Update step status based on result
+            match result {
+                Ok(output) => {
+                    plan.steps[i].status = PlanStepStatus::Completed;
+                    plan.steps[i].output = Some(output.clone());
+                    plan.steps[i].duration_ms = Some(duration);
+
+                    let _ = self.event_tx.send(PlanEvent::StepCompleted {
+                        plan_id: plan.id.clone(),
+                        step_id: step_id.clone(),
+                        success: true,
+                        output: Some(output),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    plan.steps[i].status = PlanStepStatus::Failed;
+                    plan.steps[i].error = Some(e.to_string());
+                    plan.steps[i].duration_ms = Some(duration);
+
+                    let _ = self.event_tx.send(PlanEvent::StepCompleted {
+                        plan_id: plan.id.clone(),
+                        step_id: step_id.clone(),
+                        success: false,
+                        output: None,
+                        error: Some(e.to_string()),
+                    });
+
+                    // Continue with other steps even if one fails
+                    // Could make this configurable (fail-fast vs continue)
+                }
+            }
+        }
+
+        // Determine final status
+        let all_completed = plan
+            .steps
+            .iter()
+            .all(|s| s.status == PlanStepStatus::Completed);
+        let any_failed = plan
+            .steps
+            .iter()
+            .any(|s| s.status == PlanStepStatus::Failed);
+
+        plan.status = if all_completed {
+            PlanStatus::Completed
+        } else if any_failed {
+            PlanStatus::Failed
+        } else {
+            PlanStatus::Failed // Some steps not completed
+        };
+
+        plan.completed_at = Some(Utc::now());
+
+        // Emit plan completed event
+        let _ = self.event_tx.send(PlanEvent::PlanCompleted {
+            plan_id: plan.id.clone(),
+            success: plan.status == PlanStatus::Completed,
+            summary: plan.summary(),
+        });
+
+        Ok(())
+    }
+
+    /// Execute a step inline (returns instructions for session to execute)
+    async fn execute_inline(&self, instructions: &str) -> Result<String> {
+        // For inline execution, we return the instructions
+        // The session's main loop will handle the actual tool calls
+        Ok(format!(
+            "Inline step ready for execution:\n{}",
+            instructions
+        ))
+    }
+
+    /// Execute a step using a subagent
+    async fn execute_with_subagent(
+        &self,
+        step: &PlanStep,
+        kind: crate::subagent::SubagentKind,
+    ) -> Result<String> {
+        // Create event channel for subagent
+        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+
+        // Forward subagent events to plan events
+        let plan_tx = self.event_tx.clone();
+        let plan_id = step.id.clone(); // Using step_id as context
+        let step_id = step.id.clone();
+        tokio::spawn(async move {
+            while let Some(event) = subagent_rx.recv().await {
+                // Convert subagent events to plan progress events
+                if let crate::subagent::SubagentEvent::Thinking { message, .. }
+                | crate::subagent::SubagentEvent::TextChunk { text: message, .. } = event
+                {
+                    let _ = plan_tx.send(PlanEvent::StepProgress {
+                        plan_id: plan_id.clone(),
+                        step_id: step_id.clone(),
+                        message,
+                    });
+                }
+            }
+        });
+
+        // Build scope from step
+        let mut scope = SubagentScope::new(&step.instructions);
+        if !step.relevant_files.is_empty() {
+            scope = scope.with_file_patterns(step.relevant_files.clone());
+        }
+
+        // Create and run subagent
+        let mut executor = SubagentExecutor::new(
+            kind,
+            scope,
+            self.project_path.clone(),
+            &self.config,
+            subagent_tx,
+        )
+        .await?;
+
+        let result = executor.execute().await?;
+
+        if result.success {
+            Ok(result.output)
+        } else {
+            Err(anyhow::anyhow!(
+                "Subagent failed: {}",
+                result.errors.join(", ")
+            ))
+        }
+    }
+}
+
+/// Wrapper for executing plans with approval flow
+pub struct PlanRunner {
+    executor: PlanExecutor,
+    requires_approval: bool,
+}
+
+impl PlanRunner {
+    /// Create a runner that requires approval (PLAN mode)
+    pub fn with_approval(
+        project_path: PathBuf,
+        config: Config,
+        event_tx: mpsc::UnboundedSender<PlanEvent>,
+    ) -> Self {
+        Self {
+            executor: PlanExecutor::new(project_path, config, event_tx),
+            requires_approval: true,
+        }
+    }
+
+    /// Create a runner that executes immediately (BUILD mode)
+    pub fn immediate(
+        project_path: PathBuf,
+        config: Config,
+        event_tx: mpsc::UnboundedSender<PlanEvent>,
+    ) -> Self {
+        Self {
+            executor: PlanExecutor::new(project_path, config, event_tx),
+            requires_approval: false,
+        }
+    }
+
+    /// Run a plan (with or without approval based on mode)
+    pub async fn run(&self, plan: &mut TaskPlan, approved: bool) -> Result<()> {
+        if self.requires_approval {
+            if !approved {
+                plan.status = PlanStatus::AwaitingApproval;
+                let _ = self.executor.event_tx.send(PlanEvent::AwaitingApproval {
+                    plan_id: plan.id.clone(),
+                });
+                return Ok(());
+            }
+
+            // User approved
+            let _ = self.executor.event_tx.send(PlanEvent::PlanApproved {
+                plan_id: plan.id.clone(),
+            });
+        }
+
+        self.executor.execute(plan).await
+    }
+
+    /// Approve a pending plan and execute it
+    pub async fn approve_and_execute(&self, plan: &mut TaskPlan) -> Result<()> {
+        let _ = self.executor.event_tx.send(PlanEvent::PlanApproved {
+            plan_id: plan.id.clone(),
+        });
+        self.executor.execute(plan).await
+    }
+
+    /// Reject a pending plan
+    pub fn reject(&self, plan: &mut TaskPlan) {
+        plan.status = PlanStatus::Cancelled;
+        let _ = self.executor.event_tx.send(PlanEvent::PlanRejected {
+            plan_id: plan.id.clone(),
+        });
+    }
+}

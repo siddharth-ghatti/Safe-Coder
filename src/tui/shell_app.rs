@@ -13,8 +13,10 @@ use uuid::Uuid;
 
 use super::autocomplete::Autocomplete;
 use super::file_picker::FilePicker;
+use super::sidebar::SidebarState;
 use super::spinner::Spinner;
 use crate::config::Config;
+use crate::planning::PlanEvent;
 use crate::session::Session;
 use crate::tools::AgentMode;
 
@@ -433,6 +435,10 @@ pub struct ShellTuiApp {
     pub lsp_status_message: Option<String>,
     /// Whether LSP initialization is in progress
     pub lsp_initializing: bool,
+
+    // === Sidebar State ===
+    /// Sidebar with plan progress, token usage, and connections
+    pub sidebar: SidebarState,
 }
 
 impl ShellTuiApp {
@@ -482,6 +488,8 @@ impl ShellTuiApp {
             lsp_servers: Vec::new(),
             lsp_status_message: None,
             lsp_initializing: true,
+
+            sidebar: SidebarState::new(),
         };
 
         // Add welcome message
@@ -856,6 +864,32 @@ impl ShellTuiApp {
     /// Set permission mode directly
     pub fn set_permission_mode(&mut self, mode: PermissionMode) {
         self.permission_mode = mode;
+        self.needs_redraw = true;
+    }
+
+    /// Toggle sidebar visibility
+    pub fn toggle_sidebar(&mut self) {
+        self.sidebar.toggle();
+        self.needs_redraw = true;
+    }
+
+    /// Update sidebar from a plan event
+    pub fn update_plan(&mut self, event: &PlanEvent) {
+        self.sidebar.update_from_event(event);
+        self.needs_redraw = true;
+    }
+
+    /// Update token usage in sidebar
+    pub fn update_tokens(&mut self, input: usize, output: usize) {
+        self.sidebar.update_tokens(input, output);
+        self.needs_redraw = true;
+    }
+
+    /// Sync LSP servers to sidebar
+    pub fn sync_lsp_to_sidebar(&mut self) {
+        for (lang, _cmd, running) in &self.lsp_servers {
+            self.sidebar.add_lsp_server(lang.clone(), *running);
+        }
         self.needs_redraw = true;
     }
 
