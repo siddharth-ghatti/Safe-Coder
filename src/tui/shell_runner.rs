@@ -269,6 +269,8 @@ impl ShellTuiRunner {
                                         client.command().to_string(),
                                         true,
                                     ));
+                                    // Also update sidebar
+                                    self.app.sidebar.add_lsp_server(lang.clone(), true);
                                 }
                             }
 
@@ -1878,10 +1880,13 @@ Keyboard:
         };
 
         let prompt = self.app.current_prompt();
-        let block = CommandBlock::new(display_input, BlockType::AiQuery, prompt);
+        let block = CommandBlock::new(display_input.clone(), BlockType::AiQuery, prompt);
         let block_id = block.id.clone();
         self.app.add_block(block);
         self.app.set_ai_thinking(true);
+
+        // Update sidebar with current task
+        self.app.sidebar.set_task(display_input);
 
         // Build full context
         let shell_context = self.app.build_ai_context();

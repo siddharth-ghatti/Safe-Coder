@@ -138,12 +138,13 @@ impl TaskPlanner {
 
         // Call LLM
         let messages = vec![Message::user(user_message)];
-        let response = llm_client
+        let llm_response = llm_client
             .send_message_with_system(&messages, &[], Some(system_prompt))
             .await?;
 
         // Extract text from response
-        let response_text = response
+        let response_text = llm_response
+            .message
             .content
             .iter()
             .filter_map(|block| {

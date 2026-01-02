@@ -41,7 +41,7 @@ impl AgentMode {
                 "webfetch",
                 "todowrite",
                 "todoread",
-                "subagent",
+                // "subagent", // Disabled for now - perfecting planning first
             ],
         }
     }
@@ -226,6 +226,23 @@ impl ToolRegistry {
     ) -> Self {
         use crate::session::SessionEvent;
         use crate::subagent::SubagentEvent;
+
+        // Register all basic tools first
+        // File operations
+        self.register(Box::new(ReadTool));
+        self.register(Box::new(WriteTool));
+        self.register(Box::new(EditTool));
+        self.register(Box::new(ListTool));
+        // Search tools
+        self.register(Box::new(GlobTool));
+        self.register(Box::new(GrepTool));
+        // Shell execution
+        self.register(Box::new(BashTool));
+        // Web access
+        self.register(Box::new(WebFetchTool));
+        // Task tracking
+        self.register(Box::new(TodoWriteTool));
+        self.register(Box::new(TodoReadTool));
 
         // Create event channel for subagent communication
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SubagentEvent>();

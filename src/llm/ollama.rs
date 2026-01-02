@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, LlmClient, Message, Role, ToolDefinition};
+use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, ToolDefinition};
 
 pub struct OllamaClient {
     base_url: String,
@@ -149,7 +149,7 @@ impl LlmClient for OllamaClient {
         messages: &[Message],
         tools: &[ToolDefinition],
         system_prompt: Option<&str>,
-    ) -> Result<Message> {
+    ) -> Result<LlmResponse> {
         // Build messages, prepending system prompt if provided
         let mut ollama_messages = Vec::new();
 
@@ -234,9 +234,12 @@ impl LlmClient for OllamaClient {
             });
         }
 
-        Ok(Message {
-            role: Role::Assistant,
-            content: content_blocks,
+        Ok(LlmResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content_blocks,
+            },
+            usage: None, // Ollama client doesn't track usage yet
         })
     }
 }

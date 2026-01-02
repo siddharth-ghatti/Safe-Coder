@@ -112,7 +112,23 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
 }
 
 fn calculate_input_height(app: &ShellTuiApp) -> u16 {
-    let lines = app.input.lines().count().max(1).min(5) as u16;
+    // Estimate wrapped lines (assume ~80 char width, accounting for sidebar)
+    let estimated_width = 60usize; // Conservative estimate
+    let wrapped_count = if app.input.is_empty() {
+        1
+    } else {
+        // Count wrapped lines
+        let mut count = 0;
+        for line in app.input.lines() {
+            count += ((line.len() / estimated_width) + 1).max(1);
+        }
+        // Handle case where input has no newlines but is long
+        if count == 0 {
+            count = ((app.input.len() / estimated_width) + 1).max(1);
+        }
+        count
+    };
+    let lines = wrapped_count.min(5) as u16;
     lines + 2 // borders
 }
 
@@ -389,10 +405,12 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
         }
 
         BlockType::ShellCommand => {
-            // User command header
-            lines.push(MessageLine::UserHeader {
-                text: block.input.clone(),
-            });
+            // User command header - wrap long commands
+            for wrapped in wrap(&block.input, width.saturating_sub(4)) {
+                lines.push(MessageLine::UserHeader {
+                    text: wrapped.to_string(),
+                });
+            }
 
             if block.is_running() {
                 lines.push(MessageLine::Running {
@@ -406,10 +424,12 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
         }
 
         BlockType::AiQuery => {
-            // User query header (like "# Change button color to danger...")
-            lines.push(MessageLine::UserHeader {
-                text: block.input.clone(),
-            });
+            // User query header (like "# Change button color to danger...") - wrap long queries
+            for wrapped in wrap(&block.input, width.saturating_sub(4)) {
+                lines.push(MessageLine::UserHeader {
+                    text: wrapped.to_string(),
+                });
+            }
 
             if block.is_running() && block.children.is_empty() && block.output.get_text().is_empty()
             {
@@ -771,50 +791,98 @@ fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Build input with cursor
-    let (before, after) = app.input.split_at(app.cursor_pos.min(app.input.len()));
+    let available_width = inner.width.saturating_sub(3) as usize; // Account for "> " prefix
+    let available_height = inner.height as usize;
 
     // Blinking cursor
     let cursor_visible = app.animation_frame % 16 < 10;
     let cursor_char = if cursor_visible { "█" } else { " " };
 
-    let after_rest: String = if !after.is_empty() {
-        after.chars().skip(1).collect()
-    } else {
-        String::new()
-    };
-
-    let mut spans = vec![Span::styled("> ", Style::default().fg(TEXT_DIM))];
-
     if app.input.is_empty() {
-        // Show placeholder when empty, with blinking cursor after prompt
-        spans.push(Span::styled(
-            cursor_char.to_string(),
-            Style::default()
-                .fg(ACCENT_CYAN)
-                .add_modifier(Modifier::REVERSED),
-        ));
-        spans.push(Span::styled(
-            "Type a message...",
-            Style::default().fg(TEXT_MUTED),
-        ));
-    } else {
-        spans.push(Span::styled(
-            before.to_string(),
-            Style::default().fg(TEXT_PRIMARY),
-        ));
-        spans.push(Span::styled(
-            cursor_char.to_string(),
-            Style::default()
-                .fg(ACCENT_CYAN)
-                .add_modifier(Modifier::REVERSED),
-        ));
-        spans.push(Span::styled(after_rest, Style::default().fg(TEXT_PRIMARY)));
+        // Show placeholder when empty
+        let spans = vec![
+            Span::styled("> ", Style::default().fg(TEXT_DIM)),
+            Span::styled(
+                cursor_char.to_string(),
+                Style::default()
+                    .fg(ACCENT_CYAN)
+                    .add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled("Type a message...", Style::default().fg(TEXT_MUTED)),
+        ];
+        let para = Paragraph::new(Line::from(spans));
+        f.render_widget(para, inner);
+        return;
     }
 
-    let input_para = Paragraph::new(Line::from(spans)).wrap(Wrap { trim: false });
+    // For non-empty input, we need to handle wrapping manually to track cursor position
+    let input_with_cursor = format!(
+        "{}{}{}",
+        &app.input[..app.cursor_pos.min(app.input.len())],
+        "\x00", // Cursor marker
+        &app.input[app.cursor_pos.min(app.input.len())..]
+    );
 
-    f.render_widget(input_para, inner);
+    // Wrap the text with cursor marker
+    let wrapped_lines: Vec<String> = wrap(&input_with_cursor, available_width)
+        .into_iter()
+        .map(|cow| cow.to_string())
+        .collect();
+
+    // Find which line contains the cursor and scroll to show it
+    let mut cursor_line = 0;
+    for (i, line) in wrapped_lines.iter().enumerate() {
+        if line.contains('\x00') {
+            cursor_line = i;
+            break;
+        }
+    }
+
+    // Calculate visible range to keep cursor in view
+    let visible_start = if cursor_line >= available_height {
+        cursor_line - available_height + 1
+    } else {
+        0
+    };
+    let visible_end = (visible_start + available_height).min(wrapped_lines.len());
+
+    // Build the display lines
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, line) in wrapped_lines
+        .iter()
+        .enumerate()
+        .skip(visible_start)
+        .take(visible_end - visible_start)
+    {
+        let prefix = if i == 0 { "> " } else { "  " };
+
+        if line.contains('\x00') {
+            // This line contains the cursor
+            let parts: Vec<&str> = line.splitn(2, '\x00').collect();
+            let before = parts.get(0).unwrap_or(&"");
+            let after = parts.get(1).unwrap_or(&"");
+
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(TEXT_DIM)),
+                Span::styled(before.to_string(), Style::default().fg(TEXT_PRIMARY)),
+                Span::styled(
+                    cursor_char.to_string(),
+                    Style::default()
+                        .fg(ACCENT_CYAN)
+                        .add_modifier(Modifier::REVERSED),
+                ),
+                Span::styled(after.to_string(), Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(prefix, Style::default().fg(TEXT_DIM)),
+                Span::styled(line.clone(), Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        }
+    }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
 }
 
 // ============================================================================
@@ -1020,7 +1088,19 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     ))];
 
     if let Some(ref plan) = app.sidebar.active_plan {
-        // Show progress
+        // Show progress bar
+        let percent = plan.progress_percent();
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+
+        // Show step count
         let progress = format!(" {}/{} steps", plan.completed_count(), plan.steps.len());
         lines.push(Line::from(Span::styled(
             progress,
@@ -1028,15 +1108,20 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         )));
 
         // Show each step with status icon
-        let max_steps = area.height.saturating_sub(3) as usize;
-        for (i, step) in plan.steps.iter().take(max_steps).enumerate() {
-            let icon = step.icon();
-            let icon_color = match step.status {
-                PlanStepStatus::Completed => ACCENT_GREEN,
-                PlanStepStatus::InProgress => ACCENT_CYAN,
-                PlanStepStatus::Failed => ACCENT_RED,
-                PlanStepStatus::Skipped => TEXT_MUTED,
-                PlanStepStatus::Pending => TEXT_DIM,
+        let max_steps = area.height.saturating_sub(4) as usize;
+        for (_i, step) in plan.steps.iter().take(max_steps).enumerate() {
+            // Use animated spinner for in-progress steps
+            let (icon, icon_color) = match step.status {
+                PlanStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+                PlanStepStatus::InProgress => {
+                    // Animated spinner for in-progress
+                    let spinner_chars = ["◐", "◓", "◑", "◒"];
+                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                    (spinner.to_string(), ACCENT_CYAN)
+                }
+                PlanStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
+                PlanStepStatus::Skipped => ("−".to_string(), TEXT_MUTED),
+                PlanStepStatus::Pending => ("◯".to_string(), TEXT_DIM),
             };
 
             // Truncate step description
@@ -1047,10 +1132,17 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 step.description.clone()
             };
 
+            // Highlight in-progress step
+            let desc_style = if step.status == PlanStepStatus::InProgress {
+                Style::default().fg(TEXT_PRIMARY)
+            } else {
+                Style::default().fg(TEXT_SECONDARY)
+            };
+
             lines.push(Line::from(vec![
                 Span::styled(" ", Style::default()),
                 Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
-                Span::styled(desc, Style::default().fg(TEXT_SECONDARY)),
+                Span::styled(desc, desc_style),
             ]));
         }
 
@@ -1068,6 +1160,15 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 Style::default().fg(ACCENT_YELLOW),
             )));
         }
+    } else if app.ai_thinking {
+        // Show thinking spinner when AI is processing but plan not yet created
+        let spinner_chars = ["◐", "◓", "◑", "◒"];
+        let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+            Span::styled("Thinking...", Style::default().fg(TEXT_SECONDARY)),
+        ]));
     } else {
         lines.push(Line::from(Span::styled(
             " No active plan",

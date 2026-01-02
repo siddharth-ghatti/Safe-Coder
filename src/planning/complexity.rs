@@ -1,9 +1,7 @@
 //! Complexity scoring algorithm for plan steps
 //!
-//! Determines how complex a step is and whether it should be
-//! delegated to a subagent or executed inline.
-
-use crate::subagent::SubagentKind;
+//! Determines how complex a step is. Subagent support is disabled
+//! for now - all steps execute inline.
 
 use super::types::{PlanStep, StepAssignment, StepComplexity, TaskPlan};
 
@@ -69,76 +67,10 @@ pub fn complexity_from_score(score: u8) -> StepComplexity {
 }
 
 /// Determine subagent assignment based on complexity and step content
-pub fn assign_step(step: &PlanStep) -> StepAssignment {
-    // Simple steps are always inline
-    if step.complexity == StepComplexity::Simple {
-        return StepAssignment::Inline;
-    }
-
-    let desc_lower = step.description.to_lowercase();
-    let instr_lower = step.instructions.to_lowercase();
-    let combined = format!("{} {}", desc_lower, instr_lower);
-
-    // Map step content to subagent type based on keywords
-    if contains_any(&combined, &["test", "spec", "verify", "assert", "expect"]) {
-        return StepAssignment::Subagent {
-            kind: SubagentKind::Tester,
-            reason: "Step involves testing".to_string(),
-        };
-    }
-
-    if contains_any(
-        &combined,
-        &["document", "readme", "comment", "docstring", "jsdoc"],
-    ) {
-        return StepAssignment::Subagent {
-            kind: SubagentKind::Documenter,
-            reason: "Step involves documentation".to_string(),
-        };
-    }
-
-    if contains_any(
-        &combined,
-        &[
-            "refactor",
-            "clean",
-            "improve",
-            "optimize",
-            "restructure",
-            "reorganize",
-        ],
-    ) {
-        return StepAssignment::Subagent {
-            kind: SubagentKind::Refactorer,
-            reason: "Step involves refactoring".to_string(),
-        };
-    }
-
-    if contains_any(
-        &combined,
-        &[
-            "analyze",
-            "explore",
-            "understand",
-            "investigate",
-            "review code",
-        ],
-    ) {
-        return StepAssignment::Subagent {
-            kind: SubagentKind::CodeAnalyzer,
-            reason: "Step involves code analysis".to_string(),
-        };
-    }
-
-    // For complex non-specific tasks, use a custom subagent
-    if step.complexity == StepComplexity::Complex {
-        return StepAssignment::Subagent {
-            kind: SubagentKind::Custom,
-            reason: "Complex task requiring focused execution".to_string(),
-        };
-    }
-
-    // Medium complexity without specific match - execute inline
+/// NOTE: Subagents are currently disabled - all steps execute inline
+pub fn assign_step(_step: &PlanStep) -> StepAssignment {
+    // All steps execute inline for now while we perfect the planning system
+    // Subagent support will be re-enabled later
     StepAssignment::Inline
 }
 
@@ -205,33 +137,19 @@ mod tests {
 
     #[test]
     fn test_subagent_assignment() {
-        // Test step
+        // All steps are inline now (subagents disabled)
         let mut test_step =
             PlanStep::new("1".to_string(), "Write unit tests for parser".to_string());
         test_step.complexity = StepComplexity::Medium;
         let assignment = assign_step(&test_step);
-        assert!(matches!(
-            assignment,
-            StepAssignment::Subagent {
-                kind: SubagentKind::Tester,
-                ..
-            }
-        ));
+        assert!(matches!(assignment, StepAssignment::Inline));
 
-        // Refactor step
-        let mut refactor_step =
+        let mut complex_step =
             PlanStep::new("2".to_string(), "Refactor database module".to_string());
-        refactor_step.complexity = StepComplexity::Complex;
-        let assignment = assign_step(&refactor_step);
-        assert!(matches!(
-            assignment,
-            StepAssignment::Subagent {
-                kind: SubagentKind::Refactorer,
-                ..
-            }
-        ));
+        complex_step.complexity = StepComplexity::Complex;
+        let assignment = assign_step(&complex_step);
+        assert!(matches!(assignment, StepAssignment::Inline));
 
-        // Simple step - always inline
         let mut simple_step = PlanStep::new("3".to_string(), "Update version number".to_string());
         simple_step.complexity = StepComplexity::Simple;
         let assignment = assign_step(&simple_step);

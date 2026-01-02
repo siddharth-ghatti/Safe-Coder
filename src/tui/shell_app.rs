@@ -903,8 +903,16 @@ impl ShellTuiApp {
             context.push_str(&format!("Git branch: {}\n", branch));
         }
 
+        // Detect and include project type
+        context.push_str("\n## Project Information\n");
+        if let Some(project_info) = self.detect_project_type() {
+            context.push_str(&project_info);
+        } else {
+            context.push_str("Project type: Unknown\n");
+        }
+
         // Recent shell commands
-        context.push_str("\nRecent shell activity:\n");
+        context.push_str("\n## Recent shell activity:\n");
 
         let shell_blocks: Vec<_> = self
             .blocks
@@ -937,6 +945,117 @@ impl ShellTuiApp {
         }
 
         context
+    }
+
+    /// Detect project type and return relevant context
+    fn detect_project_type(&self) -> Option<String> {
+        let mut info = String::new();
+
+        // Check for Rust project (Cargo.toml)
+        let cargo_toml = self.cwd.join("Cargo.toml");
+        if cargo_toml.exists() {
+            info.push_str("Project type: Rust (Cargo)\n");
+            if let Ok(content) = std::fs::read_to_string(&cargo_toml) {
+                // Extract package name
+                if let Some(name_line) = content.lines().find(|l| l.trim().starts_with("name")) {
+                    if let Some(name) = name_line.split('=').nth(1) {
+                        info.push_str(&format!("Package: {}\n", name.trim().trim_matches('"')));
+                    }
+                }
+                // Extract description if available
+                if let Some(desc_line) = content
+                    .lines()
+                    .find(|l| l.trim().starts_with("description"))
+                {
+                    if let Some(desc) = desc_line.split('=').nth(1) {
+                        info.push_str(&format!("Description: {}\n", desc.trim().trim_matches('"')));
+                    }
+                }
+            }
+            // Check for src directory structure
+            if self.cwd.join("src/main.rs").exists() {
+                info.push_str("Type: Binary application\n");
+            } else if self.cwd.join("src/lib.rs").exists() {
+                info.push_str("Type: Library\n");
+            }
+            return Some(info);
+        }
+
+        // Check for Node.js project (package.json)
+        let package_json = self.cwd.join("package.json");
+        if package_json.exists() {
+            info.push_str("Project type: Node.js/JavaScript\n");
+            if let Ok(content) = std::fs::read_to_string(&package_json) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(name) = json.get("name").and_then(|v| v.as_str()) {
+                        info.push_str(&format!("Package: {}\n", name));
+                    }
+                    if let Some(desc) = json.get("description").and_then(|v| v.as_str()) {
+                        info.push_str(&format!("Description: {}\n", desc));
+                    }
+                    // Check for TypeScript
+                    if json
+                        .get("devDependencies")
+                        .and_then(|d| d.get("typescript"))
+                        .is_some()
+                        || self.cwd.join("tsconfig.json").exists()
+                    {
+                        info.push_str("Language: TypeScript\n");
+                    }
+                }
+            }
+            return Some(info);
+        }
+
+        // Check for Python project
+        let pyproject = self.cwd.join("pyproject.toml");
+        let setup_py = self.cwd.join("setup.py");
+        let requirements = self.cwd.join("requirements.txt");
+        if pyproject.exists() || setup_py.exists() || requirements.exists() {
+            info.push_str("Project type: Python\n");
+            if pyproject.exists() {
+                if let Ok(content) = std::fs::read_to_string(&pyproject) {
+                    if let Some(name_line) = content.lines().find(|l| l.trim().starts_with("name"))
+                    {
+                        if let Some(name) = name_line.split('=').nth(1) {
+                            info.push_str(&format!("Package: {}\n", name.trim().trim_matches('"')));
+                        }
+                    }
+                }
+            }
+            return Some(info);
+        }
+
+        // Check for Go project
+        let go_mod = self.cwd.join("go.mod");
+        if go_mod.exists() {
+            info.push_str("Project type: Go\n");
+            if let Ok(content) = std::fs::read_to_string(&go_mod) {
+                if let Some(module_line) = content.lines().find(|l| l.starts_with("module")) {
+                    if let Some(module) = module_line.split_whitespace().nth(1) {
+                        info.push_str(&format!("Module: {}\n", module));
+                    }
+                }
+            }
+            return Some(info);
+        }
+
+        // Check for Java/Maven project
+        let pom_xml = self.cwd.join("pom.xml");
+        if pom_xml.exists() {
+            info.push_str("Project type: Java (Maven)\n");
+            return Some(info);
+        }
+
+        // Check for Java/Gradle project
+        let build_gradle = self.cwd.join("build.gradle");
+        let build_gradle_kts = self.cwd.join("build.gradle.kts");
+        if build_gradle.exists() || build_gradle_kts.exists() {
+            info.push_str("Project type: Java/Kotlin (Gradle)\n");
+            return Some(info);
+        }
+
+        None
     }
 
     // === Directory Management ===

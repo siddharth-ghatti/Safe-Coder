@@ -178,14 +178,17 @@ impl SubagentExecutor {
                 }
             };
 
+            // Extract the message from the response
+            let message = response.message;
+
             // Check for tool calls
-            let has_tool_calls = response
+            let has_tool_calls = message
                 .content
                 .iter()
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
             // Count tool calls for logging
-            let tool_call_count = response
+            let tool_call_count = message
                 .content
                 .iter()
                 .filter(|c| matches!(c, ContentBlock::ToolUse { .. }))
@@ -197,7 +200,7 @@ impl SubagentExecutor {
             });
 
             // Extract and send text chunks
-            for block in &response.content {
+            for block in &message.content {
                 if let ContentBlock::Text { text } = block {
                     final_response = text.clone();
                     let _ = self.event_tx.send(SubagentEvent::TextChunk {
@@ -208,7 +211,7 @@ impl SubagentExecutor {
             }
 
             // Add assistant message to history
-            self.messages.push(response.clone());
+            self.messages.push(message.clone());
 
             // If no tool calls, we're done
             if !has_tool_calls {
@@ -222,10 +225,10 @@ impl SubagentExecutor {
             // Execute tool calls
             let mut tool_results = Vec::new();
 
-            for block in &response.content {
+            for block in &message.content {
                 if let ContentBlock::ToolUse { id, name, input } = block {
                     // Check if tool is allowed for this subagent kind
-                    if !self.kind.is_tool_allowed(name) {
+                    if !self.kind.is_tool_allowed(name.as_str()) {
                         let error_msg = format!(
                             "Tool '{}' is not available for {} subagent",
                             name,
@@ -249,7 +252,7 @@ impl SubagentExecutor {
                     }
 
                     // Generate description
-                    let description = self.describe_tool_action(name, input);
+                    let description = self.describe_tool_action(name.as_str(), input);
 
                     // Send tool start event
                     let _ = self.event_tx.send(SubagentEvent::ToolStart {
@@ -260,11 +263,11 @@ impl SubagentExecutor {
 
                     // Execute the tool
                     let tool_ctx = ToolContext::new(&self.project_path, &self.tool_config);
-                    let result = match self.tool_registry.get_tool(name) {
+                    let result = match self.tool_registry.get_tool(name.as_str()) {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
                             Ok(output) => {
                                 // Track file operations
-                                self.track_file_operation(name, input);
+                                self.track_file_operation(name.as_str(), input);
 
                                 // Truncate output for display (safely handle UTF-8 boundaries)
                                 // Send full output for streaming display

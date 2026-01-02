@@ -48,22 +48,37 @@ pub struct ToolDefinition {
     pub input_schema: serde_json::Value,
 }
 
+/// Token usage information from LLM response
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+}
+
+/// Response from LLM including message and token usage
+#[derive(Debug, Clone)]
+pub struct LlmResponse {
+    pub message: Message,
+    pub usage: Option<TokenUsage>,
+}
+
 #[async_trait]
 pub trait LlmClient: Send + Sync {
     /// Send a message to the LLM with optional system prompt
+    /// Returns both the message and token usage
     async fn send_message_with_system(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         system_prompt: Option<&str>,
-    ) -> Result<Message>;
+    ) -> Result<LlmResponse>;
 
     /// Send a message to the LLM (backward compatible, no system prompt)
     async fn send_message(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
-    ) -> Result<Message> {
+    ) -> Result<LlmResponse> {
         self.send_message_with_system(messages, tools, None).await
     }
 }

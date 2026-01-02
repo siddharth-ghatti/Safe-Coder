@@ -1,25 +1,24 @@
 //! Plan executor
 //!
-//! Executes plan steps, delegating to subagents for complex steps.
+//! Executes plan steps inline. Subagent support is disabled for now
+//! while we perfect the planning and execution flow.
 
 use anyhow::Result;
 use chrono::Utc;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::subagent::{SubagentExecutor, SubagentScope};
 
-use super::types::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, StepAssignment, TaskPlan};
+use super::types::{PlanEvent, PlanStatus, PlanStepStatus, StepAssignment, TaskPlan};
 
 /// Executes a task plan step-by-step
 pub struct PlanExecutor {
     /// Project path for tool execution
-    project_path: PathBuf,
+    _project_path: PathBuf,
     /// Configuration
-    config: Config,
+    _config: Config,
     /// Event sender for progress updates
     event_tx: mpsc::UnboundedSender<PlanEvent>,
 }
@@ -32,13 +31,13 @@ impl PlanExecutor {
         event_tx: mpsc::UnboundedSender<PlanEvent>,
     ) -> Self {
         Self {
-            project_path,
-            config,
+            _project_path: project_path,
+            _config: config,
             event_tx,
         }
     }
 
-    /// Execute a plan
+    /// Execute a plan - all steps are executed inline
     pub async fn execute(&self, plan: &mut TaskPlan) -> Result<()> {
         plan.status = PlanStatus::Executing;
         plan.started_at = Some(Utc::now());
@@ -56,7 +55,6 @@ impl PlanExecutor {
             let step_id = plan.steps[i].id.clone();
             let step_description = plan.steps[i].active_description.clone();
             let step_instructions = plan.steps[i].instructions.clone();
-            let step_assignment = plan.steps[i].assignment.clone();
 
             // Mark step as in progress
             plan.steps[i].status = PlanStepStatus::InProgress;
@@ -70,24 +68,9 @@ impl PlanExecutor {
 
             let start_time = Instant::now();
 
-            // Execute the step
-            let result = match &step_assignment {
-                StepAssignment::Inline => {
-                    // For inline execution, we'll return the instructions
-                    // The session will handle the actual execution
-                    self.execute_inline(&step_instructions).await
-                }
-                StepAssignment::Subagent { kind, reason } => {
-                    let _ = self.event_tx.send(PlanEvent::StepProgress {
-                        plan_id: plan.id.clone(),
-                        step_id: step_id.clone(),
-                        message: format!("Spawning {} subagent: {}", kind.display_name(), reason),
-                    });
-
-                    self.execute_with_subagent(&plan.steps[i], kind.clone())
-                        .await
-                }
-            };
+            // Execute inline - subagents are disabled
+            // The session's main loop will handle the actual tool calls
+            let result = self.execute_inline(&step_instructions).await;
 
             let duration = start_time.elapsed().as_millis() as u64;
 
@@ -120,7 +103,6 @@ impl PlanExecutor {
                     });
 
                     // Continue with other steps even if one fails
-                    // Could make this configurable (fail-fast vs continue)
                 }
             }
         }
@@ -159,66 +141,7 @@ impl PlanExecutor {
     async fn execute_inline(&self, instructions: &str) -> Result<String> {
         // For inline execution, we return the instructions
         // The session's main loop will handle the actual tool calls
-        Ok(format!(
-            "Inline step ready for execution:\n{}",
-            instructions
-        ))
-    }
-
-    /// Execute a step using a subagent
-    async fn execute_with_subagent(
-        &self,
-        step: &PlanStep,
-        kind: crate::subagent::SubagentKind,
-    ) -> Result<String> {
-        // Create event channel for subagent
-        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
-
-        // Forward subagent events to plan events
-        let plan_tx = self.event_tx.clone();
-        let plan_id = step.id.clone(); // Using step_id as context
-        let step_id = step.id.clone();
-        tokio::spawn(async move {
-            while let Some(event) = subagent_rx.recv().await {
-                // Convert subagent events to plan progress events
-                if let crate::subagent::SubagentEvent::Thinking { message, .. }
-                | crate::subagent::SubagentEvent::TextChunk { text: message, .. } = event
-                {
-                    let _ = plan_tx.send(PlanEvent::StepProgress {
-                        plan_id: plan_id.clone(),
-                        step_id: step_id.clone(),
-                        message,
-                    });
-                }
-            }
-        });
-
-        // Build scope from step
-        let mut scope = SubagentScope::new(&step.instructions);
-        if !step.relevant_files.is_empty() {
-            scope = scope.with_file_patterns(step.relevant_files.clone());
-        }
-
-        // Create and run subagent
-        let mut executor = SubagentExecutor::new(
-            kind,
-            scope,
-            self.project_path.clone(),
-            &self.config,
-            subagent_tx,
-        )
-        .await?;
-
-        let result = executor.execute().await?;
-
-        if result.success {
-            Ok(result.output)
-        } else {
-            Err(anyhow::anyhow!(
-                "Subagent failed: {}",
-                result.errors.join(", ")
-            ))
-        }
+        Ok(instructions.to_string())
     }
 }
 

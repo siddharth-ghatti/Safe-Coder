@@ -16,7 +16,7 @@ use crate::loop_detector::{DoomLoopAction, LoopDetector};
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
-use crate::planning::{PlanEvent, TaskPlan, TaskPlanner};
+use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan};
 use crate::prompts;
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 
@@ -262,13 +262,20 @@ impl Session {
                 .collect();
 
             // Send to LLM with hierarchical system prompt
-            let assistant_message = self
+            let llm_response = self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
                 .await?;
 
-            // Track stats (approximate token counting)
-            self.stats.total_tokens_sent += user_message.len() / 4; // Rough estimate
+            let assistant_message = llm_response.message;
+
+            // Track stats from actual token usage if available
+            if let Some(usage) = &llm_response.usage {
+                self.stats.total_tokens_sent += usage.input_tokens;
+            } else {
+                // Fall back to approximate token counting
+                self.stats.total_tokens_sent += user_message.len() / 4;
+            }
             self.stats.total_messages += 1;
 
             // Check if there are any tool calls
@@ -516,13 +523,25 @@ impl Session {
                 .collect();
 
             // Send to LLM with hierarchical system prompt
-            let assistant_message = self
+            let llm_response = self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
                 .await?;
 
-            // Track stats
-            self.stats.total_tokens_sent += user_message.len() / 4;
+            let assistant_message = llm_response.message;
+
+            // Track stats and emit token usage event
+            if let Some(usage) = &llm_response.usage {
+                self.stats.total_tokens_sent += usage.input_tokens;
+                // Emit token usage event for sidebar
+                let _ = event_tx.send(SessionEvent::TokenUsage {
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                });
+            } else {
+                // Fall back to approximate token counting
+                self.stats.total_tokens_sent += user_message.len() / 4;
+            }
             self.stats.total_messages += 1;
 
             // Check if there are any tool calls
@@ -551,6 +570,43 @@ impl Session {
             let mut tool_results = Vec::new();
             let mut tools_executed = Vec::new();
 
+            // Create a dynamic plan from tool calls for sidebar display
+            let tool_calls: Vec<_> = assistant_message
+                .content
+                .iter()
+                .filter_map(|block| {
+                    if let ContentBlock::ToolUse { id, name, input } = block {
+                        Some((id.clone(), name.clone(), input.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Track plan ID for step events
+            let plan_id = if !tool_calls.is_empty() {
+                let id = format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+                let mut plan = TaskPlan::new(id.clone(), user_message.clone());
+                plan.title = "Executing task".to_string();
+                plan.status = PlanStatus::Executing;
+
+                // Create steps from tool calls
+                for (i, (_, name, input)) in tool_calls.iter().enumerate() {
+                    let description = self.describe_tool_action(name, input);
+                    let step = PlanStep::new(format!("step-{}", i + 1), description);
+                    plan.steps.push(step);
+                }
+
+                // Emit plan created event
+                let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCreated {
+                    plan: plan.clone(),
+                }));
+                Some(id)
+            } else {
+                None
+            };
+
+            let mut step_index = 0usize;
             for block in &assistant_message.content {
                 if let ContentBlock::ToolUse { id, name, input } = block {
                     // Track stats
@@ -644,6 +700,16 @@ impl Session {
                         name: name.clone(),
                         description: description.clone(),
                     });
+
+                    // Emit step started event for plan sidebar
+                    if let Some(ref pid) = plan_id {
+                        let step_id = format!("step-{}", step_index + 1);
+                        let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepStarted {
+                            plan_id: pid.clone(),
+                            step_id: step_id.clone(),
+                            description: description.clone(),
+                        }));
+                    }
 
                     // For edit_file, capture old content for diff
                     // Note: edit_file uses "file_path", write_file uses "path"
@@ -749,11 +815,40 @@ impl Session {
                         success,
                     });
 
+                    // Emit step completed event for plan sidebar
+                    if let Some(ref pid) = plan_id {
+                        let step_id = format!("step-{}", step_index + 1);
+                        let _ = event_tx.send(SessionEvent::Plan(PlanEvent::StepCompleted {
+                            plan_id: pid.clone(),
+                            step_id,
+                            success,
+                            output: if success { Some(result.clone()) } else { None },
+                            error: if !success { Some(result.clone()) } else { None },
+                        }));
+                    }
+                    step_index += 1;
+
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
                         content: result,
                     });
                 }
+            }
+
+            // Emit plan completed event
+            if let Some(ref pid) = plan_id {
+                let all_success = tool_results.iter().all(|r| {
+                    if let ContentBlock::ToolResult { content, .. } = r {
+                        !content.starts_with("Error:")
+                    } else {
+                        true
+                    }
+                });
+                let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCompleted {
+                    plan_id: pid.clone(),
+                    success: all_success,
+                    summary: format!("Completed {} tool(s)", tools_executed.len()),
+                }));
             }
 
             // Auto-commit if enabled

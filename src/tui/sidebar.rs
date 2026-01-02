@@ -25,7 +25,8 @@ impl Default for SidebarState {
             visible: true, // Visible by default
             current_task: None,
             active_plan: None,
-            token_usage: TokenUsage::default(),
+            // Default to Claude's 200K context window
+            token_usage: TokenUsage::with_context_window(200_000),
             connections: ConnectionStatus::default(),
         }
     }
