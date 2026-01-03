@@ -10,7 +10,9 @@ use ratatui::{
 use textwrap::wrap;
 
 use super::app::App;
+use super::enhanced_ui::draw_enhanced;
 use super::messages::MessageType;
+use super::theme::Theme;
 
 // Claude Code inspired color scheme - clean and minimal
 const ACCENT_BLUE: Color = Color::Rgb(100, 149, 237); // Cornflower blue for user
@@ -24,6 +26,13 @@ const TEXT_DIM: Color = Color::Rgb(100, 100, 100); // Dimmed text
 const BORDER_DIM: Color = Color::Rgb(60, 60, 65); // Subtle borders
 
 pub fn draw(f: &mut Frame, app: &mut App) {
+    // Use enhanced UI if available, fall back to simple UI
+    let theme = app.theme_manager.get_current_theme();
+    draw_enhanced(f, app, &theme);
+}
+
+// Keep the original simple UI as a fallback
+pub fn draw_simple(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
     // Calculate dynamic input height based on wrapped content

@@ -1,7 +1,10 @@
 use super::banner;
 use super::messages::{BackgroundTask, BackgroundTaskStatus, ChatMessage, ToolExecution};
+use super::sidebar::SidebarState;
 use super::spinner::Spinner;
+use super::theme_manager::ThemeManager;
 use chrono::Local;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FocusPanel {
@@ -30,6 +33,12 @@ pub struct App {
     pub needs_redraw: bool,
     /// Track last input length for cursor blink optimization
     last_input_len: usize,
+    
+    // Enhanced UI fields
+    pub sidebar_state: SidebarState,
+    pub current_session_id: Option<String>,
+    pub show_help: bool,
+    pub theme_manager: ThemeManager,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +51,12 @@ pub struct SessionStatus {
 
 impl App {
     pub fn new(project_path: String) -> Self {
+        let mut theme_manager = ThemeManager::new(
+            dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("safe-coder")
+        );
+        
         let mut app = Self {
             project_path: project_path.clone(),
             messages: Vec::new(),
@@ -65,6 +80,12 @@ impl App {
             start_time: Local::now(),
             needs_redraw: true,
             last_input_len: 0,
+            
+            // Enhanced UI fields
+            sidebar_state: SidebarState::default(),
+            current_session_id: None,
+            show_help: false,
+            theme_manager,
         };
 
         // Add the banner as a welcome message
@@ -201,6 +222,7 @@ impl App {
     pub fn start_session(&mut self, session_id: String) {
         self.session_status.active = true;
         self.session_status.session_id = Some(session_id.clone());
+        self.current_session_id = Some(session_id.clone());
         self.start_time = Local::now();
         self.add_system_message(&format!("Session started: {}", session_id));
     }
@@ -211,6 +233,7 @@ impl App {
         }
         self.session_status.active = false;
         self.session_status.session_id = None;
+        self.current_session_id = None;
     }
 
     pub fn update_workspace_count(&mut self, count: usize) {
@@ -340,5 +363,63 @@ impl App {
             .iter()
             .filter(|t| matches!(t.status, BackgroundTaskStatus::Failed(_)))
             .count()
+    }
+
+    // Enhanced UI methods
+    pub fn is_focused_on_input(&self) -> bool {
+        matches!(self.focus, FocusPanel::Chat)
+    }
+
+    pub fn visible_messages(&self) -> impl Iterator<Item = &ChatMessage> {
+        let total = self.messages.len();
+        if self.scroll_offset >= total {
+            [].iter()
+        } else {
+            let start = total - (total - self.scroll_offset.min(total));
+            self.messages[start..].iter()
+        }
+    }
+
+    pub fn show_help(&mut self) {
+        self.show_help = true;
+        self.mark_dirty();
+    }
+
+    pub fn hide_help(&mut self) {
+        self.show_help = false;
+        self.mark_dirty();
+    }
+
+    pub fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+        self.mark_dirty();
+    }
+
+    pub async fn cycle_theme(&mut self) -> anyhow::Result<()> {
+        let new_theme = self.theme_manager.cycle_theme().await?;
+        self.set_status(&format!("Switched to {} theme", new_theme));
+        Ok(())
+    }
+
+    pub async fn toggle_high_contrast(&mut self) -> anyhow::Result<()> {
+        self.theme_manager.toggle_high_contrast().await?;
+        let status = if self.theme_manager.is_high_contrast() {
+            "High contrast enabled"
+        } else {
+            "High contrast disabled"
+        };
+        self.set_status(status);
+        Ok(())
+    }
+
+    pub async fn load_theme_config(&mut self) -> anyhow::Result<()> {
+        self.theme_manager.load().await?;
+        Ok(())
+    }
+    
+    pub fn cycle_theme_sync(&mut self) {
+        self.theme_manager.cycle_theme_sync();
+        let theme_name = self.theme_manager.current_theme_name();
+        self.set_status(&format!("Switched to {} theme", theme_name));
     }
 }

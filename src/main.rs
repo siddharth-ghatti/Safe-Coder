@@ -224,6 +224,7 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
     // Demo mode - no API required
     if demo && use_tui {
         let mut tui_runner = tui::TuiRunner::new(canonical_path.display().to_string());
+        tui_runner.initialize().await?;
         tui_runner.run_demo().await?;
         return Ok(());
     }
@@ -243,6 +244,7 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
     if use_tui {
         // Use TUI mode - skip session.start() as it outputs to stdout and interferes with TUI
         let mut tui_runner = tui::TuiRunner::new(canonical_path.display().to_string());
+        tui_runner.initialize().await?;
         tui_runner.run(session).await?;
         return Ok(());
     }

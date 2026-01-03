@@ -17,10 +17,14 @@ use tokio::sync::{mpsc, Mutex};
 mod app;
 mod autocomplete;
 mod banner;
+mod enhanced_ui;
 mod file_picker;
 mod messages;
 mod sidebar;
 mod spinner;
+mod styled_components;
+mod theme;
+mod theme_manager;
 mod ui;
 
 // New shell-first TUI modules
@@ -30,7 +34,12 @@ mod shell_ui;
 
 pub use sidebar::{ConnectionStatus, PlanDisplay, SidebarState, TokenUsage};
 
+// Enhanced UI imports
+use enhanced_ui::draw_enhanced;
 pub use file_picker::FilePicker;
+pub use styled_components::{LayoutUtils, StyledComponents};
+pub use theme::{ColorPalette, StyleSet, TailwindColors, Theme};
+pub use theme_manager::{StylingConfig, ThemeManager};
 
 pub use app::App;
 pub use messages::{BackgroundTask, BackgroundTaskStatus, ChatMessage, MessageType, ToolExecution};
@@ -59,6 +68,12 @@ impl TuiRunner {
         Self {
             app: App::new(project_path),
         }
+    }
+
+    pub async fn initialize(&mut self) -> Result<()> {
+        // Load theme configuration
+        self.app.load_theme_config().await?;
+        Ok(())
     }
 
     pub async fn run_demo(&mut self) -> Result<()> {
@@ -141,7 +156,8 @@ impl TuiRunner {
         loop {
             // Only redraw when needed
             if self.app.needs_redraw {
-                terminal.draw(|f| ui::draw(f, &mut self.app))?;
+                let theme = self.app.theme_manager.get_current_theme();
+                terminal.draw(|f| draw_enhanced(f, &mut self.app, &theme))?;
                 self.app.clear_dirty();
             }
 
@@ -246,7 +262,15 @@ impl TuiRunner {
                             self.app.cycle_focus();
                         }
                         KeyCode::Esc => {
-                            // Could be used to cancel thinking in future
+                            // Toggle help or close help if open
+                            if self.app.show_help {
+                                self.app.hide_help();
+                            } else {
+                                self.app.toggle_help();
+                            }
+                        }
+                        KeyCode::F(1) => {
+                            self.app.cycle_theme_sync();
                         }
                         _ => {}
                     }
@@ -345,7 +369,8 @@ impl TuiRunner {
         loop {
             // Only redraw when needed
             if self.app.needs_redraw {
-                terminal.draw(|f| ui::draw(f, &mut self.app))?;
+                let theme = self.app.theme_manager.get_current_theme();
+                terminal.draw(|f| draw_enhanced(f, &mut self.app, &theme))?;
                 self.app.clear_dirty();
             }
 
@@ -412,6 +437,9 @@ impl TuiRunner {
                         }
                         KeyCode::Tab => {
                             self.app.cycle_focus();
+                        }
+                        KeyCode::F(1) => {
+                            self.app.cycle_theme_sync();
                         }
                         _ => {}
                     }
