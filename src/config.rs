@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::mcp::McpConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub llm: LlmConfig,
@@ -15,6 +17,8 @@ pub struct Config {
     pub lsp: LspConfigWrapper,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 /// LSP configuration wrapper
@@ -444,6 +448,7 @@ impl Default for Config {
             tools: ToolConfig::default(),
             lsp: LspConfigWrapper::default(),
             cache: CacheConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }

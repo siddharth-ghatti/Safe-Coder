@@ -13,6 +13,7 @@ use crate::custom_commands::CustomCommandManager;
 use crate::git::GitManager;
 use crate::llm::{create_client, ContentBlock, LlmClient, Message, ToolDefinition};
 use crate::loop_detector::{DoomLoopAction, LoopDetector};
+use crate::mcp::McpManager;
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
@@ -105,6 +106,9 @@ pub struct Session {
 
     // Event channel for subagent streaming
     subagent_event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
+
+    // MCP server manager
+    mcp_manager: McpManager,
 }
 
 impl Session {
@@ -121,7 +125,7 @@ impl Session {
         let llm_client = create_client(&config).await?;
 
         // Initialize tool registry with subagent support
-        let tool_registry = if let Some(ref tx) = event_tx {
+        let mut tool_registry = if let Some(ref tx) = event_tx {
             ToolRegistry::new()
                 .with_subagent_support_and_events(config.clone(), project_path.clone(), tx.clone())
                 .await
@@ -130,6 +134,23 @@ impl Session {
                 .with_subagent_support(config.clone(), project_path.clone())
                 .await
         };
+
+        // Initialize MCP manager and register its tools
+        let mut mcp_manager = McpManager::new(config.mcp.clone());
+        mcp_manager.initialize(&project_path).await?;
+
+        // Register MCP tools with the tool registry
+        for tool in mcp_manager.get_tools() {
+            tool_registry.register(tool);
+        }
+
+        if mcp_manager.is_active() {
+            tracing::info!(
+                "MCP active: {} server(s), {} tool(s)",
+                mcp_manager.connected_count(),
+                mcp_manager.tool_count()
+            );
+        }
 
         // Initialize git for safety
         let git_manager = GitManager::new(project_path.clone());
@@ -164,6 +185,7 @@ impl Session {
             current_session_id: None,
             last_output: String::new(),
             subagent_event_tx: event_tx,
+            mcp_manager,
         })
     }
 

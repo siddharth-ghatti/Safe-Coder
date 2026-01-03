@@ -13,6 +13,7 @@ pub mod git;
 pub mod llm;
 pub mod loop_detector;
 pub mod lsp;
+pub mod mcp;
 pub mod memory;
 pub mod orchestrator;
 pub mod permissions;

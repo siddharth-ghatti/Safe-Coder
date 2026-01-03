@@ -10,6 +10,7 @@ mod git;
 mod llm;
 mod loop_detector;
 mod lsp;
+mod mcp;
 mod memory;
 mod orchestrator;
 mod permissions;
