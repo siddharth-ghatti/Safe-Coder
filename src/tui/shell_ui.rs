@@ -964,7 +964,7 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Sidebar sections: [TASK] [CONTEXT] [FILES] [PLAN] [LSP]
     let sections = Layout::vertical([
         Constraint::Length(4),               // TASK section
-        Constraint::Length(5),               // CONTEXT (token usage with dual progress bar)
+        Constraint::Length(3),               // CONTEXT (token usage)
         Constraint::Length(modified_height), // FILES (modified files)
         Constraint::Min(6),                  // PLAN (variable height)
         Constraint::Length(5),               // LSP connections
@@ -1060,75 +1060,7 @@ fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         )));
     }
 
-    // Progress bar if we have context window info
-    // Shows both current tokens and compressed tokens
-    if usage.context_window > 0 {
-        let bar_width = area.width.saturating_sub(4) as usize;
 
-        // Calculate current usage portion
-        let current_percent = usage.usage_percent();
-        let current_filled = ((current_percent / 100.0) * bar_width as f32) as usize;
-
-        // Calculate compressed portion (shown in different color)
-        let compressed_percent = usage.compressed_percent();
-        let compressed_filled = ((compressed_percent / 100.0) * bar_width as f32) as usize;
-
-        // Total filled cannot exceed bar width
-        let total_filled = (current_filled + compressed_filled).min(bar_width);
-        let empty = bar_width.saturating_sub(total_filled);
-
-        // Color for current tokens
-        let current_color = if current_percent > 80.0 {
-            ACCENT_RED
-        } else if current_percent > 60.0 {
-            ACCENT_YELLOW
-        } else {
-            ACCENT_GREEN
-        };
-
-        // Compressed tokens shown in magenta/purple
-        let compressed_color = ACCENT_MAGENTA;
-
-        // Build the progress bar with two colors
-        let mut spans = vec![Span::styled(" ", Style::default())];
-
-        if compressed_filled > 0 {
-            // Compressed tokens first (leftmost, as they represent "history")
-            spans.push(Span::styled(
-                "▓".repeat(compressed_filled.min(bar_width)),
-                Style::default().fg(compressed_color),
-            ));
-        }
-
-        if current_filled > 0 {
-            // Current tokens after compressed
-            spans.push(Span::styled(
-                "█".repeat(current_filled.min(bar_width.saturating_sub(compressed_filled))),
-                Style::default().fg(current_color),
-            ));
-        }
-
-        // Empty portion
-        if empty > 0 {
-            spans.push(Span::styled(
-                "░".repeat(empty),
-                Style::default().fg(TEXT_MUTED),
-            ));
-        }
-
-        lines.push(Line::from(spans));
-
-        // Legend line
-        if usage.compressed_tokens > 0 {
-            lines.push(Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled("█", Style::default().fg(current_color)),
-                Span::styled(" live ", Style::default().fg(TEXT_DIM)),
-                Span::styled("▓", Style::default().fg(compressed_color)),
-                Span::styled(" compressed", Style::default().fg(TEXT_DIM)),
-            ]));
-        }
-    }
 
     let para = Paragraph::new(lines);
     f.render_widget(para, area);
