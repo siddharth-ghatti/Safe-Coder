@@ -68,6 +68,10 @@ pub enum SessionEvent {
     TokenUsage {
         input_tokens: usize,
         output_tokens: usize,
+        /// Tokens read from provider cache (if available)
+        cache_read_tokens: Option<usize>,
+        /// Tokens written to provider cache (if available)
+        cache_creation_tokens: Option<usize>,
     },
     /// Context was compressed - tokens_compressed is the estimated tokens that were compressed
     ContextCompressed { tokens_compressed: usize },
@@ -550,10 +554,12 @@ impl Session {
             // Track stats and emit token usage event
             if let Some(usage) = &llm_response.usage {
                 self.stats.total_tokens_sent += usage.input_tokens;
-                // Emit token usage event for sidebar
+                // Emit token usage event for sidebar (including cache stats)
                 let _ = event_tx.send(SessionEvent::TokenUsage {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
+                    cache_read_tokens: usage.cache_read_tokens,
+                    cache_creation_tokens: usage.cache_creation_tokens,
                 });
             } else {
                 // Fall back to approximate token counting

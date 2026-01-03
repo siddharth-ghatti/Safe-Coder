@@ -1,5 +1,6 @@
 mod approval;
 mod auth;
+mod cache;
 mod checkpoint;
 mod commands;
 mod config;

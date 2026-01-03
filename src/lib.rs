@@ -3,6 +3,7 @@
 
 pub mod approval;
 pub mod auth;
+pub mod cache;
 pub mod checkpoint;
 pub mod commands;
 pub mod config;

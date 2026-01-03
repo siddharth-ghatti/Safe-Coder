@@ -13,6 +13,8 @@ pub struct Config {
     pub tools: ToolConfig,
     #[serde(default)]
     pub lsp: LspConfigWrapper,
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 /// LSP configuration wrapper
@@ -96,6 +98,59 @@ impl Default for ToolConfig {
             max_output_bytes: default_max_output(),
             warn_dangerous_commands: true,
             dangerous_patterns: default_dangerous_patterns(),
+        }
+    }
+}
+
+/// Configuration for LLM response caching
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheConfig {
+    /// Whether caching is enabled globally
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Use provider-native caching (Anthropic cache_control, OpenAI automatic)
+    #[serde(default = "default_true")]
+    pub provider_native: bool,
+    /// Use application-level response caching
+    #[serde(default = "default_true")]
+    pub application_cache: bool,
+    /// Maximum number of cached responses
+    #[serde(default = "default_cache_max_entries")]
+    pub max_entries: usize,
+    /// Time-to-live for cached responses in minutes
+    #[serde(default = "default_cache_ttl_minutes")]
+    pub ttl_minutes: u64,
+}
+
+fn default_cache_max_entries() -> usize {
+    100
+}
+
+fn default_cache_ttl_minutes() -> u64 {
+    30
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider_native: true,
+            application_cache: true,
+            max_entries: default_cache_max_entries(),
+            ttl_minutes: default_cache_ttl_minutes(),
+        }
+    }
+}
+
+impl CacheConfig {
+    /// Convert to the llm::cached::CacheConfig type
+    pub fn to_llm_cache_config(&self) -> crate::llm::cached::CacheConfig {
+        crate::llm::cached::CacheConfig {
+            enabled: self.enabled,
+            provider_native: self.provider_native,
+            application_cache: self.application_cache,
+            ttl: std::time::Duration::from_secs(self.ttl_minutes * 60),
+            max_entries: self.max_entries,
         }
     }
 }
@@ -388,6 +443,7 @@ impl Default for Config {
             orchestrator: OrchestratorConfig::default(),
             tools: ToolConfig::default(),
             lsp: LspConfigWrapper::default(),
+            cache: CacheConfig::default(),
         }
     }
 }

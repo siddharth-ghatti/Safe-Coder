@@ -97,6 +97,8 @@ enum AiUpdate {
         block_id: String,
         input_tokens: usize,
         output_tokens: usize,
+        cache_read_tokens: Option<usize>,
+        cache_creation_tokens: Option<usize>,
     },
     /// Context was compressed
     ContextCompressed {
@@ -610,10 +612,17 @@ impl ShellTuiRunner {
                     AiUpdate::TokenUsage {
                         input_tokens,
                         output_tokens,
+                        cache_read_tokens,
+                        cache_creation_tokens,
                         ..
                     } => {
-                        // Update token usage in sidebar
-                        self.app.update_tokens(input_tokens, output_tokens);
+                        // Update token usage in sidebar with cache stats
+                        self.app.update_tokens_with_cache(
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            cache_creation_tokens,
+                        );
                     }
                     AiUpdate::ContextCompressed {
                         tokens_compressed, ..
@@ -2083,10 +2092,14 @@ Keyboard:
                             SessionEvent::TokenUsage {
                                 input_tokens,
                                 output_tokens,
+                                cache_read_tokens,
+                                cache_creation_tokens,
                             } => AiUpdate::TokenUsage {
                                 block_id: block_id_inner.clone(),
                                 input_tokens,
                                 output_tokens,
+                                cache_read_tokens,
+                                cache_creation_tokens,
                             },
                             // Context compression updates
                             SessionEvent::ContextCompressed { tokens_compressed } => {

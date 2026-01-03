@@ -888,6 +888,19 @@ impl ShellTuiApp {
         self.needs_redraw = true;
     }
 
+    /// Update token usage in sidebar with cache statistics
+    pub fn update_tokens_with_cache(
+        &mut self,
+        input: usize,
+        output: usize,
+        cache_read: Option<usize>,
+        cache_write: Option<usize>,
+    ) {
+        self.sidebar
+            .update_tokens_with_cache(input, output, cache_read, cache_write);
+        self.needs_redraw = true;
+    }
+
     /// Sync LSP servers to sidebar
     pub fn sync_lsp_to_sidebar(&mut self) {
         for (lang, _cmd, running) in &self.lsp_servers {

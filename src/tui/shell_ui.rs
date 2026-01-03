@@ -1060,7 +1060,17 @@ fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         )));
     }
 
-
+    // Cache statistics - only show if there's cache activity
+    if usage.has_cache_activity() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", usage.format_cache_display()),
+            Style::default().fg(Color::Cyan),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", usage.format_savings()),
+            Style::default().fg(Color::Green),
+        )));
+    }
 
     let para = Paragraph::new(lines);
     f.render_widget(para, area);

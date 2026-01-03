@@ -7,6 +7,7 @@ use crate::auth::{StoredToken, TokenManager, TokenProvider};
 use crate::config::{Config, LlmConfig, LlmProvider};
 
 pub mod anthropic;
+pub mod cached;
 pub mod copilot;
 pub mod ollama;
 pub mod openai;
@@ -49,14 +50,56 @@ pub struct ToolDefinition {
 }
 
 /// Token usage information from LLM response
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: usize,
     pub output_tokens: usize,
+    /// Tokens written to provider cache (Anthropic cache_creation_input_tokens)
+    pub cache_creation_tokens: Option<usize>,
+    /// Tokens read from provider cache (Anthropic cache_read_input_tokens, OpenAI cached_tokens)
+    pub cache_read_tokens: Option<usize>,
+}
+
+impl TokenUsage {
+    /// Create a new TokenUsage with basic token counts
+    pub fn new(input_tokens: usize, output_tokens: usize) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+        }
+    }
+
+    /// Create a new TokenUsage with cache information
+    pub fn with_cache(
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_creation_tokens: Option<usize>,
+        cache_read_tokens: Option<usize>,
+    ) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        }
+    }
+
+    /// Check if this response had any cache hits
+    pub fn has_cache_hit(&self) -> bool {
+        self.cache_read_tokens.map(|t| t > 0).unwrap_or(false)
+    }
+
+    /// Get total tokens saved by caching (cache reads are 90% cheaper)
+    pub fn tokens_saved_by_cache(&self) -> usize {
+        // Cache reads cost 10% of normal, so we save 90% of those tokens
+        self.cache_read_tokens.unwrap_or(0)
+    }
 }
 
 /// Response from LLM including message and token usage
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmResponse {
     pub message: Message,
     pub usage: Option<TokenUsage>,
@@ -83,7 +126,32 @@ pub trait LlmClient: Send + Sync {
     }
 }
 
+/// Create an LLM client with optional caching wrapper
 pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
+    // Create the underlying provider client
+    let inner_client = create_provider_client(config).await?;
+
+    // Wrap with caching if enabled
+    if config.cache.enabled {
+        let cache_config = config.cache.to_llm_cache_config();
+        tracing::info!(
+            "Token caching enabled (app_cache={}, provider_native={}, ttl={}min)",
+            cache_config.application_cache,
+            cache_config.provider_native,
+            config.cache.ttl_minutes
+        );
+        Ok(Box::new(cached::CachingLlmClient::new(
+            inner_client,
+            config.llm.model.clone(),
+            cache_config,
+        )))
+    } else {
+        Ok(inner_client)
+    }
+}
+
+/// Create the underlying provider-specific LLM client (without caching)
+async fn create_provider_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
     match config.llm.provider {
         LlmProvider::Anthropic => {
             // Check if we have a stored token (could be OAuth or API key)

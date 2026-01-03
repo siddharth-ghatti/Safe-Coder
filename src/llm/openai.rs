@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, ToolDefinition};
+use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 pub struct OpenAiClient {
     api_key: String,
@@ -63,9 +63,28 @@ struct OpenAiToolFunction {
     parameters: serde_json::Value,
 }
 
+/// Prompt token details including cache information
+#[derive(Debug, Deserialize, Default)]
+struct PromptTokensDetails {
+    /// Number of tokens that were served from cache
+    #[serde(default)]
+    cached_tokens: usize,
+}
+
+/// Usage information from OpenAI response
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAiResponse {
     choices: Vec<OpenAiChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,12 +260,36 @@ impl LlmClient for OpenAiClient {
             });
         }
 
+        // Extract token usage including cache information
+        let usage = openai_response.usage.map(|u| {
+            let cached_tokens = u
+                .prompt_tokens_details
+                .map(|d| d.cached_tokens)
+                .unwrap_or(0);
+
+            // Log cache stats if present
+            if cached_tokens > 0 {
+                tracing::debug!("OpenAI cache hit: {} tokens read from cache", cached_tokens);
+            }
+
+            TokenUsage::with_cache(
+                u.prompt_tokens,
+                u.completion_tokens,
+                None, // OpenAI doesn't have cache creation tokens
+                if cached_tokens > 0 {
+                    Some(cached_tokens)
+                } else {
+                    None
+                },
+            )
+        });
+
         Ok(LlmResponse {
             message: Message {
                 role: Role::Assistant,
                 content: content_blocks,
             },
-            usage: None, // OpenAI client doesn't track usage yet
+            usage,
         })
     }
 }
