@@ -150,6 +150,69 @@ impl DirectoryCheckpointManager {
         })
     }
 
+    /// Check if the project is a git repository
+    fn is_git_repo(&self) -> bool {
+        self.project_path.join(".git").exists()
+    }
+
+    /// Ensure checkpoint directory is in .gitignore (if this is a git project)
+    async fn ensure_gitignore(&self) -> Result<()> {
+        if !self.is_git_repo() {
+            return Ok(());
+        }
+
+        let gitignore_path = self.project_path.join(".gitignore");
+        let checkpoint_entry = ".safe-coder-checkpoints/";
+
+        // Read existing .gitignore or create empty content
+        let existing_content = if gitignore_path.exists() {
+            tokio::fs::read_to_string(&gitignore_path)
+                .await
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Check if checkpoint dir is already ignored
+        let already_ignored = existing_content.lines().any(|line| {
+            let trimmed = line.trim();
+            trimmed == checkpoint_entry
+                || trimmed == ".safe-coder-checkpoints"
+                || trimmed == "/.safe-coder-checkpoints/"
+                || trimmed == "/.safe-coder-checkpoints"
+        });
+
+        if already_ignored {
+            return Ok(());
+        }
+
+        // Add checkpoint directory to .gitignore
+        let new_content = if existing_content.is_empty() {
+            format!(
+                "# Safe-Coder checkpoints (auto-generated)\n{}\n",
+                checkpoint_entry
+            )
+        } else if existing_content.ends_with('\n') {
+            format!(
+                "{}\n# Safe-Coder checkpoints (auto-generated)\n{}\n",
+                existing_content, checkpoint_entry
+            )
+        } else {
+            format!(
+                "{}\n\n# Safe-Coder checkpoints (auto-generated)\n{}\n",
+                existing_content, checkpoint_entry
+            )
+        };
+
+        tokio::fs::write(&gitignore_path, new_content)
+            .await
+            .context("Failed to update .gitignore")?;
+
+        tracing::info!("Added {} to .gitignore", checkpoint_entry);
+
+        Ok(())
+    }
+
     /// Check if checkpoints are enabled
     pub fn is_enabled(&self) -> bool {
         self.config.enabled
@@ -159,6 +222,11 @@ impl DirectoryCheckpointManager {
     pub async fn create_checkpoint(&mut self, label: &str) -> Result<String> {
         if !self.config.enabled {
             return Ok(String::new());
+        }
+
+        // Ensure checkpoint directory is in .gitignore (for git projects)
+        if let Err(e) = self.ensure_gitignore().await {
+            tracing::warn!("Failed to update .gitignore: {}", e);
         }
 
         // Generate checkpoint ID
@@ -503,6 +571,7 @@ impl DirectoryCheckpointManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CheckpointConfig;
     use tempfile::TempDir;
     use tokio::fs;
     use tokio::process::Command;
@@ -563,5 +632,172 @@ mod tests {
         // Check content is restored to original
         let content = fs::read_to_string(&test_file).await.unwrap();
         assert_eq!(content, "original content");
+    }
+
+    #[tokio::test]
+    async fn test_directory_checkpoint_creates_gitignore_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let sandbox = temp_dir.path().to_path_buf();
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
+
+        // Create a test file
+        let test_file = sandbox.join("test.txt");
+        fs::write(&test_file, "test content").await.unwrap();
+
+        // Create checkpoint manager
+        let config = CheckpointConfig::default();
+        let mut manager = DirectoryCheckpointManager::new(sandbox.clone(), config).unwrap();
+
+        // Create a checkpoint (this should add to .gitignore)
+        manager.create_checkpoint("test checkpoint").await.unwrap();
+
+        // Verify .gitignore was created and contains the checkpoint dir
+        let gitignore_path = sandbox.join(".gitignore");
+        assert!(gitignore_path.exists(), ".gitignore should be created");
+
+        let gitignore_content = fs::read_to_string(&gitignore_path).await.unwrap();
+        assert!(
+            gitignore_content.contains(".safe-coder-checkpoints"),
+            ".gitignore should contain checkpoint directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_directory_checkpoint_preserves_existing_gitignore() {
+        let temp_dir = TempDir::new().unwrap();
+        let sandbox = temp_dir.path().to_path_buf();
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
+
+        // Create existing .gitignore with some content
+        let gitignore_path = sandbox.join(".gitignore");
+        fs::write(&gitignore_path, "node_modules/\n*.log\n")
+            .await
+            .unwrap();
+
+        // Create a test file
+        let test_file = sandbox.join("test.txt");
+        fs::write(&test_file, "test content").await.unwrap();
+
+        // Create checkpoint manager and checkpoint
+        let config = CheckpointConfig::default();
+        let mut manager = DirectoryCheckpointManager::new(sandbox.clone(), config).unwrap();
+        manager.create_checkpoint("test checkpoint").await.unwrap();
+
+        // Verify existing content is preserved
+        let gitignore_content = fs::read_to_string(&gitignore_path).await.unwrap();
+        assert!(
+            gitignore_content.contains("node_modules/"),
+            "Existing entries should be preserved"
+        );
+        assert!(
+            gitignore_content.contains("*.log"),
+            "Existing entries should be preserved"
+        );
+        assert!(
+            gitignore_content.contains(".safe-coder-checkpoints"),
+            "Checkpoint dir should be added"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_directory_checkpoint_does_not_duplicate_gitignore_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let sandbox = temp_dir.path().to_path_buf();
+
+        // Initialize git repo
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&sandbox)
+            .output()
+            .await
+            .unwrap();
+
+        // Create .gitignore that already has the entry
+        let gitignore_path = sandbox.join(".gitignore");
+        fs::write(&gitignore_path, ".safe-coder-checkpoints/\n")
+            .await
+            .unwrap();
+
+        // Create a test file
+        let test_file = sandbox.join("test.txt");
+        fs::write(&test_file, "test content").await.unwrap();
+
+        // Create checkpoint manager and checkpoint
+        let config = CheckpointConfig::default();
+        let mut manager = DirectoryCheckpointManager::new(sandbox.clone(), config).unwrap();
+        manager.create_checkpoint("test checkpoint").await.unwrap();
+
+        // Verify no duplicate entries
+        let gitignore_content = fs::read_to_string(&gitignore_path).await.unwrap();
+        let count = gitignore_content.matches(".safe-coder-checkpoints").count();
+        assert_eq!(count, 1, "Should not duplicate gitignore entry");
+    }
+
+    #[tokio::test]
+    async fn test_directory_checkpoint_no_gitignore_for_non_git_project() {
+        let temp_dir = TempDir::new().unwrap();
+        let sandbox = temp_dir.path().to_path_buf();
+
+        // Do NOT initialize git repo
+
+        // Create a test file
+        let test_file = sandbox.join("test.txt");
+        fs::write(&test_file, "test content").await.unwrap();
+
+        // Create checkpoint manager and checkpoint
+        let config = CheckpointConfig::default();
+        let mut manager = DirectoryCheckpointManager::new(sandbox.clone(), config).unwrap();
+        manager.create_checkpoint("test checkpoint").await.unwrap();
+
+        // Verify .gitignore was NOT created (not a git project)
+        let gitignore_path = sandbox.join(".gitignore");
+        assert!(
+            !gitignore_path.exists(),
+            ".gitignore should not be created for non-git projects"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_directory_checkpoint_create_and_restore() {
+        let temp_dir = TempDir::new().unwrap();
+        let sandbox = temp_dir.path().to_path_buf();
+
+        // Create test files
+        let test_file = sandbox.join("test.txt");
+        fs::write(&test_file, "original content").await.unwrap();
+
+        // Create checkpoint manager
+        let config = CheckpointConfig::default();
+        let mut manager = DirectoryCheckpointManager::new(sandbox.clone(), config).unwrap();
+
+        // Create a checkpoint
+        let checkpoint_id = manager.create_checkpoint("before changes").await.unwrap();
+        assert!(!checkpoint_id.is_empty());
+
+        // Modify the file
+        fs::write(&test_file, "modified content").await.unwrap();
+        let modified = fs::read_to_string(&test_file).await.unwrap();
+        assert_eq!(modified, "modified content");
+
+        // Restore the checkpoint
+        manager.restore_checkpoint(&checkpoint_id).await.unwrap();
+
+        // Verify content is restored
+        let restored = fs::read_to_string(&test_file).await.unwrap();
+        assert_eq!(restored, "original content");
     }
 }
