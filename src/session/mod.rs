@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::approval::{ApprovalMode, ExecutionMode, ExecutionPlan, PlannedTool};
-use crate::checkpoint::CheckpointManager;
+use crate::checkpoint::{CheckpointManager, DirectoryCheckpointManager};
 use crate::config::Config;
 use crate::context::ContextManager;
 use crate::custom_commands::CustomCommandManager;
@@ -99,6 +99,7 @@ pub struct Session {
     stats: SessionStats,
     memory: MemoryManager,
     checkpoints: CheckpointManager,
+    dir_checkpoints: DirectoryCheckpointManager,
     custom_commands: CustomCommandManager,
     session_start: chrono::DateTime<Utc>,
     current_session_id: Option<String>,
@@ -160,6 +161,8 @@ impl Session {
         let memory = MemoryManager::new(project_path.clone());
         let custom_commands = CustomCommandManager::new(project_path.clone()).await?;
         let checkpoints = CheckpointManager::new(project_path.clone());
+        let dir_checkpoints =
+            DirectoryCheckpointManager::new(project_path.clone(), config.checkpoint.clone())?;
 
         Ok(Self {
             config,
@@ -180,6 +183,7 @@ impl Session {
             stats: SessionStats::new(),
             memory,
             checkpoints,
+            dir_checkpoints,
             custom_commands,
             session_start: Utc::now(),
             current_session_id: None,
@@ -252,6 +256,14 @@ impl Session {
     }
 
     pub async fn send_message(&mut self, user_message: String) -> Result<String> {
+        // Create checkpoint before processing user task (git-agnostic safety)
+        if self.dir_checkpoints.is_enabled() {
+            let label = user_message.chars().take(100).collect::<String>();
+            if let Err(e) = self.dir_checkpoints.create_checkpoint(&label).await {
+                tracing::warn!("Failed to create checkpoint: {}", e);
+            }
+        }
+
         // Track stats
         self.stats.total_messages += 1;
 
@@ -506,6 +518,18 @@ impl Session {
         user_message: String,
         event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Result<String> {
+        // Create checkpoint before processing user task (git-agnostic safety)
+        if self.dir_checkpoints.is_enabled() {
+            let label = user_message.chars().take(100).collect::<String>();
+            if let Err(e) = self.dir_checkpoints.create_checkpoint(&label).await {
+                tracing::warn!("Failed to create checkpoint: {}", e);
+            } else {
+                let _ = event_tx.send(SessionEvent::TextChunk(
+                    "📦 Checkpoint created\n".to_string(),
+                ));
+            }
+        }
+
         // Track stats
         self.stats.total_messages += 1;
 
@@ -1240,6 +1264,32 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    // ========== Directory Checkpoint Management ==========
+
+    /// List all directory checkpoints
+    pub async fn list_dir_checkpoints(&self) -> Result<String> {
+        use crate::checkpoint::DirectoryCheckpointManager;
+        let checkpoints = self.dir_checkpoints.list_checkpoints().await?;
+        Ok(DirectoryCheckpointManager::format_checkpoint_list(
+            &checkpoints,
+        ))
+    }
+
+    /// Restore to a specific directory checkpoint
+    pub async fn restore_dir_checkpoint(&self, checkpoint_id: &str) -> Result<()> {
+        self.dir_checkpoints.restore_checkpoint(checkpoint_id).await
+    }
+
+    /// Restore to the latest directory checkpoint
+    pub async fn restore_latest_checkpoint(&self) -> Result<()> {
+        self.dir_checkpoints.restore_latest().await
+    }
+
+    /// Delete a specific directory checkpoint
+    pub async fn delete_dir_checkpoint(&mut self, checkpoint_id: &str) -> Result<()> {
+        self.dir_checkpoints.delete_checkpoint(checkpoint_id).await
     }
 
     /// Generate project summary

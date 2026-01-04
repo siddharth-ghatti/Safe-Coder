@@ -19,6 +19,8 @@ pub struct Config {
     pub cache: CacheConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub checkpoint: CheckpointConfig,
 }
 
 /// LSP configuration wrapper
@@ -449,6 +451,7 @@ impl Default for Config {
             lsp: LspConfigWrapper::default(),
             cache: CacheConfig::default(),
             mcp: McpConfig::default(),
+            checkpoint: CheckpointConfig::default(),
         }
     }
 }
@@ -457,6 +460,53 @@ impl Default for GitConfig {
     fn default() -> Self {
         Self {
             auto_commit: true, // Enabled by default
+        }
+    }
+}
+
+/// Configuration for directory-based checkpoints (git-agnostic)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CheckpointConfig {
+    /// Enable directory-based checkpoints before each task
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Maximum number of checkpoints to keep (oldest deleted first)
+    #[serde(default = "default_max_checkpoints")]
+    pub max_checkpoints: usize,
+    /// Custom storage path (default: .safe-coder-checkpoints in project dir)
+    #[serde(default)]
+    pub storage_path: Option<String>,
+    /// Patterns to ignore when creating checkpoints (gitignore-style)
+    #[serde(default = "default_ignore_patterns_checkpoint")]
+    pub ignore_patterns: Vec<String>,
+}
+
+fn default_max_checkpoints() -> usize {
+    10
+}
+
+fn default_ignore_patterns_checkpoint() -> Vec<String> {
+    vec![
+        "node_modules/".to_string(),
+        "target/".to_string(),
+        ".git/".to_string(),
+        "__pycache__/".to_string(),
+        ".venv/".to_string(),
+        "venv/".to_string(),
+        ".safe-coder-checkpoints/".to_string(),
+        "*.pyc".to_string(),
+        ".DS_Store".to_string(),
+        "Thumbs.db".to_string(),
+    ]
+}
+
+impl Default for CheckpointConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_checkpoints: default_max_checkpoints(),
+            storage_path: None,
+            ignore_patterns: default_ignore_patterns_checkpoint(),
         }
     }
 }
