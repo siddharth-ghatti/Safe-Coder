@@ -11,6 +11,7 @@ pub mod cached;
 pub mod copilot;
 pub mod ollama;
 pub mod openai;
+pub mod openrouter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -250,6 +251,18 @@ async fn create_provider_client(config: &crate::config::Config) -> Result<Box<dy
 
             Ok(Box::new(copilot::CopilotClient::new(
                 copilot_token,
+                config.llm.model.clone(),
+                config.llm.max_tokens,
+            )))
+        }
+        LlmProvider::OpenRouter => {
+            let api_key = config.get_auth_token().context(
+                "OpenRouter API key not set. Set OPENROUTER_API_KEY or configure API key",
+            )?;
+
+            tracing::info!("🌐 Using OpenRouter (75+ models available)");
+            Ok(Box::new(openrouter::OpenRouterClient::new(
+                api_key,
                 config.llm.model.clone(),
                 config.llm.max_tokens,
             )))

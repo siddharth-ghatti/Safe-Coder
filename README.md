@@ -1,10 +1,76 @@
 # Safe Coder
 
-A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and now includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
+A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
 
-![Safe Coder CLI](assets/cli-screenshot.png)
+<p align="center">
+  <img src="assets/safe-coder-demo.gif" alt="Safe Coder Demo" width="800">
+</p>
+
+## Why Safe Coder?
+
+| Feature | Safe Coder | Claude Code | Cursor | Aider |
+|---------|------------|-------------|--------|-------|
+| **Multi-Agent Orchestration** | ✅ Claude + Gemini + Copilot | ❌ | ❌ | ❌ |
+| **Subagent System** | ✅ 5 specialized types | ❌ | ❌ | ❌ |
+| **75+ Model Support** | ✅ via OpenRouter | ❌ | Limited | ✅ |
+| **LSP Integration** | ✅ Auto-download | ❌ | Built-in | ❌ |
+| **Git-Agnostic Checkpoints** | ✅ Works anywhere | ❌ | ❌ | ❌ |
+| **Undo/Redo** | ✅ `/undo` `/redo` | ✅ | ❌ | ❌ |
+| **Local AI (Ollama)** | ✅ 100% Private | ❌ | ❌ | ✅ |
+| **Native Binary** | ✅ Rust (fast) | Node.js | Electron | Python |
+
+<p align="center">
+  <img src="assets/orchestration-demo.gif" alt="Multi-Agent Orchestration" width="800">
+</p>
+
+## Quick Start (30 seconds)
+
+```bash
+# Install (macOS/Linux)
+curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
+chmod +x safe-coder-* && sudo mv safe-coder-* /usr/local/bin/safe-coder
+
+# Set your API key (choose one)
+export OPENROUTER_API_KEY="sk-or-v1-..."  # 75+ models
+# OR
+export ANTHROPIC_API_KEY="sk-ant-..."     # Claude directly
+
+# Start coding
+cd your-project
+safe-coder chat
+```
+
+**Key Commands:**
+```bash
+@ How do I add authentication?     # Ask AI
+@file.rs                           # Add file to context
+!cargo test                        # Run shell command
+/undo                              # Undo last changes
+/redo                              # Redo changes
+/compact                           # Free up context tokens
+@orchestrate add auth and tests    # Multi-agent task
+```
 
 ## 🌟 What's New
+
+### 🌐 **OpenRouter + 75+ Models (v2.5)**
+- **One API, 75+ models** - Access Claude, GPT-4, Gemini, Llama, Mistral, DeepSeek, and more through a single API
+- **Automatic fallback** - If your preferred model is unavailable, OpenRouter routes to a similar one
+- **Cost tracking** - See per-model pricing in the OpenRouter dashboard
+- **Just set `OPENROUTER_API_KEY`** - Works out of the box
+
+### ⚡ **New Commands (v2.5)**
+- **`/undo`** - Instantly undo your last file changes (git-based)
+- **`/redo`** - Redo previously undone changes
+- **`/compact`** - Manually trigger context compaction to free up tokens
+- **`/sessions`** - Quick alias for `/chat list` to switch sessions
+- **`/agent`** - Alias for `/mode` to switch between plan/build modes
+
+### 🛡️ **Git-Agnostic Checkpoints (v2.5)**
+- **Works without git** - Create checkpoints in any directory
+- **Automatic gitignore** - Checkpoint folders auto-added to .gitignore for git projects
+- **Fast restore** - Instantly rollback to any previous checkpoint
+- **Configurable limits** - Control max checkpoints and ignore patterns
 
 ### 🤖 **Subagent System (v2.4)**
 - **Specialized AI agents** - Deploy focused agents for specific tasks (analysis, testing, refactoring, documentation)
@@ -291,7 +357,8 @@ For complex tasks, Safe Coder can still orchestrate multiple AI agents:
 1. **Git**: Required for change tracking and safety (usually pre-installed)
 
 2. **API Key or Local Setup**: Choose one option:
-   - **Anthropic API key** for Claude models
+   - **OpenRouter API key** for 75+ models (recommended - see [OpenRouter Setup](#openrouter-75-models))
+   - **Anthropic API key** for Claude models directly
    - **OpenAI API key** for GPT models  
    - **Ollama** for local, private AI (see [Local AI Setup](#local-ai-with-ollama))
 
@@ -511,6 +578,47 @@ safe-coder chat --path /your/project
 - `qwen2.5-coder:32b-instruct` - Best quality (19GB, ~32GB RAM)
 
 See the [Ollama Setup Guide](OLLAMA_SETUP.md) for detailed instructions.
+
+### OpenRouter (75+ Models)
+
+Access 75+ AI models through a single API key:
+
+```bash
+# 1. Get your API key from https://openrouter.ai/keys
+
+# 2. Set the environment variable
+export OPENROUTER_API_KEY="sk-or-v1-..."
+
+# 3. Start coding (auto-detects OpenRouter)
+safe-coder chat --path /your/project
+
+# Or explicitly configure
+safe-coder config set llm.provider openrouter
+safe-coder config set llm.model "anthropic/claude-3.5-sonnet"
+```
+
+**Popular Models Available:**
+
+| Model | ID | Best For |
+|-------|-----|----------|
+| Claude 3.5 Sonnet | `anthropic/claude-3.5-sonnet` | General coding (default) |
+| Claude 3 Opus | `anthropic/claude-3-opus` | Complex reasoning |
+| GPT-4o | `openai/gpt-4o` | Fast, capable |
+| GPT-4 Turbo | `openai/gpt-4-turbo` | Long context |
+| Gemini Pro 1.5 | `google/gemini-pro-1.5` | Multi-modal |
+| Llama 3.1 405B | `meta-llama/llama-3.1-405b-instruct` | Open source, powerful |
+| Llama 3.1 70B | `meta-llama/llama-3.1-70b-instruct` | Open source, fast |
+| DeepSeek Coder | `deepseek/deepseek-coder` | Code-specialized |
+| Mixtral 8x22B | `mistralai/mixtral-8x22b-instruct` | Fast, efficient |
+| Qwen 2 72B | `qwen/qwen-2-72b-instruct` | Multilingual |
+
+**Benefits:**
+- 🎯 **One API key** for all models - no need for separate accounts
+- 💰 **Pay-per-use** - only pay for what you use
+- 🔄 **Automatic fallback** - if a model is down, routes to a similar one
+- 📊 **Usage dashboard** - track costs and usage at openrouter.ai
+
+See the full model list at [openrouter.ai/models](https://openrouter.ai/models).
 
 ## Example Sessions
 
@@ -803,10 +911,16 @@ The configuration is stored in `~/.config/safe-coder/config.toml`:
 
 ```toml
 [llm]
-provider = "anthropic"
-api_key = "your-api-key-here"
-model = "claude-sonnet-4-20250514"
+# Provider options: "anthropic", "openai", "openrouter", "ollama", "github-copilot"
+provider = "openrouter"
+api_key = "sk-or-v1-..."  # Or set OPENROUTER_API_KEY env var
+model = "anthropic/claude-3.5-sonnet"  # Any OpenRouter model ID
 max_tokens = 8192
+
+# Alternative: Direct Anthropic
+# provider = "anthropic"
+# api_key = "sk-ant-..."
+# model = "claude-sonnet-4-20250514"
 
 [git]
 auto_commit = true

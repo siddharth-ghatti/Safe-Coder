@@ -335,6 +335,8 @@ pub enum LlmProvider {
     Ollama,
     #[serde(rename = "github-copilot")]
     GitHubCopilot,
+    #[serde(rename = "openrouter")]
+    OpenRouter,
 }
 
 impl Config {
@@ -425,6 +427,13 @@ impl Default for Config {
             )
         } else if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             (LlmProvider::OpenAI, Some(key), "gpt-4o".to_string())
+        } else if let Ok(key) = std::env::var("OPENROUTER_API_KEY") {
+            // OpenRouter with Claude as default model
+            (
+                LlmProvider::OpenRouter,
+                Some(key),
+                "anthropic/claude-3.5-sonnet".to_string(),
+            )
         } else if let Ok(key) = std::env::var("GITHUB_COPILOT_TOKEN") {
             (LlmProvider::GitHubCopilot, Some(key), "gpt-4".to_string())
         } else {
