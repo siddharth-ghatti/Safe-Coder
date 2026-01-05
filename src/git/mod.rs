@@ -4,11 +4,161 @@ use tokio::process::Command;
 
 pub struct GitManager {
     repo_path: std::path::PathBuf,
+    /// Stack of commit hashes for redo functionality
+    redo_stack: Vec<String>,
 }
 
 impl GitManager {
     pub fn new(repo_path: std::path::PathBuf) -> Self {
-        Self { repo_path }
+        Self {
+            repo_path,
+            redo_stack: Vec::new(),
+        }
+    }
+
+    /// Check if this is a git repository
+    pub fn is_git_repo(&self) -> bool {
+        self.repo_path.join(".git").exists()
+    }
+
+    /// Get current HEAD commit hash
+    pub async fn get_head_commit(&self) -> Result<String> {
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .context("Failed to get HEAD commit")?;
+
+        if !output.status.success() {
+            anyhow::bail!("Not a git repository or no commits yet");
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Undo the last change by resetting to HEAD~1
+    /// Returns the files that were restored and saves current HEAD for redo
+    pub async fn undo(&mut self) -> Result<UndoResult> {
+        if !self.is_git_repo() {
+            anyhow::bail!("Not a git repository. Use /checkpoint restore instead.");
+        }
+
+        // Get current HEAD before undo (for redo)
+        let current_head = self.get_head_commit().await?;
+
+        // Get list of files that will be affected
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "HEAD~1", "HEAD"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .context("Failed to get changed files")?;
+
+        let files_changed: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+
+        if files_changed.is_empty() {
+            // Check if there's even a previous commit
+            let log_output = Command::new("git")
+                .args(["log", "--oneline", "-2"])
+                .current_dir(&self.repo_path)
+                .output()
+                .await?;
+
+            let log_str = String::from_utf8_lossy(&log_output.stdout);
+            let log_lines: Vec<_> = log_str.lines().collect();
+
+            if log_lines.len() < 2 {
+                anyhow::bail!("No previous commit to undo to");
+            }
+        }
+
+        // Reset to previous commit
+        let reset_output = Command::new("git")
+            .args(["reset", "--hard", "HEAD~1"])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .context("Failed to reset to previous commit")?;
+
+        if !reset_output.status.success() {
+            anyhow::bail!(
+                "Failed to undo: {}",
+                String::from_utf8_lossy(&reset_output.stderr)
+            );
+        }
+
+        // Save the undone commit for redo
+        self.redo_stack.push(current_head.clone());
+
+        tracing::info!("Undo: reset to HEAD~1, saved {} for redo", current_head);
+
+        Ok(UndoResult {
+            files_restored: files_changed,
+            commit_undone: current_head,
+        })
+    }
+
+    /// Redo a previously undone change
+    pub async fn redo(&mut self) -> Result<RedoResult> {
+        if !self.is_git_repo() {
+            anyhow::bail!("Not a git repository");
+        }
+
+        let commit_to_restore = self
+            .redo_stack
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("Nothing to redo"))?;
+
+        // Get files that will change
+        let output = Command::new("git")
+            .args(["diff", "--name-only", "HEAD", &commit_to_restore])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .context("Failed to get changed files")?;
+
+        let files_changed: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Reset to the saved commit
+        let reset_output = Command::new("git")
+            .args(["reset", "--hard", &commit_to_restore])
+            .current_dir(&self.repo_path)
+            .output()
+            .await
+            .context("Failed to reset to saved commit")?;
+
+        if !reset_output.status.success() {
+            // Put it back on the stack since we failed
+            self.redo_stack.push(commit_to_restore);
+            anyhow::bail!(
+                "Failed to redo: {}",
+                String::from_utf8_lossy(&reset_output.stderr)
+            );
+        }
+
+        tracing::info!("Redo: restored to commit {}", commit_to_restore);
+
+        Ok(RedoResult {
+            files_restored: files_changed,
+            commit_restored: commit_to_restore,
+        })
+    }
+
+    /// Check if redo is available
+    pub fn can_redo(&self) -> bool {
+        !self.redo_stack.is_empty()
+    }
+
+    /// Clear redo stack (called when new changes are made)
+    pub fn clear_redo_stack(&mut self) {
+        self.redo_stack.clear();
     }
 
     /// Initialize git repo if not already present
@@ -207,5 +357,72 @@ impl ChangeSummary {
                 .collect::<Vec<_>>()
                 .join("\n")
         )
+    }
+}
+
+/// Result of an undo operation
+#[derive(Debug, Clone)]
+pub struct UndoResult {
+    pub files_restored: Vec<String>,
+    pub commit_undone: String,
+}
+
+impl UndoResult {
+    pub fn format(&self) -> String {
+        let mut output = String::new();
+        output.push_str("↩️  Undo successful\n");
+
+        if self.files_restored.is_empty() {
+            output.push_str("No files were changed.\n");
+        } else {
+            output.push_str(&format!(
+                "Restored {} file(s):\n",
+                self.files_restored.len()
+            ));
+            for file in &self.files_restored {
+                output.push_str(&format!("  • {}\n", file));
+            }
+        }
+
+        output.push_str(&format!(
+            "\nUndone commit: {}",
+            &self.commit_undone[..8.min(self.commit_undone.len())]
+        ));
+        output.push_str("\nUse /redo to restore these changes.");
+
+        output
+    }
+}
+
+/// Result of a redo operation
+#[derive(Debug, Clone)]
+pub struct RedoResult {
+    pub files_restored: Vec<String>,
+    pub commit_restored: String,
+}
+
+impl RedoResult {
+    pub fn format(&self) -> String {
+        let mut output = String::new();
+        output.push_str("↪️  Redo successful\n");
+
+        if self.files_restored.is_empty() {
+            output.push_str("No files were changed.\n");
+        } else {
+            output.push_str(&format!(
+                "Restored {} file(s):\n",
+                self.files_restored.len()
+            ));
+            for file in &self.files_restored {
+                output.push_str(&format!("  • {}\n", file));
+            }
+        }
+
+        output.push_str(&format!(
+            "\nRestored to commit: {}",
+            &self.commit_restored[..8.min(self.commit_restored.len())]
+        ));
+
+        output
     }
 }

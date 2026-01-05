@@ -1420,4 +1420,61 @@ impl Session {
             self.project_path.display()
         ))
     }
+
+    // ========== Undo/Redo Support ==========
+
+    /// Undo the last change using git
+    pub async fn undo(&mut self) -> Result<String> {
+        let result = self.git_manager.undo().await?;
+        Ok(result.format())
+    }
+
+    /// Redo a previously undone change
+    pub async fn redo(&mut self) -> Result<String> {
+        let result = self.git_manager.redo().await?;
+        Ok(result.format())
+    }
+
+    /// Check if redo is available
+    pub fn can_redo(&self) -> bool {
+        self.git_manager.can_redo()
+    }
+
+    // ========== Manual Context Compaction ==========
+
+    /// Manually trigger context compaction
+    pub async fn compact_context(&mut self) -> Result<String> {
+        let stats_before = self.context_manager.analyze(&self.messages);
+
+        // Force compaction even if not at threshold
+        let (compacted, summary) = self
+            .context_manager
+            .compact(std::mem::take(&mut self.messages));
+
+        let stats_after = self.context_manager.analyze(&compacted);
+        let tokens_saved = stats_before
+            .estimated_tokens
+            .saturating_sub(stats_after.estimated_tokens);
+
+        self.messages = compacted;
+
+        let mut output = String::new();
+        output.push_str("📦 Context Compacted\n");
+        output.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+        output.push_str(&format!(
+            "Before: ~{} tokens ({} messages)\n",
+            stats_before.estimated_tokens, stats_before.message_count
+        ));
+        output.push_str(&format!(
+            "After:  ~{} tokens ({} messages)\n",
+            stats_after.estimated_tokens, stats_after.message_count
+        ));
+        output.push_str(&format!("Saved:  ~{} tokens\n", tokens_saved));
+
+        if !summary.is_empty() {
+            output.push_str(&format!("\nSummary: {}\n", summary));
+        }
+
+        Ok(output)
+    }
 }

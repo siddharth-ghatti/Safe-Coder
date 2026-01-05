@@ -26,6 +26,12 @@ pub enum SlashCommand {
     Init,
     Commands,
     Checkpoint(CheckpointSubcommand),
+    /// Undo the last change (git-based)
+    Undo,
+    /// Redo a previously undone change
+    Redo,
+    /// Manually compact context to save tokens
+    Compact,
     Unknown(String),
 }
 
@@ -82,7 +88,8 @@ impl SlashCommand {
             "model" => SlashCommand::Model(args.get(0).map(|s| s.to_string())),
             "restore" => SlashCommand::Restore(args.get(0).map(|s| s.to_string())),
             "approval-mode" => SlashCommand::ApprovalMode(args.get(0).map(|s| s.to_string())),
-            "mode" => SlashCommand::ExecutionMode(args.get(0).map(|s| s.to_string())),
+            // /mode and /agent are aliases for execution mode
+            "mode" | "agent" => SlashCommand::ExecutionMode(args.get(0).map(|s| s.to_string())),
             "summary" => SlashCommand::Summary,
             "compress" => SlashCommand::Compress,
             "settings" => SlashCommand::Settings,
@@ -93,6 +100,13 @@ impl SlashCommand {
             "init" => SlashCommand::Init,
             "commands" => SlashCommand::Commands,
             "checkpoint" | "cp" => Self::parse_checkpoint_subcommand(args),
+            // Undo/Redo commands
+            "undo" => SlashCommand::Undo,
+            "redo" => SlashCommand::Redo,
+            // Manual context compaction
+            "compact" => SlashCommand::Compact,
+            // /sessions is an alias for /chat list
+            "sessions" => SlashCommand::Chat(ChatSubcommand::List),
             _ => SlashCommand::Unknown(input.to_string()),
         }
     }
@@ -311,6 +325,18 @@ pub async fn execute_slash_command(
         }
         SlashCommand::Commands => Ok(CommandResult::ShowCommandsModal),
         SlashCommand::Checkpoint(subcmd) => execute_checkpoint_command(subcmd, session).await,
+        SlashCommand::Undo => {
+            let result = session.undo().await?;
+            Ok(CommandResult::Message(result))
+        }
+        SlashCommand::Redo => {
+            let result = session.redo().await?;
+            Ok(CommandResult::Message(result))
+        }
+        SlashCommand::Compact => {
+            let result = session.compact_context().await?;
+            Ok(CommandResult::Message(result))
+        }
         SlashCommand::Unknown(cmd) => Ok(CommandResult::Message(format!(
             "Unknown command: /{}. Type /help for available commands.",
             cmd
@@ -437,14 +463,21 @@ SESSION MANAGEMENT
   /chat resume <id>   Resume a saved conversation
   /chat list          List all saved conversations
   /chat delete <id>   Delete a saved conversation
+  /sessions           List all saved sessions (alias for /chat list)
+
+UNDO/REDO (git-based)
+  /undo               Undo the last change (resets to previous commit)
+  /redo               Redo a previously undone change
 
 MEMORY & CONTEXT
   /memory add <text>  Add instruction to memory
   /memory show        Show current memory/instructions
   /memory refresh     Reload from SAFE_CODER.md
+  /compact            Manually compact context to save tokens
 
 CONFIGURATION
   /mode [plan|act]    Set execution mode (plan/act)
+  /agent [plan|act]   Alias for /mode
   /model [name]       Switch model or show current
   /approval-mode [mode]  Set approval mode (plan/default/auto-edit/yolo)
   /settings           Show current settings
@@ -529,16 +562,25 @@ pub fn get_commands_text() -> String {
   /chat list            List all saved conversations
   /chat delete <id>     Delete a saved conversation
   /chat share <id>      Generate a shareable link for a conversation
+  /sessions             List all saved sessions (alias for /chat list)
+
+↩️  UNDO/REDO (Git-Based)
+  /undo                 Undo the last change (resets to previous git commit)
+  /redo                 Redo a previously undone change
+                        Note: Works with git auto-commit. Use /checkpoint for non-git projects.
 
 🧠 MEMORY & CONTEXT
   /memory add <text>    Add custom instructions to AI memory
   /memory show          Display current memory and instructions
   /memory refresh       Reload instructions from SAFE_CODER.md
+  /compact              Manually compact context to save tokens
+                        (Summarizes older messages to reduce token usage)
 
 ⚙️  CONFIGURATION & SETTINGS
   /mode [plan|act]      Set execution mode:
                         • plan - Deep planning with user approval
                         • act  - Auto-execution with brief summaries
+  /agent [plan|act]     Alias for /mode
   /model [name]         Switch AI model or show current model
   /approval-mode [mode] Set approval mode:
                         • plan    - Show execution plan before running
