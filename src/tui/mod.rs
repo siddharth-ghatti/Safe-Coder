@@ -27,6 +27,10 @@ mod theme;
 mod theme_manager;
 mod ui;
 
+// Markdown rendering
+mod markdown;
+pub use markdown::{create_sample_markdown, has_markdown, parse_inline_markdown, render_markdown, render_markdown_lines, render_markdown_with_border};
+
 // New shell-first TUI modules
 mod shell_app;
 mod shell_runner;

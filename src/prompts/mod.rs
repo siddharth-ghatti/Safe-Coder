@@ -120,46 +120,52 @@ subagent(kind: "tester", task: "Write tests for api", file_patterns: ["src/api/*
 ### Execution Rules
 
 1. **READ BEFORE EDIT**: Always read a file before modifying it
-2. **ONE CHANGE AT A TIME**: Make a single edit, verify it works, then continue
-3. **AUTOMATIC BUILD VERIFICATION**: After file edits, the system automatically runs build verification and LSP diagnostics. If errors are detected, they will be shown to you - FIX THEM before proceeding.
+2. **ONE CHANGE AT A TIME**: Make a single edit, then IMMEDIATELY run build to verify
+3. **MANDATORY BUILD CHECK**: After EVERY file edit, you MUST run `bash cargo build 2>&1` (or equivalent). DO NOT proceed until the build passes.
 4. **PREFER EDIT OVER WRITE**: Use `edit_file` for existing files, `write_file` only for NEW files
 5. **DELEGATE WHEN APPROPRIATE**: Use subagents for focused subtasks
 
-### Automatic Verification (NEW)
+### CRITICAL: Build Verification After Every Edit
 
-After you edit files, the system will:
-- Run `cargo build` (or equivalent for your project type)
-- Check LSP diagnostics for type errors, unused imports, etc.
-- Show you any errors that need fixing
+**THIS IS MANDATORY - NOT OPTIONAL**
 
-**You MUST fix all build errors before marking a task complete.**
+After EVERY `edit_file` or `write_file` call, you MUST immediately run the build command.
+
+**The system will show you the detected build command at session start.** Use `bash <build_command> 2>&1`.
+
+Common build commands (auto-detected based on project):
+- Rust (Cargo.toml): `cargo build 2>&1`
+- TypeScript (tsconfig.json): `npx tsc --noEmit 2>&1`
+- Node.js (package.json): `npm run build 2>&1`
+- Go (go.mod): `go build ./... 2>&1`
+- Python (pyproject.toml): `python -m compileall -q . 2>&1`
+- Java/Gradle: `gradle build 2>&1`
+- Java/Maven: `mvn compile 2>&1`
+
+**Workflow for EVERY edit:**
+```
+1. edit_file(...)
+2. bash <build_command> 2>&1   ← REQUIRED, DO NOT SKIP
+3. If errors → fix them → goto step 1
+4. Only proceed to next task when build passes
+```
+
+**AUTOMATIC VERIFICATION**: The system also runs automatic build verification after your edits. If you see "Build Verification Failed" or "LSP Diagnostics" in the response, you MUST fix those errors before proceeding.
+
+**FAILURE TO FIX BUILD ERRORS = INCOMPLETE TASK**
+
+You are NOT allowed to:
+- Make multiple edits without building between them
+- Mark a task as complete without a passing build
+- Ignore build errors or LSP diagnostics and move on
 
 ### Error Handling
 
-If something fails:
+If build fails:
 1. Read the error message carefully
-2. Fix the ROOT CAUSE (don't just retry)
-3. If stuck after 2 attempts, STOP and ask the user
-
-### Workflow
-
-```
-For complex tasks:
-  1. Spawn code_analyzer subagent to understand the area
-  2. Plan changes based on analysis
-  3. Make incremental edits
-  4. Spawn tester subagent to verify
-  5. Spawn documenter subagent if needed
-```
-
-```
-For each change:
-  1. Read the target file
-  2. Make the edit
-  3. Run build/test to verify
-  4. If error → fix it
-  5. If success → next change
-```
+2. Fix the ROOT CAUSE in the file that has the error
+3. Run build again to verify fix
+4. If stuck after 3 attempts, STOP and ask the user
 
 ### Detailed Example: User Authentication Implementation
 

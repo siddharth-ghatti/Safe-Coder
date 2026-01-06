@@ -25,10 +25,12 @@ use tokio::sync::{mpsc, Mutex};
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
 use crate::config::Config;
+use crate::llm::create_client;
 use crate::lsp::{default_lsp_configs, LspClient, LspManager};
 use crate::orchestrator::TaskPlan;
 use crate::planning::PlanEvent;
 use crate::session::{Session, SessionEvent};
+use crate::unified_planning::{ExecutionMode, UnifiedPlanner};
 
 /// Message types for async command execution
 #[derive(Debug)]
@@ -1473,8 +1475,7 @@ Keyboard:
     }
 
     /// Run orchestration asynchronously
-    /// Run orchestration asynchronously - simplified version for TUI
-    /// This runs Claude CLI directly without the full workspace/worktree setup
+    /// This creates a proper plan using UnifiedPlanner before executing tasks
     async fn run_orchestration(
         project_path: PathBuf,
         config: Config,
@@ -1487,44 +1488,202 @@ Keyboard:
             block_id: block_id.clone(),
         });
 
-        // For TUI mode, we'll run Claude CLI directly without worktrees
-        // This is simpler and more reliable for interactive use
         let cli_path = config.orchestrator.claude_cli_path.clone();
 
-        // Create a simple plan with one task
+        // Create LLM client and use UnifiedPlanner to create a proper plan
+        let llm_client = match create_client(&config).await {
+            Ok(client) => client,
+            Err(e) => {
+                let _ = tx.send(OrchestrationUpdate::Complete {
+                    block_id,
+                    summary: format!("Failed to create LLM client for planning: {}", e),
+                    success_count: 0,
+                    fail_count: 1,
+                });
+                return;
+            }
+        };
+
+        // Use UnifiedPlanner to create a thoughtful, structured plan
+        let planner = UnifiedPlanner::new(ExecutionMode::Orchestration);
+        let unified_plan = match planner.create_plan(llm_client.as_ref(), &task, None).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                // Fall back to simple single-task plan if planning fails
+                eprintln!("Planning failed, using simple plan: {}", e);
+                let _ = tx.send(OrchestrationUpdate::TaskOutput {
+                    block_id: block_id.clone(),
+                    task_id: "planning".to_string(),
+                    line: format!(
+                        "Note: Advanced planning unavailable ({}), using direct execution",
+                        e
+                    ),
+                });
+
+                // Create fallback simple plan
+                use crate::orchestrator::Task;
+                let mut plan = TaskPlan::new(
+                    "tui-task-1".to_string(),
+                    task.clone(),
+                    format!("Execute: {}", task),
+                );
+                plan.add_task(Task::new("task-1".to_string(), task.clone(), task.clone()));
+
+                let _ = tx.send(OrchestrationUpdate::PlanReady {
+                    block_id: block_id.clone(),
+                    plan: plan.clone(),
+                });
+
+                // Execute fallback single task
+                Self::execute_single_task(&cli_path, &project_path, &task, block_id, tx).await;
+                return;
+            }
+        };
+
+        // Convert UnifiedPlan to TaskPlan for display
         use crate::orchestrator::Task;
-        let mut plan = TaskPlan::new(
-            "tui-task-1".to_string(),
+        let mut task_plan = TaskPlan::new(
+            unified_plan.id.clone(),
             task.clone(),
-            format!("Execute: {}", task),
+            unified_plan.title.clone(),
         );
-        plan.add_task(Task::new("task-1".to_string(), task.clone(), task.clone()));
+
+        // Flatten groups into tasks for execution
+        let mut all_tasks: Vec<(String, String, String)> = Vec::new();
+        for group in &unified_plan.groups {
+            for step in &group.steps {
+                task_plan.add_task(Task::new(
+                    step.id.clone(),
+                    step.description.clone(),
+                    step.instructions.clone(),
+                ));
+                all_tasks.push((
+                    step.id.clone(),
+                    step.description.clone(),
+                    step.instructions.clone(),
+                ));
+            }
+        }
 
         // Send plan ready
         let _ = tx.send(OrchestrationUpdate::PlanReady {
             block_id: block_id.clone(),
-            plan: plan.clone(),
+            plan: task_plan.clone(),
         });
 
+        // Send executing status
+        let _ = tx.send(OrchestrationUpdate::Executing {
+            block_id: block_id.clone(),
+            task_count: all_tasks.len(),
+        });
+
+        // Execute each task sequentially (groups could be parallelized in full orchestration mode)
+        let mut success_count = 0;
+        let mut fail_count = 0;
+        let mut all_outputs = Vec::new();
+
+        for (task_id, description, instructions) in all_tasks {
+            // Send task started
+            let _ = tx.send(OrchestrationUpdate::TaskStarted {
+                block_id: block_id.clone(),
+                task_id: task_id.clone(),
+                description: description.clone(),
+                worker: "claude".to_string(),
+            });
+
+            // Build the full prompt for this step
+            let step_prompt = format!(
+                "Task: {}\n\nInstructions:\n{}\n\nOriginal request context: {}",
+                description, instructions, task
+            );
+
+            // Run Claude CLI for this step
+            let result = Self::run_claude_cli(
+                &cli_path,
+                &project_path,
+                &step_prompt,
+                block_id.clone(),
+                task_id.clone(),
+                tx.clone(),
+            )
+            .await;
+
+            let (success, output) = match result {
+                Ok(output) => (true, output),
+                Err(e) => (false, e.to_string()),
+            };
+
+            if success {
+                success_count += 1;
+            } else {
+                fail_count += 1;
+            }
+
+            all_outputs.push(format!("## {}\n{}", description, output));
+
+            // Send task completed
+            let _ = tx.send(OrchestrationUpdate::TaskCompleted {
+                block_id: block_id.clone(),
+                task_id: task_id.clone(),
+                success,
+                output: output.clone(),
+            });
+
+            // Stop on failure (could be configurable)
+            if !success {
+                break;
+            }
+        }
+
+        // Send completion
+        let _ = tx.send(OrchestrationUpdate::Complete {
+            block_id,
+            summary: if fail_count == 0 {
+                format!(
+                    "All {} tasks completed successfully:\n\n{}",
+                    success_count,
+                    all_outputs.join("\n\n")
+                )
+            } else {
+                format!(
+                    "{} succeeded, {} failed:\n\n{}",
+                    success_count,
+                    fail_count,
+                    all_outputs.join("\n\n")
+                )
+            },
+            success_count,
+            fail_count,
+        });
+    }
+
+    /// Execute a single task as fallback when planning fails
+    async fn execute_single_task(
+        cli_path: &str,
+        project_path: &PathBuf,
+        task: &str,
+        block_id: String,
+        tx: mpsc::UnboundedSender<OrchestrationUpdate>,
+    ) {
         // Send executing status
         let _ = tx.send(OrchestrationUpdate::Executing {
             block_id: block_id.clone(),
             task_count: 1,
         });
 
-        // Send task started (using Claude as the worker for shell mode)
+        // Send task started
         let _ = tx.send(OrchestrationUpdate::TaskStarted {
             block_id: block_id.clone(),
             task_id: "1".to_string(),
-            description: task.clone(),
+            description: task.to_string(),
             worker: "claude".to_string(),
         });
 
-        // Run Claude CLI directly with streaming output
+        // Run Claude CLI directly
         let result = Self::run_claude_cli(
-            &cli_path,
-            &project_path,
-            &task,
+            cli_path,
+            project_path,
+            task,
             block_id.clone(),
             "1".to_string(),
             tx.clone(),

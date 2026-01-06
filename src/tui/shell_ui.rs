@@ -21,6 +21,7 @@ use similar::{ChangeTag, TextDiff};
 use textwrap::wrap;
 
 use super::file_picker::FilePicker;
+use super::markdown::{has_markdown, parse_inline_markdown, render_markdown_lines};
 use super::shell_app::{
     BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
 };
@@ -279,6 +280,10 @@ enum MessageLine {
         text: String,
         spinner_frame: usize,
     },
+    // Markdown-rendered line with border
+    AiMarkdownLine {
+        spans: Vec<Span<'static>>,
+    },
 }
 
 impl MessageLine {
@@ -388,6 +393,12 @@ impl MessageLine {
                     Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
                 ])
             }
+
+            MessageLine::AiMarkdownLine { spans } => {
+                let mut line_spans = vec![Span::styled("│ ", Style::default().fg(BORDER_ACCENT))];
+                line_spans.extend(spans.clone());
+                Line::from(line_spans)
+            }
         }
     }
 }
@@ -445,34 +456,62 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
 
             // Render children (tools, reasoning)
             for child in &block.children {
-                render_child_block(lines, child, width, frame);
+                render_child_block(lines, child, width, frame, false);
             }
 
-            // Final AI response
+            // Final AI response - render with markdown if detected
             let text = block.output.get_text();
             if !text.is_empty() {
                 lines.push(MessageLine::Empty);
                 lines.push(MessageLine::BlockStart);
 
-                let output_lines: Vec<&str> = text.lines().collect();
-                let total = output_lines.len();
+                if has_markdown(&text) {
+                    // Use full markdown rendering for complex content
+                    let md_lines = render_markdown_lines(&text);
+                    let total = md_lines.len();
 
-                for (i, line) in output_lines.iter().enumerate() {
-                    for wrapped in wrap(line, width.saturating_sub(4)) {
+                    for (i, md_line) in md_lines.into_iter().enumerate() {
                         let is_last = i == total - 1;
-                        lines.push(MessageLine::AiText {
-                            text: wrapped.to_string(),
-                            model: if is_last {
-                                Some("claude-sonnet-4".to_string())
-                            } else {
-                                None
-                            },
-                            timestamp: if is_last {
-                                Some(chrono::Local::now().format("%I:%M %p").to_string())
-                            } else {
-                                None
-                            },
-                        });
+                        if is_last {
+                            // Add model/timestamp info on last line
+                            let mut spans: Vec<Span<'static>> = md_line.spans;
+                            spans.push(Span::styled(
+                                format!(
+                                    "  {} ({})",
+                                    "claude-sonnet-4",
+                                    chrono::Local::now().format("%I:%M %p")
+                                ),
+                                Style::default().fg(TEXT_DIM),
+                            ));
+                            lines.push(MessageLine::AiMarkdownLine { spans });
+                        } else {
+                            lines.push(MessageLine::AiMarkdownLine {
+                                spans: md_line.spans,
+                            });
+                        }
+                    }
+                } else {
+                    // Plain text fallback for simple content
+                    let output_lines: Vec<&str> = text.lines().collect();
+                    let total = output_lines.len();
+
+                    for (i, line) in output_lines.iter().enumerate() {
+                        for wrapped in wrap(line, width.saturating_sub(4)) {
+                            let is_last = i == total - 1;
+                            lines.push(MessageLine::AiText {
+                                text: wrapped.to_string(),
+                                model: if is_last {
+                                    Some("claude-sonnet-4".to_string())
+                                } else {
+                                    None
+                                },
+                                timestamp: if is_last {
+                                    Some(chrono::Local::now().format("%I:%M %p").to_string())
+                                } else {
+                                    None
+                                },
+                            });
+                        }
                     }
                 }
             }
@@ -483,26 +522,38 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                 text: format!("orchestrate: {}", block.input),
             });
 
-            render_output(lines, &block.output, width);
+            // Use unthrottled output for orchestration - show all output continuously
+            render_output_unthrottled(lines, &block.output, width);
 
             for child in &block.children {
-                render_child_block(lines, child, width, frame);
+                // Pass unthrottled=true for orchestration child blocks
+                render_child_block(lines, child, width, frame, true);
             }
         }
 
         BlockType::AiToolExecution { .. } => {
-            render_child_block(lines, block, width, frame);
+            render_child_block(lines, block, width, frame, false);
         }
 
         BlockType::AiReasoning => {
             let text = block.output.get_text();
-            for line in text.lines() {
-                for wrapped in wrap(line, width.saturating_sub(4)) {
-                    lines.push(MessageLine::AiText {
-                        text: wrapped.to_string(),
-                        model: None,
-                        timestamp: None,
+            if has_markdown(&text) {
+                // Render with markdown formatting
+                for md_line in render_markdown_lines(&text) {
+                    lines.push(MessageLine::AiMarkdownLine {
+                        spans: md_line.spans,
                     });
+                }
+            } else {
+                // Plain text fallback
+                for line in text.lines() {
+                    for wrapped in wrap(line, width.saturating_sub(4)) {
+                        lines.push(MessageLine::AiText {
+                            text: wrapped.to_string(),
+                            model: None,
+                            timestamp: None,
+                        });
+                    }
                 }
             }
         }
@@ -516,7 +567,7 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
             render_output(lines, &block.output, width);
 
             for child in &block.children {
-                render_child_block(lines, child, width, frame);
+                render_child_block(lines, child, width, frame, false);
             }
         }
     }
@@ -527,6 +578,7 @@ fn render_child_block(
     block: &CommandBlock,
     width: usize,
     frame: usize,
+    unthrottled: bool,
 ) {
     match &block.block_type {
         BlockType::AiToolExecution { tool_name } => {
@@ -571,7 +623,7 @@ fn render_child_block(
                 || tool_name.starts_with("task-")
                 || tool_name.starts_with("subagent:")
             {
-                render_tool_output(lines, &block.output, width);
+                render_tool_output(lines, &block.output, width, unthrottled);
             }
         }
 
@@ -579,13 +631,23 @@ fn render_child_block(
             let text = block.output.get_text();
             if !text.is_empty() {
                 lines.push(MessageLine::Empty);
-                for line in text.lines() {
-                    for wrapped in wrap(line, width.saturating_sub(4)) {
-                        lines.push(MessageLine::AiText {
-                            text: wrapped.to_string(),
-                            model: None,
-                            timestamp: None,
+                if has_markdown(&text) {
+                    // Render with markdown formatting
+                    for md_line in render_markdown_lines(&text) {
+                        lines.push(MessageLine::AiMarkdownLine {
+                            spans: md_line.spans,
                         });
+                    }
+                } else {
+                    // Plain text fallback
+                    for line in text.lines() {
+                        for wrapped in wrap(line, width.saturating_sub(4)) {
+                            lines.push(MessageLine::AiText {
+                                text: wrapped.to_string(),
+                                model: None,
+                                timestamp: None,
+                            });
+                        }
                     }
                 }
             }
@@ -596,36 +658,53 @@ fn render_child_block(
 }
 
 fn render_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+    render_output_with_limit(lines, output, width, Some(20))
+}
+
+/// Render output without any line limit (for orchestration, continuous streaming)
+fn render_output_unthrottled(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+    render_output_with_limit(lines, output, width, None)
+}
+
+/// Render output with configurable line limit (None = unlimited)
+fn render_output_with_limit(
+    lines: &mut Vec<MessageLine>,
+    output: &BlockOutput,
+    width: usize,
+    max_lines: Option<usize>,
+) {
     match output {
         BlockOutput::Streaming {
             lines: output_lines,
             ..
         } => {
-            for line in output_lines.iter().take(20) {
+            // For unlimited (None), show all lines; for limited, show last N lines
+            let skip_count = match max_lines {
+                Some(limit) if output_lines.len() > limit => output_lines.len() - limit,
+                _ => 0,
+            };
+
+            for line in output_lines.iter().skip(skip_count) {
                 for wrapped in wrap(line, width.saturating_sub(4)) {
                     lines.push(MessageLine::ShellOutput {
                         text: wrapped.to_string(),
                     });
                 }
-            }
-            if output_lines.len() > 20 {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("... {} more lines", output_lines.len() - 20),
-                });
             }
         }
         BlockOutput::Success(text) if !text.is_empty() => {
-            for line in text.lines().take(20) {
+            let text_lines: Vec<&str> = text.lines().collect();
+            let skip_count = match max_lines {
+                Some(limit) if text_lines.len() > limit => text_lines.len() - limit,
+                _ => 0,
+            };
+
+            for line in text_lines.iter().skip(skip_count) {
                 for wrapped in wrap(line, width.saturating_sub(4)) {
                     lines.push(MessageLine::ShellOutput {
                         text: wrapped.to_string(),
                     });
                 }
-            }
-            if text.lines().count() > 20 {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("... {} more lines", text.lines().count() - 20),
-                });
             }
         }
         BlockOutput::Error { message, .. } => {
@@ -637,41 +716,69 @@ fn render_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usiz
     }
 }
 
-fn render_tool_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+fn render_tool_output(
+    lines: &mut Vec<MessageLine>,
+    output: &BlockOutput,
+    width: usize,
+    unthrottled: bool,
+) {
     match output {
         BlockOutput::Streaming {
             lines: output_lines,
             ..
         } => {
-            // Show more lines for subagent streaming output
-            let max_lines = 50;
-            for line in output_lines.iter().take(max_lines) {
-                for wrapped in wrap(line, width.saturating_sub(14)) {
-                    lines.push(MessageLine::ShellOutput {
-                        text: format!("  {}", wrapped),
-                    });
+            if unthrottled {
+                // Show all lines for orchestration mode
+                for line in output_lines.iter() {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
                 }
-            }
-            if output_lines.len() > max_lines {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("  ... {} more lines", output_lines.len() - max_lines),
-                });
+            } else {
+                // Throttled mode - show last N lines
+                let max_lines = 50;
+                let skip_count = if output_lines.len() > max_lines {
+                    output_lines.len() - max_lines
+                } else {
+                    0
+                };
+                for line in output_lines.iter().skip(skip_count) {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
+                }
             }
         }
         BlockOutput::Success(text) if !text.is_empty() => {
-            let max_lines = 30;
             let text_lines: Vec<&str> = text.lines().collect();
-            for line in text_lines.iter().take(max_lines) {
-                for wrapped in wrap(line, width.saturating_sub(14)) {
-                    lines.push(MessageLine::ShellOutput {
-                        text: format!("  {}", wrapped),
-                    });
+            if unthrottled {
+                // Show all lines for orchestration mode
+                for line in text_lines.iter() {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
                 }
-            }
-            if text_lines.len() > max_lines {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("  ... {} more lines", text_lines.len() - max_lines),
-                });
+            } else {
+                // Throttled mode - show last N lines
+                let max_lines = 30;
+                let skip_count = if text_lines.len() > max_lines {
+                    text_lines.len() - max_lines
+                } else {
+                    0
+                };
+                for line in text_lines.iter().skip(skip_count) {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
+                }
             }
         }
         _ => {}

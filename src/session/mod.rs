@@ -22,6 +22,7 @@ use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan}
 use crate::prompts;
 use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
+use crate::unified_planning::{ExecutionMode as PlanExecutionMode, UnifiedPlanner};
 
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
@@ -521,6 +522,9 @@ impl Session {
                     .any(|t| t == "edit_file" || t == "write_file");
 
                 if had_file_edits {
+                    // Give LSP a moment to process file changes
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
                     // Run build verification after file modifications
                     if let Some(build_errors) = self.verify_build().await {
                         final_results.push(ContentBlock::Text {
@@ -612,10 +616,97 @@ impl Session {
         let system_prompt =
             prompts::build_system_prompt(self.agent_mode, project_context.as_deref(), None);
 
-        // Create a persistent plan ID for this task - will accumulate steps across LLM calls
-        let task_plan_id = format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
-        let mut plan_created = false;
-        let mut total_step_count = 0usize;
+        // === UPFRONT PLANNING PHASE ===
+        // Always create a structured plan first, regardless of mode
+        // In Plan mode: show plan and stop
+        // In Build mode: show plan and execute
+        let _ = event_tx.send(SessionEvent::Thinking("Creating plan...".to_string()));
+
+        let execution_mode = match self.agent_mode {
+            AgentMode::Plan => PlanExecutionMode::Direct, // Plan mode uses simple direct planning
+            AgentMode::Build => PlanExecutionMode::Direct, // Build mode also uses direct for inline execution
+        };
+
+        let planner = UnifiedPlanner::new(execution_mode);
+        let unified_plan = planner
+            .create_plan(
+                self.llm_client.as_ref(),
+                &user_message,
+                project_context.as_deref(),
+            )
+            .await;
+
+        // Create a persistent plan ID for this task
+        let task_plan_id = match &unified_plan {
+            Ok(plan) => plan.id.clone(),
+            Err(_) => format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
+        };
+
+        // Convert UnifiedPlan to TaskPlan for UI display
+        if let Ok(ref plan) = unified_plan {
+            let mut task_plan = TaskPlan::new(plan.id.clone(), user_message.clone());
+            task_plan.title = plan.title.clone();
+            task_plan.status = PlanStatus::Ready;
+
+            // Add steps from unified plan
+            for group in &plan.groups {
+                for step in &group.steps {
+                    task_plan
+                        .steps
+                        .push(PlanStep::new(step.id.clone(), step.description.clone()));
+                }
+            }
+
+            // Send plan to UI
+            let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCreated {
+                plan: task_plan.clone(),
+            }));
+
+            // In Plan mode, just show the plan and return without executing
+            if self.agent_mode == AgentMode::Plan {
+                response_text.push_str(&format!("## Plan: {}\n\n", plan.title));
+                for (i, group) in plan.groups.iter().enumerate() {
+                    response_text.push_str(&format!("### Phase {}\n", i + 1));
+                    for step in &group.steps {
+                        response_text.push_str(&format!(
+                            "- **{}**: {}\n",
+                            step.description, step.instructions
+                        ));
+                        if !step.relevant_files.is_empty() {
+                            response_text.push_str(&format!(
+                                "  Files: {}\n",
+                                step.relevant_files.join(", ")
+                            ));
+                        }
+                    }
+                    response_text.push('\n');
+                }
+                response_text
+                    .push_str("\n**Plan complete. Switch to BUILD mode (Ctrl+G) to execute.**\n");
+                let _ = event_tx.send(SessionEvent::TextChunk(response_text.clone()));
+                return Ok(response_text);
+            }
+
+            // In Build mode, mark plan as approved to start execution
+            let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanApproved {
+                plan_id: task_plan_id.clone(),
+            }));
+        } else if let Err(ref e) = unified_plan {
+            // Planning failed - log but continue with reactive planning
+            tracing::warn!(
+                "Upfront planning failed: {}. Continuing with reactive planning.",
+                e
+            );
+            let _ = event_tx.send(SessionEvent::TextChunk(format!(
+                "Note: Upfront planning unavailable, using reactive execution.\n"
+            )));
+        }
+
+        let mut plan_created = unified_plan.is_ok();
+        let mut total_step_count = unified_plan
+            .as_ref()
+            .map(|p| p.groups.iter().map(|g| g.steps.len()).sum())
+            .unwrap_or(0);
 
         loop {
             // Notify UI that we're thinking
@@ -1008,6 +1099,9 @@ impl Session {
                     .any(|t| t == "edit_file" || t == "write_file");
 
                 if had_file_edits {
+                    // Give LSP a moment to process file changes
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
                     // Run build verification after file modifications
                     if let Some(build_errors) = self.verify_build().await {
                         has_issues = true;
@@ -1131,39 +1225,14 @@ impl Session {
         plan
     }
 
-    /// Detect the project type and return the appropriate build command
-    fn detect_build_command(&self) -> Option<&'static str> {
-        // Check for Rust project
-        if self.project_path.join("Cargo.toml").exists() {
-            return Some("cargo build 2>&1");
-        }
-        // Check for Node.js/TypeScript project
-        if self.project_path.join("package.json").exists() {
-            // Check if there's a build script
-            if let Ok(content) = std::fs::read_to_string(self.project_path.join("package.json")) {
-                if content.contains("\"build\"") {
-                    return Some("npm run build 2>&1");
-                }
-                // TypeScript check
-                if content.contains("\"tsc\"") || self.project_path.join("tsconfig.json").exists() {
-                    return Some("npx tsc --noEmit 2>&1");
-                }
-            }
-        }
-        // Check for Go project
-        if self.project_path.join("go.mod").exists() {
-            return Some("go build ./... 2>&1");
-        }
-        // Check for Python project
-        if self.project_path.join("pyproject.toml").exists()
-            || self.project_path.join("setup.py").exists()
-        {
-            // Python doesn't have a traditional "build" but we can type-check
-            if self.project_path.join("pyproject.toml").exists() {
-                return Some("python -m py_compile $(find . -name '*.py' -not -path './venv/*' | head -20) 2>&1");
-            }
-        }
-        None
+    /// Get the build command for this project from config
+    pub fn get_build_command(&self) -> Option<String> {
+        self.config.build.get_build_command(&self.project_path)
+    }
+
+    /// Get build command hint for prompts
+    pub fn get_build_command_hint(&self) -> String {
+        self.config.build.get_build_command_hint(&self.project_path)
     }
 
     /// Run build verification and return any errors
@@ -1171,16 +1240,26 @@ impl Session {
     /// This runs the project's build command and returns the output if there are errors.
     /// Returns None if build succeeds or if no build command is available.
     pub async fn verify_build(&self) -> Option<String> {
-        let build_cmd = self.detect_build_command()?;
+        let build_cmd = self.get_build_command()?;
+        let timeout = self.config.build.timeout_secs;
+        let max_output = self.config.build.max_output_bytes;
 
-        // Run the build command
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(build_cmd)
-            .current_dir(&self.project_path)
-            .output()
-            .await
-            .ok()?;
+        // Run the build command with timeout
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&build_cmd)
+                .current_dir(&self.project_path)
+                .output(),
+        )
+        .await;
+
+        let output = match output {
+            Ok(Ok(o)) => o,
+            Ok(Err(_)) => return Some("Build command failed to execute".to_string()),
+            Err(_) => return Some(format!("Build timed out after {}s", timeout)),
+        };
 
         if output.status.success() {
             None
@@ -1193,9 +1272,9 @@ impl Session {
             if combined.trim().is_empty() {
                 Some("Build failed with no output".to_string())
             } else {
-                // Limit output to avoid overwhelming the context
-                let truncated = if combined.len() > 2000 {
-                    format!("{}...\n[output truncated]", &combined[..2000])
+                // Limit output to configured max size
+                let truncated = if combined.len() > max_output {
+                    format!("{}...\n[output truncated]", &combined[..max_output])
                 } else {
                     combined.to_string()
                 };

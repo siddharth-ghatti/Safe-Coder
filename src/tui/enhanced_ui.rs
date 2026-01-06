@@ -1,4 +1,5 @@
 use super::{
+    markdown::{has_markdown, render_markdown_lines},
     styled_components::{LayoutUtils, StyledComponents},
     theme::Theme,
     App,
@@ -191,7 +192,7 @@ fn draw_enhanced_main_content(f: &mut Frame, area: Rect, app: &App, theme: &Them
 
     let messages_area = LayoutUtils::card_with_padding(main_layout[0], 1);
     
-    // Enhanced message rendering
+    // Enhanced message rendering with markdown support
     let mut message_lines = Vec::new();
     
     for (i, message) in app.visible_messages().enumerate() {
@@ -220,10 +221,25 @@ fn draw_enhanced_main_content(f: &mut Frame, area: Rect, app: &App, theme: &Them
             super::MessageType::Orchestration => "🎯 ",
         };
 
-        message_lines.push(Line::from(vec![
-            Span::styled(prefix, style),
-            Span::styled(&message.content, style),
-        ]));
+        // Check if this is an assistant message with markdown content
+        if matches!(message.message_type, super::MessageType::Assistant) && has_markdown(&message.content) {
+            // Render markdown content for assistant messages
+            message_lines.push(Line::from(Span::styled(prefix, style)));
+            
+            let md_lines = render_markdown_lines(&message.content);
+            for md_line in md_lines {
+                // Add a small indent for markdown content
+                let mut spans = vec![Span::styled("  ", Style::default())];
+                spans.extend(md_line.spans);
+                message_lines.push(Line::from(spans));
+            }
+        } else {
+            // Regular text rendering for non-markdown content
+            message_lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(&message.content, style),
+            ]));
+        }
 
         // Add spacing between messages
         if i < app.visible_messages().count() - 1 {

@@ -23,6 +23,8 @@ pub struct Config {
     pub checkpoint: CheckpointConfig,
     #[serde(default)]
     pub subagents: SubagentConfig,
+    #[serde(default)]
+    pub build: BuildConfig,
 }
 
 /// Configuration for subagent models
@@ -158,6 +160,124 @@ impl Default for ToolConfig {
             max_output_bytes: default_max_output(),
             warn_dangerous_commands: true,
             dangerous_patterns: default_dangerous_patterns(),
+        }
+    }
+}
+
+/// Configuration for build verification
+/// Allows configuring build commands for different project types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuildConfig {
+    /// Whether automatic build verification is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Build commands by project type (detected by marker file)
+    /// Key is the marker file (e.g., "Cargo.toml"), value is the build command
+    #[serde(default = "default_build_commands")]
+    pub commands: std::collections::HashMap<String, String>,
+    /// Timeout for build commands in seconds
+    #[serde(default = "default_build_timeout")]
+    pub timeout_secs: u64,
+    /// Maximum build output size in bytes before truncation
+    #[serde(default = "default_build_max_output")]
+    pub max_output_bytes: usize,
+}
+
+fn default_build_timeout() -> u64 {
+    60
+}
+
+fn default_build_max_output() -> usize {
+    8192 // 8KB - enough for error messages
+}
+
+fn default_build_commands() -> std::collections::HashMap<String, String> {
+    let mut commands = std::collections::HashMap::new();
+    // Rust
+    commands.insert("Cargo.toml".to_string(), "cargo build 2>&1".to_string());
+    // Node.js / TypeScript
+    commands.insert(
+        "tsconfig.json".to_string(),
+        "npx tsc --noEmit 2>&1".to_string(),
+    );
+    commands.insert("package.json".to_string(), "npm run build 2>&1".to_string());
+    // Go
+    commands.insert("go.mod".to_string(), "go build ./... 2>&1".to_string());
+    // Python
+    commands.insert(
+        "pyproject.toml".to_string(),
+        "python -m compileall -q . 2>&1".to_string(),
+    );
+    commands.insert(
+        "setup.py".to_string(),
+        "python -m compileall -q . 2>&1".to_string(),
+    );
+    // C/C++ with CMake
+    commands.insert(
+        "CMakeLists.txt".to_string(),
+        "cmake --build build 2>&1".to_string(),
+    );
+    // Java/Kotlin with Gradle
+    commands.insert("build.gradle".to_string(), "gradle build 2>&1".to_string());
+    commands.insert(
+        "build.gradle.kts".to_string(),
+        "gradle build 2>&1".to_string(),
+    );
+    // Java with Maven
+    commands.insert("pom.xml".to_string(), "mvn compile 2>&1".to_string());
+    commands
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            commands: default_build_commands(),
+            timeout_secs: default_build_timeout(),
+            max_output_bytes: default_build_max_output(),
+        }
+    }
+}
+
+impl BuildConfig {
+    /// Get the build command for a project based on detected marker files
+    pub fn get_build_command(&self, project_path: &std::path::Path) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+
+        // Check markers in priority order (most specific first)
+        let priority_order = [
+            "Cargo.toml",       // Rust (most specific)
+            "tsconfig.json",    // TypeScript
+            "go.mod",           // Go
+            "CMakeLists.txt",   // C/C++
+            "build.gradle.kts", // Kotlin Gradle
+            "build.gradle",     // Java Gradle
+            "pom.xml",          // Maven
+            "pyproject.toml",   // Python (modern)
+            "setup.py",         // Python (legacy)
+            "package.json",     // Node.js (least specific, check last)
+        ];
+
+        for marker in priority_order {
+            if project_path.join(marker).exists() {
+                if let Some(cmd) = self.commands.get(marker) {
+                    return Some(cmd.clone());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get a summary of the build command for display in prompts
+    pub fn get_build_command_hint(&self, project_path: &std::path::Path) -> String {
+        if let Some(cmd) = self.get_build_command(project_path) {
+            format!("Build command: `{}`", cmd)
+        } else {
+            "No build command detected. Run appropriate build/compile command for your project."
+                .to_string()
         }
     }
 }
@@ -529,6 +649,7 @@ impl Default for Config {
             mcp: McpConfig::default(),
             checkpoint: CheckpointConfig::default(),
             subagents: SubagentConfig::default(),
+            build: BuildConfig::default(),
         }
     }
 }

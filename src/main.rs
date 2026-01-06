@@ -22,6 +22,7 @@ mod shell;
 mod subagent;
 mod tools;
 mod tui;
+mod unified_planning;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

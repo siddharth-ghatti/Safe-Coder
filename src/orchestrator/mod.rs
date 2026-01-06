@@ -4,7 +4,11 @@
 //! high-level planner that delegates tasks to specialized CLI agents (Claude Code,
 //! Gemini CLI) running in isolated git workspaces.
 
+// TODO: Fix type mismatches in these modules
+// pub mod live_orchestration;
 pub mod planner;
+// pub mod self_orchestration;
+// pub mod streaming_worker;
 pub mod task;
 pub mod worker;
 pub mod workspace;

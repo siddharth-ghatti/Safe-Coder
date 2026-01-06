@@ -43,6 +43,7 @@ impl AgentMode {
                 "webfetch",
                 "todowrite",
                 "todoread",
+                "build_config",
                 // "subagent", // Disabled for now - perfecting planning first
             ],
         }
@@ -88,6 +89,7 @@ impl fmt::Display for AgentMode {
 
 pub mod ast_grep;
 pub mod bash;
+pub mod build_config;
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -98,8 +100,9 @@ pub mod todo;
 pub mod webfetch;
 pub mod write;
 
-pub use ast_grep::{AstGrepParams, AstGrepTool, AstLanguage, AstMatch, search_file, patterns};
+pub use ast_grep::{patterns, search_file, AstGrepParams, AstGrepTool, AstLanguage, AstMatch};
 pub use bash::BashTool;
+pub use build_config::BuildConfigTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
@@ -199,6 +202,8 @@ impl ToolRegistry {
         // Task tracking
         registry.register(Box::new(TodoWriteTool));
         registry.register(Box::new(TodoReadTool));
+        // Build configuration
+        registry.register(Box::new(BuildConfigTool));
         registry
     }
 
@@ -249,6 +254,8 @@ impl ToolRegistry {
         // Task tracking
         self.register(Box::new(TodoWriteTool));
         self.register(Box::new(TodoReadTool));
+        // Build configuration
+        self.register(Box::new(BuildConfigTool));
 
         // Create event channel for subagent communication
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SubagentEvent>();
