@@ -1,10 +1,168 @@
 # Safe Coder
 
-A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and now includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
+A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
 
-![Safe Coder CLI](assets/cli-screenshot.png)
+<p align="center">
+  <img src="assets/safe-coder-demo.gif" alt="Safe Coder Demo" width="800">
+</p>
+
+## Why Safe Coder?
+
+| Feature | Safe Coder | Claude Code | Cursor | Aider |
+|---------|------------|-------------|--------|-------|
+| **Multi-Agent Orchestration** | ✅ Claude + Gemini + Copilot | ❌ | ❌ | ❌ |
+| **Subagent System** | ✅ 5 specialized types | ❌ | ❌ | ❌ |
+| **Multi-Model Subagents** | ✅ Per-agent LLM config | ❌ | ❌ | ❌ |
+| **AST-Grep (Structural Search)** | ✅ Tree-sitter based | ❌ | ❌ | ❌ |
+| **Skill System** | ✅ Loadable knowledge files | ❌ | ❌ | ❌ |
+| **Lifecycle Hooks** | ✅ Pre/Post tool hooks | ❌ | ❌ | ❌ |
+| **75+ Model Support** | ✅ via OpenRouter | ❌ | Limited | ✅ |
+| **LSP Integration** | ✅ Auto-download | ❌ | Built-in | ❌ |
+| **Git-Agnostic Checkpoints** | ✅ Works anywhere | ❌ | ❌ | ❌ |
+| **Undo/Redo** | ✅ `/undo` `/redo` | ✅ | ❌ | ❌ |
+| **Local AI (Ollama)** | ✅ 100% Private | ❌ | ❌ | ✅ |
+| **Native Binary** | ✅ Rust (fast) | Node.js | Electron | Python |
+
+<p align="center">
+  <img src="assets/orchestration-demo.gif" alt="Multi-Agent Orchestration" width="800">
+</p>
+
+## Quick Start (30 seconds)
+
+```bash
+# Install (macOS/Linux)
+curl -LO https://github.com/siddharth-ghatti/Safe-Coder/releases/latest/download/safe-coder-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
+chmod +x safe-coder-* && sudo mv safe-coder-* /usr/local/bin/safe-coder
+
+# Set your API key (choose one)
+export OPENROUTER_API_KEY="sk-or-v1-..."  # 75+ models
+# OR
+export ANTHROPIC_API_KEY="sk-ant-..."     # Claude directly
+
+# Start coding
+cd your-project
+safe-coder chat
+```
+
+**Key Commands:**
+```bash
+@ How do I add authentication?     # Ask AI
+@file.rs                           # Add file to context
+!cargo test                        # Run shell command
+/undo                              # Undo last changes
+/redo                              # Redo changes
+/compact                           # Free up context tokens
+@orchestrate add auth and tests    # Multi-agent task
+```
 
 ## 🌟 What's New
+
+### 🚀 **Advanced Extensibility Features (v2.6)**
+
+#### 🤖 **Multi-Model Subagents**
+Configure different LLM providers per subagent type for optimal cost/performance:
+```toml
+[subagents.analyzer]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"  # Best for analysis
+
+[subagents.tester]
+provider = "openai"
+model = "gpt-4o"  # Fast for test generation
+
+[subagents.documenter]
+provider = "ollama"
+model = "llama3.1:8b"  # Local, free for docs
+```
+
+#### 🔍 **AST-Grep (Structural Code Search)**
+Search code by structure, not just text. Uses tree-sitter for AST parsing:
+```bash
+# Find all function definitions in Rust
+safe-coder ast-grep --pattern "function_item" --language rust
+
+# Find all Python classes
+safe-coder ast-grep --pattern "class_definition" --language python
+
+# Use tree-sitter queries for complex patterns
+safe-coder ast-grep --pattern "(function_item name: (identifier) @name)"
+```
+Supports: **Rust, TypeScript, JavaScript, Python, Go**
+
+#### 📚 **Skill System**
+Load specialized knowledge into AI context via markdown files:
+```bash
+# List available skills
+/skill list
+
+# Activate a skill
+/skill activate rust-patterns
+
+# Skills auto-activate based on file patterns
+# Working on *.rs files? rust-patterns activates automatically!
+```
+
+Create custom skills in `.safe-coder/skills/`:
+```markdown
+---
+name: my-api-patterns
+trigger: ["*.ts", "src/api/**"]
+description: Our API conventions
+---
+
+# API Patterns
+
+When creating API endpoints:
+1. Always use zod for validation
+2. Return consistent error shapes
+...
+```
+
+**Built-in Skills:**
+- `rust-patterns` - Rust idioms (triggers: `*.rs`)
+- `react-patterns` - React/TypeScript best practices (triggers: `*.tsx`, `*.jsx`)
+- `python-patterns` - Python idioms (triggers: `*.py`)
+
+#### 🪝 **Hooks System**
+Add custom logic at lifecycle points for validation, logging, or automation:
+
+**Available Hook Points:**
+| Hook | When It Fires |
+|------|---------------|
+| `PreToolUse` | Before any tool executes |
+| `PostToolUse` | After any tool completes |
+| `PreFileWrite` | Before writing to a file |
+| `PostFileWrite` | After writing to a file |
+| `PreBash` | Before bash command execution |
+| `PostBash` | After bash command completes |
+| `OnError` | When an error occurs |
+| `OnContextLimit` | When context limit is approaching |
+| `OnSessionStart` | When a new session begins |
+
+**Built-in Hooks:**
+- `CommentChecker` - Warns about TODO/FIXME in new code
+- `ContextMonitor` - Alerts when context usage is high
+- `TodoEnforcer` - Ensures todos are tracked properly
+- `EditValidator` - Validates file edits before applying
+
+### 🌐 **OpenRouter + 75+ Models (v2.5)**
+- **One API, 75+ models** - Access Claude, GPT-4, Gemini, Llama, Mistral, DeepSeek, and more through a single API
+- **Automatic fallback** - If your preferred model is unavailable, OpenRouter routes to a similar one
+- **Cost tracking** - See per-model pricing in the OpenRouter dashboard
+- **Just set `OPENROUTER_API_KEY`** - Works out of the box
+
+### ⚡ **New Commands (v2.5)**
+- **`/undo`** - Instantly undo your last file changes (git-based)
+- **`/redo`** - Redo previously undone changes
+- **`/compact`** - Manually trigger context compaction to free up tokens
+- **`/sessions`** - Quick alias for `/chat list` to switch sessions
+- **`/agent`** - Alias for `/mode` to switch between plan/build modes
+
+### 🛡️ **Git-Agnostic Checkpoints (v2.5)**
+- **Works without git** - Create checkpoints in any directory
+- **Automatic gitignore** - Checkpoint folders auto-added to .gitignore for git projects
+- **Fast restore** - Instantly rollback to any previous checkpoint
+- **Configurable limits** - Control max checkpoints and ignore patterns
 
 ### 🤖 **Subagent System (v2.4)**
 - **Specialized AI agents** - Deploy focused agents for specific tasks (analysis, testing, refactoring, documentation)
@@ -47,6 +205,7 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **Better word wrapping** - Improved text rendering in the TUI
 
 ### 🛠️ **Expanded Tool Suite**
+- **AST-Grep** - Structural code search using tree-sitter AST parsing
 - **Glob search** - Fast file pattern matching with `**/*.rs` syntax
 - **Grep search** - Content search across files with regex support
 - **File listing** - Directory exploration with smart filtering
@@ -93,6 +252,33 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 - **Custom commands** - User-defined shortcuts for frequent operations
 
 ## Features
+
+### 🔍 **AST-Grep (Structural Code Search)**
+- **Tree-sitter Powered**: Search code by AST structure, not just text patterns
+- **Multi-Language**: Supports Rust, TypeScript, JavaScript, Python, and Go
+- **Pattern Types**: Use simple node types (`function_item`) or full tree-sitter queries
+- **IDE Integration**: Available as a tool for AI agents to use during coding
+- **Fast Indexing**: Respects `.gitignore` and handles large codebases efficiently
+
+### 📚 **Skill System**
+- **Knowledge Injection**: Load specialized context into AI conversations
+- **Auto-Activation**: Skills activate automatically based on file patterns
+- **Custom Skills**: Create project-specific skills in `.safe-coder/skills/`
+- **YAML Frontmatter**: Define triggers, descriptions, and metadata
+- **Built-in Skills**: Comes with Rust, React, and Python best practices
+
+### 🪝 **Hooks System**
+- **Lifecycle Events**: Hook into 9 different lifecycle points
+- **Built-in Validators**: Comment checking, context monitoring, edit validation
+- **Custom Hooks**: Create your own hooks for project-specific workflows
+- **Pre/Post Actions**: Run logic before or after tool execution
+- **Error Handling**: Custom error handlers and recovery logic
+
+### 🤖 **Multi-Model Subagents**
+- **Per-Agent Configuration**: Different LLM providers per subagent type
+- **Cost Optimization**: Use cheaper models for simple tasks
+- **Provider Flexibility**: Mix Anthropic, OpenAI, OpenRouter, and Ollama
+- **Automatic Selection**: Falls back to default provider if not configured
 
 ### 🧠 **Language Server Protocol (LSP) Features**
 - **Automatic Setup**: Download and configure language servers automatically
@@ -291,7 +477,8 @@ For complex tasks, Safe Coder can still orchestrate multiple AI agents:
 1. **Git**: Required for change tracking and safety (usually pre-installed)
 
 2. **API Key or Local Setup**: Choose one option:
-   - **Anthropic API key** for Claude models
+   - **OpenRouter API key** for 75+ models (recommended - see [OpenRouter Setup](#openrouter-75-models))
+   - **Anthropic API key** for Claude models directly
    - **OpenAI API key** for GPT models  
    - **Ollama** for local, private AI (see [Local AI Setup](#local-ai-with-ollama))
 
@@ -416,6 +603,7 @@ safe-coder chat --demo
 | Command Type | Example | Description |
 |--------------|---------|-------------|
 | **Slash Commands** | `/help`, `/stats`, `/chat save` | Meta-level control |
+| **Skill Commands** | `/skill list`, `/skill activate rust` | Manage knowledge skills |
 | **At-Commands** | `@main.rs`, `@src/**/*.rs` | Attach file context |
 | **Shell Commands** | `!cargo test`, `!git status` | Execute shell commands |
 | **Custom Commands** | `/test`, `/refactor <fn>` | User-defined shortcuts |
@@ -511,6 +699,47 @@ safe-coder chat --path /your/project
 - `qwen2.5-coder:32b-instruct` - Best quality (19GB, ~32GB RAM)
 
 See the [Ollama Setup Guide](OLLAMA_SETUP.md) for detailed instructions.
+
+### OpenRouter (75+ Models)
+
+Access 75+ AI models through a single API key:
+
+```bash
+# 1. Get your API key from https://openrouter.ai/keys
+
+# 2. Set the environment variable
+export OPENROUTER_API_KEY="sk-or-v1-..."
+
+# 3. Start coding (auto-detects OpenRouter)
+safe-coder chat --path /your/project
+
+# Or explicitly configure
+safe-coder config set llm.provider openrouter
+safe-coder config set llm.model "anthropic/claude-3.5-sonnet"
+```
+
+**Popular Models Available:**
+
+| Model | ID | Best For |
+|-------|-----|----------|
+| Claude 3.5 Sonnet | `anthropic/claude-3.5-sonnet` | General coding (default) |
+| Claude 3 Opus | `anthropic/claude-3-opus` | Complex reasoning |
+| GPT-4o | `openai/gpt-4o` | Fast, capable |
+| GPT-4 Turbo | `openai/gpt-4-turbo` | Long context |
+| Gemini Pro 1.5 | `google/gemini-pro-1.5` | Multi-modal |
+| Llama 3.1 405B | `meta-llama/llama-3.1-405b-instruct` | Open source, powerful |
+| Llama 3.1 70B | `meta-llama/llama-3.1-70b-instruct` | Open source, fast |
+| DeepSeek Coder | `deepseek/deepseek-coder` | Code-specialized |
+| Mixtral 8x22B | `mistralai/mixtral-8x22b-instruct` | Fast, efficient |
+| Qwen 2 72B | `qwen/qwen-2-72b-instruct` | Multilingual |
+
+**Benefits:**
+- 🎯 **One API key** for all models - no need for separate accounts
+- 💰 **Pay-per-use** - only pay for what you use
+- 🔄 **Automatic fallback** - if a model is down, routes to a similar one
+- 📊 **Usage dashboard** - track costs and usage at openrouter.ai
+
+See the full model list at [openrouter.ai/models](https://openrouter.ai/models).
 
 ## Example Sessions
 
@@ -803,10 +1032,16 @@ The configuration is stored in `~/.config/safe-coder/config.toml`:
 
 ```toml
 [llm]
-provider = "anthropic"
-api_key = "your-api-key-here"
-model = "claude-sonnet-4-20250514"
+# Provider options: "anthropic", "openai", "openrouter", "ollama", "github-copilot"
+provider = "openrouter"
+api_key = "sk-or-v1-..."  # Or set OPENROUTER_API_KEY env var
+model = "anthropic/claude-3.5-sonnet"  # Any OpenRouter model ID
 max_tokens = 8192
+
+# Alternative: Direct Anthropic
+# provider = "anthropic"
+# api_key = "sk-ant-..."
+# model = "claude-sonnet-4-20250514"
 
 [git]
 auto_commit = true
@@ -836,6 +1071,32 @@ gemini_max_concurrent = 2       # Max concurrent Gemini workers
 safe_coder_max_concurrent = 2   # Max concurrent Safe-Coder workers
 copilot_max_concurrent = 2      # Max concurrent GitHub Copilot workers
 start_delay_ms = 100            # Delay between starting workers (ms)
+
+# Per-subagent LLM configuration (optional - falls back to main [llm] if not set)
+[subagents.analyzer]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+
+[subagents.tester]
+provider = "openai"
+model = "gpt-4o"
+max_tokens = 4096
+
+[subagents.refactorer]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 8192
+
+[subagents.documenter]
+provider = "ollama"
+model = "llama3.1:8b"
+max_tokens = 4096
+
+[subagents.custom]
+provider = "openrouter"
+model = "anthropic/claude-3.5-sonnet"
+max_tokens = 4096
 ```
 
 ## How It Works
@@ -964,6 +1225,7 @@ safe-coder/
 │   │   ├── edit.rs          # File editing with diffs
 │   │   ├── glob.rs          # File pattern matching
 │   │   ├── grep.rs          # Content search
+│   │   ├── ast_grep.rs      # Structural code search (tree-sitter)
 │   │   ├── list.rs          # Directory listing
 │   │   ├── todo.rs          # Task tracking
 │   │   └── webfetch.rs      # Web content retrieval
@@ -976,7 +1238,14 @@ safe-coder/
 │   ├── loop_detector/       # AI loop detection
 │   ├── permissions/         # Permission mode handling
 │   ├── prompts/             # System prompts
-│   └── git/                 # Git change tracking
+│   ├── git/                 # Git change tracking
+│   ├── skills/              # Skill system for knowledge injection
+│   │   └── mod.rs           # Skill loading and management
+│   └── hooks/               # Lifecycle hooks system
+│       ├── mod.rs           # Hook types and exports
+│       ├── types.rs         # Hook trait and context definitions
+│       ├── builtin.rs       # Built-in hooks (comment checker, etc.)
+│       └── manager.rs       # Hook registration and execution
 ├── Cargo.toml
 └── README.md
 ```
@@ -1070,6 +1339,10 @@ safe-coder login anthropic
 - [x] **Specialized subagent system** - Deploy focused AI agents for specific tasks
 - [x] **Enhanced task planning** - Complexity scoring and intelligent agent assignment
 - [x] **Tool-restricted agents** - Safety through limited tool access per agent type
+- [x] **Multi-model subagents** - Configure different LLM providers per subagent type
+- [x] **AST-Grep tool** - Structural code search using tree-sitter
+- [x] **Hooks system** - Lifecycle hooks for extensibility (pre/post tool, file write, etc.)
+- [x] **Skill system** - Loadable knowledge files with auto-activation
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI
@@ -1090,4 +1363,5 @@ MIT License - See LICENSE file for details
 - Orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Gemini CLI](https://github.com/google/gemini-cli), and [GitHub Copilot](https://cli.github.com/)
 - TUI powered by [Ratatui](https://github.com/ratatui-org/ratatui)
 - Diff rendering powered by the [Similar](https://github.com/mitsuhiko/similar) crate
+- AST parsing powered by [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)
 - Built with Rust for performance and safety

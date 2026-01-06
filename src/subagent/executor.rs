@@ -10,7 +10,10 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::context::{ContextConfig, ContextManager};
-use crate::llm::{create_client, ContentBlock, LlmClient, Message, ToolDefinition};
+use crate::llm::{
+    create_client, create_client_from_subagent_config, ContentBlock, LlmClient, Message,
+    ToolDefinition,
+};
 use crate::tools::{ToolContext, ToolRegistry};
 
 use super::prompts::build_subagent_prompt;
@@ -54,7 +57,30 @@ impl SubagentExecutor {
         event_tx: mpsc::UnboundedSender<SubagentEvent>,
     ) -> Result<Self> {
         let id = format!("subagent-{}", Uuid::new_v4().to_string()[..8].to_string());
-        let llm_client = create_client(config).await?;
+
+        // Check if there's a per-subagent model configuration
+        let kind_str = match kind {
+            SubagentKind::CodeAnalyzer => "analyzer",
+            SubagentKind::Tester => "tester",
+            SubagentKind::Refactorer => "refactorer",
+            SubagentKind::Documenter => "documenter",
+            SubagentKind::Custom => "custom",
+        };
+
+        let llm_client = if let Some(subagent_model) = config.get_subagent_model(kind_str) {
+            // Use per-subagent model configuration
+            tracing::info!(
+                "🤖 {} subagent using custom model: {} ({})",
+                kind.display_name(),
+                subagent_model.model,
+                format!("{:?}", subagent_model.provider).to_lowercase()
+            );
+            create_client_from_subagent_config(subagent_model).await?
+        } else {
+            // Fall back to main LLM config
+            create_client(config).await?
+        };
+
         // Subagents don't spawn other subagents - use registry without subagent support
         let tool_registry = ToolRegistry::new_without_subagents();
 

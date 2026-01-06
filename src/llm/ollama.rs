@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, ToolDefinition};
+use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 pub struct OllamaClient {
     base_url: String,
@@ -59,9 +59,20 @@ struct OllamaToolFunction {
     parameters: serde_json::Value,
 }
 
+/// Usage information from Ollama response (OpenAI-compatible)
+#[derive(Debug, Deserialize)]
+struct OllamaUsage {
+    #[serde(default)]
+    prompt_tokens: usize,
+    #[serde(default)]
+    completion_tokens: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct OllamaResponse {
     choices: Vec<OllamaChoice>,
+    #[serde(default)]
+    usage: Option<OllamaUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,12 +245,17 @@ impl LlmClient for OllamaClient {
             });
         }
 
+        // Extract token usage (Ollama uses OpenAI-compatible format)
+        let usage = ollama_response
+            .usage
+            .map(|u| TokenUsage::new(u.prompt_tokens, u.completion_tokens));
+
         Ok(LlmResponse {
             message: Message {
                 role: Role::Assistant,
                 content: content_blocks,
             },
-            usage: None, // Ollama client doesn't track usage yet
+            usage,
         })
     }
 }

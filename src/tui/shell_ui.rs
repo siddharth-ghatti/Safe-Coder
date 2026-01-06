@@ -751,33 +751,46 @@ fn render_diff_opencode(lines: &mut Vec<MessageLine>, diff: &FileDiff, _width: u
 // ============================================================================
 
 fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    // Show key commands on the left, model on the right
+    // Format: "/help  /undo  /redo  /compact  @file  !cmd                    model"
+
+    let hints = vec![
+        ("/help", "help"),
+        ("/undo", "undo"),
+        ("/redo", "redo"),
+        ("/compact", "tokens"),
+        ("@", "attach"),
+        ("!", "shell"),
+    ];
+
+    let mut spans: Vec<Span> = vec![Span::styled(" ", Style::default())];
+
+    for (i, (cmd, _desc)) in hints.iter().enumerate() {
+        spans.push(Span::styled(*cmd, Style::default().fg(TEXT_SECONDARY)));
+        if i < hints.len() - 1 {
+            spans.push(Span::styled("  ", Style::default().fg(TEXT_MUTED)));
+        }
+    }
+
+    // Model name on the right
     let model_name = if app.ai_connected {
-        "Anthropic Claude Sonnet 4"
+        "claude-sonnet-4"
     } else {
-        "Not connected"
+        "disconnected"
     };
 
-    let left = Span::styled("enter ", Style::default().fg(TEXT_DIM));
-    let left2 = Span::styled("send", Style::default().fg(TEXT_SECONDARY));
-
-    let right = Span::styled(model_name, Style::default().fg(TEXT_SECONDARY));
-
-    // Calculate spacing
-    let left_len = 10; // "enter send"
+    // Calculate left side length
+    let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
     let right_len = model_name.len();
     let padding = area
         .width
         .saturating_sub(left_len as u16 + right_len as u16 + 2) as usize;
 
-    let line = Line::from(vec![
-        Span::styled(" ", Style::default()),
-        left,
-        left2,
-        Span::styled(" ".repeat(padding), Style::default()),
-        right,
-        Span::styled(" ", Style::default()),
-    ]);
+    spans.push(Span::styled(" ".repeat(padding.max(1)), Style::default()));
+    spans.push(Span::styled(model_name, Style::default().fg(TEXT_DIM)));
+    spans.push(Span::styled(" ", Style::default()));
 
+    let line = Line::from(spans);
     let para = Paragraph::new(line).style(Style::default().bg(BG_PRIMARY));
     f.render_widget(para, area);
 }
@@ -901,9 +914,8 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         .replace(&std::env::var("HOME").unwrap_or_default(), "~");
 
     let mode = app.agent_mode.short_name();
-    let version = "v0.1.0";
 
-    // Build spans (removed LSP status - it's shown in sidebar instead)
+    // Build left side: safe-coder + path
     let mut spans = vec![
         Span::styled(" ", Style::default()),
         Span::styled(
@@ -912,27 +924,47 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 .fg(TEXT_PRIMARY)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {}  ", version), Style::default().fg(TEXT_DIM)),
+        Span::styled("  ", Style::default()),
         Span::styled(path.clone(), Style::default().fg(TEXT_SECONDARY)),
     ];
 
-    // Calculate padding for right side
+    // Build right side: keyboard shortcuts + mode
+    // Format: "ctrl+c quit  tab mode  esc clear  BUILD"
+    let right_parts = vec![
+        ("^C", "quit", TEXT_DIM, TEXT_DIM),
+        ("tab", "mode", TEXT_DIM, TEXT_DIM),
+        ("esc", "clear", TEXT_DIM, TEXT_DIM),
+    ];
+
+    let mut right_spans: Vec<Span> = Vec::new();
+    for (key, action, key_color, action_color) in &right_parts {
+        right_spans.push(Span::styled(*key, Style::default().fg(*key_color)));
+        right_spans.push(Span::styled(" ", Style::default()));
+        right_spans.push(Span::styled(*action, Style::default().fg(*action_color)));
+        right_spans.push(Span::styled("  ", Style::default()));
+    }
+
+    // Add mode indicator
+    let mode_color = match mode {
+        "BUILD" => ACCENT_GREEN,
+        "PLAN" => ACCENT_CYAN,
+        _ => TEXT_PRIMARY,
+    };
+    right_spans.push(Span::styled(
+        mode.to_uppercase(),
+        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+    ));
+    right_spans.push(Span::styled(" ", Style::default()));
+
+    // Calculate padding
     let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
-    let right_text = format!("tab  {} MODE", mode.to_uppercase());
+    let right_len: usize = right_spans.iter().map(|s| s.content.len()).sum();
     let padding = area
         .width
-        .saturating_sub(left_len as u16 + right_text.len() as u16 + 2) as usize;
+        .saturating_sub(left_len as u16 + right_len as u16 + 1) as usize;
 
     spans.push(Span::styled(" ".repeat(padding.max(1)), Style::default()));
-    spans.push(Span::styled("tab", Style::default().fg(TEXT_DIM)));
-    spans.push(Span::styled("  ", Style::default()));
-    spans.push(Span::styled(
-        format!("{} MODE", mode.to_uppercase()),
-        Style::default()
-            .fg(TEXT_PRIMARY)
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(" ", Style::default()));
+    spans.extend(right_spans);
 
     let line = Line::from(spans);
     let para = Paragraph::new(line).style(Style::default().bg(BG_STATUS));
@@ -964,7 +996,7 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Sidebar sections: [TASK] [CONTEXT] [FILES] [PLAN] [LSP]
     let sections = Layout::vertical([
         Constraint::Length(4),               // TASK section
-        Constraint::Length(5),               // CONTEXT (token usage with dual progress bar)
+        Constraint::Length(3),               // CONTEXT (token usage)
         Constraint::Length(modified_height), // FILES (modified files)
         Constraint::Min(6),                  // PLAN (variable height)
         Constraint::Length(5),               // LSP connections
@@ -1060,74 +1092,16 @@ fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         )));
     }
 
-    // Progress bar if we have context window info
-    // Shows both current tokens and compressed tokens
-    if usage.context_window > 0 {
-        let bar_width = area.width.saturating_sub(4) as usize;
-
-        // Calculate current usage portion
-        let current_percent = usage.usage_percent();
-        let current_filled = ((current_percent / 100.0) * bar_width as f32) as usize;
-
-        // Calculate compressed portion (shown in different color)
-        let compressed_percent = usage.compressed_percent();
-        let compressed_filled = ((compressed_percent / 100.0) * bar_width as f32) as usize;
-
-        // Total filled cannot exceed bar width
-        let total_filled = (current_filled + compressed_filled).min(bar_width);
-        let empty = bar_width.saturating_sub(total_filled);
-
-        // Color for current tokens
-        let current_color = if current_percent > 80.0 {
-            ACCENT_RED
-        } else if current_percent > 60.0 {
-            ACCENT_YELLOW
-        } else {
-            ACCENT_GREEN
-        };
-
-        // Compressed tokens shown in magenta/purple
-        let compressed_color = ACCENT_MAGENTA;
-
-        // Build the progress bar with two colors
-        let mut spans = vec![Span::styled(" ", Style::default())];
-
-        if compressed_filled > 0 {
-            // Compressed tokens first (leftmost, as they represent "history")
-            spans.push(Span::styled(
-                "▓".repeat(compressed_filled.min(bar_width)),
-                Style::default().fg(compressed_color),
-            ));
-        }
-
-        if current_filled > 0 {
-            // Current tokens after compressed
-            spans.push(Span::styled(
-                "█".repeat(current_filled.min(bar_width.saturating_sub(compressed_filled))),
-                Style::default().fg(current_color),
-            ));
-        }
-
-        // Empty portion
-        if empty > 0 {
-            spans.push(Span::styled(
-                "░".repeat(empty),
-                Style::default().fg(TEXT_MUTED),
-            ));
-        }
-
-        lines.push(Line::from(spans));
-
-        // Legend line
-        if usage.compressed_tokens > 0 {
-            lines.push(Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled("█", Style::default().fg(current_color)),
-                Span::styled(" live ", Style::default().fg(TEXT_DIM)),
-                Span::styled("▓", Style::default().fg(compressed_color)),
-                Span::styled(" compressed", Style::default().fg(TEXT_DIM)),
-            ]));
-        }
+    // Cache statistics - only show if there's cache activity
+    if usage.has_cache_activity() {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", usage.format_cache_display()),
+            Style::default().fg(Color::Cyan),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!(" {}", usage.format_savings()),
+            Style::default().fg(Color::Green),
+        )));
     }
 
     let para = Paragraph::new(lines);

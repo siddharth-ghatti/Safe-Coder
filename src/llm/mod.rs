@@ -7,9 +7,11 @@ use crate::auth::{StoredToken, TokenManager, TokenProvider};
 use crate::config::{Config, LlmConfig, LlmProvider};
 
 pub mod anthropic;
+pub mod cached;
 pub mod copilot;
 pub mod ollama;
 pub mod openai;
+pub mod openrouter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -49,14 +51,56 @@ pub struct ToolDefinition {
 }
 
 /// Token usage information from LLM response
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: usize,
     pub output_tokens: usize,
+    /// Tokens written to provider cache (Anthropic cache_creation_input_tokens)
+    pub cache_creation_tokens: Option<usize>,
+    /// Tokens read from provider cache (Anthropic cache_read_input_tokens, OpenAI cached_tokens)
+    pub cache_read_tokens: Option<usize>,
+}
+
+impl TokenUsage {
+    /// Create a new TokenUsage with basic token counts
+    pub fn new(input_tokens: usize, output_tokens: usize) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens: None,
+            cache_read_tokens: None,
+        }
+    }
+
+    /// Create a new TokenUsage with cache information
+    pub fn with_cache(
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_creation_tokens: Option<usize>,
+        cache_read_tokens: Option<usize>,
+    ) -> Self {
+        Self {
+            input_tokens,
+            output_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        }
+    }
+
+    /// Check if this response had any cache hits
+    pub fn has_cache_hit(&self) -> bool {
+        self.cache_read_tokens.map(|t| t > 0).unwrap_or(false)
+    }
+
+    /// Get total tokens saved by caching (cache reads are 90% cheaper)
+    pub fn tokens_saved_by_cache(&self) -> usize {
+        // Cache reads cost 10% of normal, so we save 90% of those tokens
+        self.cache_read_tokens.unwrap_or(0)
+    }
 }
 
 /// Response from LLM including message and token usage
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmResponse {
     pub message: Message,
     pub usage: Option<TokenUsage>,
@@ -83,7 +127,32 @@ pub trait LlmClient: Send + Sync {
     }
 }
 
+/// Create an LLM client with optional caching wrapper
 pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
+    // Create the underlying provider client
+    let inner_client = create_provider_client(config).await?;
+
+    // Wrap with caching if enabled
+    if config.cache.enabled {
+        let cache_config = config.cache.to_llm_cache_config();
+        tracing::info!(
+            "Token caching enabled (app_cache={}, provider_native={}, ttl={}min)",
+            cache_config.application_cache,
+            cache_config.provider_native,
+            config.cache.ttl_minutes
+        );
+        Ok(Box::new(cached::CachingLlmClient::new(
+            inner_client,
+            config.llm.model.clone(),
+            cache_config,
+        )))
+    } else {
+        Ok(inner_client)
+    }
+}
+
+/// Create the underlying provider-specific LLM client (without caching)
+async fn create_provider_client(config: &crate::config::Config) -> Result<Box<dyn LlmClient>> {
     match config.llm.provider {
         LlmProvider::Anthropic => {
             // Check if we have a stored token (could be OAuth or API key)
@@ -186,6 +255,18 @@ pub async fn create_client(config: &crate::config::Config) -> Result<Box<dyn Llm
                 config.llm.max_tokens,
             )))
         }
+        LlmProvider::OpenRouter => {
+            let api_key = config.get_auth_token().context(
+                "OpenRouter API key not set. Set OPENROUTER_API_KEY or configure API key",
+            )?;
+
+            tracing::info!("🌐 Using OpenRouter (75+ models available)");
+            Ok(Box::new(openrouter::OpenRouterClient::new(
+                api_key,
+                config.llm.model.clone(),
+                config.llm.max_tokens,
+            )))
+        }
     }
 }
 
@@ -201,6 +282,65 @@ impl Message {
         Self {
             role: Role::Assistant,
             content,
+        }
+    }
+}
+
+/// Create an LLM client from a SubagentModelConfig
+/// Used for per-subagent model configuration
+pub async fn create_client_from_subagent_config(
+    subagent_config: &crate::config::SubagentModelConfig,
+) -> Result<Box<dyn LlmClient>> {
+    let api_key = subagent_config.get_api_key();
+
+    match subagent_config.provider {
+        LlmProvider::Anthropic => {
+            let key = api_key.context("Anthropic API key not set for subagent")?;
+            Ok(Box::new(anthropic::AnthropicClient::new(
+                key,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
+        }
+        LlmProvider::OpenAI => {
+            let key = api_key.context("OpenAI API key not set for subagent")?;
+            Ok(Box::new(openai::OpenAiClient::new(
+                key,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+                None, // No custom base URL for subagents
+            )))
+        }
+        LlmProvider::OpenRouter => {
+            let key = api_key.context("OpenRouter API key not set for subagent")?;
+            tracing::info!(
+                "🌐 Subagent using OpenRouter model: {}",
+                subagent_config.model
+            );
+            Ok(Box::new(openrouter::OpenRouterClient::new(
+                key,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
+        }
+        LlmProvider::Ollama => {
+            tracing::info!("🦙 Subagent using Ollama model: {}", subagent_config.model);
+            Ok(Box::new(ollama::OllamaClient::new(
+                None, // Default Ollama URL
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
+        }
+        LlmProvider::GitHubCopilot => {
+            let github_token = api_key.context("GitHub Copilot token not set for subagent")?;
+            let copilot_token = copilot::get_copilot_token(&github_token)
+                .await
+                .context("Failed to get Copilot token for subagent")?;
+            Ok(Box::new(copilot::CopilotClient::new(
+                copilot_token,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
         }
     }
 }

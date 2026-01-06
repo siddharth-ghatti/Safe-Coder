@@ -161,6 +161,29 @@ impl SidebarState {
             self.token_usage.input_tokens + self.token_usage.output_tokens;
     }
 
+    /// Update token usage with cache information
+    pub fn update_tokens_with_cache(
+        &mut self,
+        input: usize,
+        output: usize,
+        cache_read: Option<usize>,
+        cache_write: Option<usize>,
+    ) {
+        self.token_usage.input_tokens += input;
+        self.token_usage.output_tokens += output;
+        self.token_usage.total_tokens =
+            self.token_usage.input_tokens + self.token_usage.output_tokens;
+
+        // Update cache stats if present
+        let read_tokens = cache_read.unwrap_or(0);
+        let write_tokens = cache_write.unwrap_or(0);
+        if read_tokens > 0 || write_tokens > 0 {
+            let is_hit = read_tokens > 0;
+            self.token_usage
+                .update_cache_stats(read_tokens, write_tokens, is_hit);
+        }
+    }
+
     /// Reset token usage (for new session)
     pub fn reset_tokens(&mut self) {
         self.token_usage = TokenUsage::default();
@@ -502,6 +525,16 @@ pub struct TokenUsage {
     pub context_window: usize,
     /// Tokens that have been compressed/summarized (to show history)
     pub compressed_tokens: usize,
+    /// Tokens read from provider cache (Anthropic/OpenAI)
+    pub cache_read_tokens: usize,
+    /// Tokens written to provider cache
+    pub cache_write_tokens: usize,
+    /// Number of cache hits
+    pub cache_hits: usize,
+    /// Number of cache misses
+    pub cache_misses: usize,
+    /// Estimated cost savings from caching (in dollars)
+    pub estimated_savings: f64,
 }
 
 impl TokenUsage {
@@ -513,6 +546,11 @@ impl TokenUsage {
             total_tokens: 0,
             context_window,
             compressed_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            estimated_savings: 0.0,
         }
     }
 
@@ -561,6 +599,65 @@ impl TokenUsage {
             format_number(self.output_tokens),
             format_number(self.total_tokens)
         )
+    }
+
+    /// Update cache statistics from LLM response
+    pub fn update_cache_stats(&mut self, cache_read: usize, cache_write: usize, is_hit: bool) {
+        self.cache_read_tokens += cache_read;
+        self.cache_write_tokens += cache_write;
+        if is_hit {
+            self.cache_hits += 1;
+        } else {
+            self.cache_misses += 1;
+        }
+        self.update_estimated_savings();
+    }
+
+    /// Calculate cache hit rate as percentage
+    pub fn cache_hit_rate(&self) -> f32 {
+        let total = self.cache_hits + self.cache_misses;
+        if total == 0 {
+            0.0
+        } else {
+            (self.cache_hits as f32 / total as f32) * 100.0
+        }
+    }
+
+    /// Update estimated savings based on cache reads
+    /// Uses approximate pricing: cache reads are 90% cheaper than regular input
+    fn update_estimated_savings(&mut self) {
+        // Anthropic pricing: ~$3/1M input tokens, cached = $0.30/1M (90% savings)
+        // We save $2.70 per 1M cached tokens
+        let savings_per_million = 2.70;
+        self.estimated_savings =
+            (self.cache_read_tokens as f64 / 1_000_000.0) * savings_per_million;
+    }
+
+    /// Format cache display for sidebar
+    pub fn format_cache_display(&self) -> String {
+        if self.cache_read_tokens == 0 && self.cache_write_tokens == 0 {
+            "Cache: --".to_string()
+        } else {
+            format!(
+                "Cache: {} read ({:.0}% hit)",
+                format_number(self.cache_read_tokens),
+                self.cache_hit_rate()
+            )
+        }
+    }
+
+    /// Format savings display
+    pub fn format_savings(&self) -> String {
+        if self.estimated_savings < 0.01 {
+            "Saved: <$0.01".to_string()
+        } else {
+            format!("Saved: ~${:.2}", self.estimated_savings)
+        }
+    }
+
+    /// Check if there's any cache activity to display
+    pub fn has_cache_activity(&self) -> bool {
+        self.cache_read_tokens > 0 || self.cache_write_tokens > 0 || self.cache_hits > 0
     }
 }
 
@@ -638,6 +735,11 @@ mod tests {
             total_tokens: 2000,
             context_window: 200_000,
             compressed_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            estimated_savings: 0.0,
         };
         assert_eq!(usage.format_display(), "In: 1.5K / Out: 500");
     }

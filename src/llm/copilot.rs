@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, ToolDefinition};
+use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 // Helper function to get Copilot token from GitHub token
 pub async fn get_copilot_token(github_token: &str) -> Result<String> {
@@ -92,9 +92,18 @@ struct CopilotToolFunction {
     parameters: serde_json::Value,
 }
 
+/// Usage information from Copilot response (OpenAI-compatible)
+#[derive(Debug, Deserialize)]
+struct CopilotUsage {
+    prompt_tokens: usize,
+    completion_tokens: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct CopilotResponse {
     choices: Vec<CopilotChoice>,
+    #[serde(default)]
+    usage: Option<CopilotUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -261,12 +270,17 @@ impl LlmClient for CopilotClient {
             });
         }
 
+        // Extract token usage (Copilot uses OpenAI-compatible format)
+        let usage = copilot_response
+            .usage
+            .map(|u| TokenUsage::new(u.prompt_tokens, u.completion_tokens));
+
         Ok(LlmResponse {
             message: Message {
                 role: Role::Assistant,
                 content: content_blocks,
             },
-            usage: None, // Copilot client doesn't track usage yet
+            usage,
         })
     }
 }
