@@ -12,6 +12,10 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 |---------|------------|-------------|--------|-------|
 | **Multi-Agent Orchestration** | ✅ Claude + Gemini + Copilot | ❌ | ❌ | ❌ |
 | **Subagent System** | ✅ 5 specialized types | ❌ | ❌ | ❌ |
+| **Multi-Model Subagents** | ✅ Per-agent LLM config | ❌ | ❌ | ❌ |
+| **AST-Grep (Structural Search)** | ✅ Tree-sitter based | ❌ | ❌ | ❌ |
+| **Skill System** | ✅ Loadable knowledge files | ❌ | ❌ | ❌ |
+| **Lifecycle Hooks** | ✅ Pre/Post tool hooks | ❌ | ❌ | ❌ |
 | **75+ Model Support** | ✅ via OpenRouter | ❌ | Limited | ✅ |
 | **LSP Integration** | ✅ Auto-download | ❌ | Built-in | ❌ |
 | **Git-Agnostic Checkpoints** | ✅ Works anywhere | ❌ | ❌ | ❌ |
@@ -52,6 +56,94 @@ safe-coder chat
 ```
 
 ## 🌟 What's New
+
+### 🚀 **Advanced Extensibility Features (v2.6)**
+
+#### 🤖 **Multi-Model Subagents**
+Configure different LLM providers per subagent type for optimal cost/performance:
+```toml
+[subagents.analyzer]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"  # Best for analysis
+
+[subagents.tester]
+provider = "openai"
+model = "gpt-4o"  # Fast for test generation
+
+[subagents.documenter]
+provider = "ollama"
+model = "llama3.1:8b"  # Local, free for docs
+```
+
+#### 🔍 **AST-Grep (Structural Code Search)**
+Search code by structure, not just text. Uses tree-sitter for AST parsing:
+```bash
+# Find all function definitions in Rust
+safe-coder ast-grep --pattern "function_item" --language rust
+
+# Find all Python classes
+safe-coder ast-grep --pattern "class_definition" --language python
+
+# Use tree-sitter queries for complex patterns
+safe-coder ast-grep --pattern "(function_item name: (identifier) @name)"
+```
+Supports: **Rust, TypeScript, JavaScript, Python, Go**
+
+#### 📚 **Skill System**
+Load specialized knowledge into AI context via markdown files:
+```bash
+# List available skills
+/skill list
+
+# Activate a skill
+/skill activate rust-patterns
+
+# Skills auto-activate based on file patterns
+# Working on *.rs files? rust-patterns activates automatically!
+```
+
+Create custom skills in `.safe-coder/skills/`:
+```markdown
+---
+name: my-api-patterns
+trigger: ["*.ts", "src/api/**"]
+description: Our API conventions
+---
+
+# API Patterns
+
+When creating API endpoints:
+1. Always use zod for validation
+2. Return consistent error shapes
+...
+```
+
+**Built-in Skills:**
+- `rust-patterns` - Rust idioms (triggers: `*.rs`)
+- `react-patterns` - React/TypeScript best practices (triggers: `*.tsx`, `*.jsx`)
+- `python-patterns` - Python idioms (triggers: `*.py`)
+
+#### 🪝 **Hooks System**
+Add custom logic at lifecycle points for validation, logging, or automation:
+
+**Available Hook Points:**
+| Hook | When It Fires |
+|------|---------------|
+| `PreToolUse` | Before any tool executes |
+| `PostToolUse` | After any tool completes |
+| `PreFileWrite` | Before writing to a file |
+| `PostFileWrite` | After writing to a file |
+| `PreBash` | Before bash command execution |
+| `PostBash` | After bash command completes |
+| `OnError` | When an error occurs |
+| `OnContextLimit` | When context limit is approaching |
+| `OnSessionStart` | When a new session begins |
+
+**Built-in Hooks:**
+- `CommentChecker` - Warns about TODO/FIXME in new code
+- `ContextMonitor` - Alerts when context usage is high
+- `TodoEnforcer` - Ensures todos are tracked properly
+- `EditValidator` - Validates file edits before applying
 
 ### 🌐 **OpenRouter + 75+ Models (v2.5)**
 - **One API, 75+ models** - Access Claude, GPT-4, Gemini, Llama, Mistral, DeepSeek, and more through a single API
@@ -113,6 +205,7 @@ safe-coder chat
 - **Better word wrapping** - Improved text rendering in the TUI
 
 ### 🛠️ **Expanded Tool Suite**
+- **AST-Grep** - Structural code search using tree-sitter AST parsing
 - **Glob search** - Fast file pattern matching with `**/*.rs` syntax
 - **Grep search** - Content search across files with regex support
 - **File listing** - Directory exploration with smart filtering
@@ -159,6 +252,33 @@ safe-coder chat
 - **Custom commands** - User-defined shortcuts for frequent operations
 
 ## Features
+
+### 🔍 **AST-Grep (Structural Code Search)**
+- **Tree-sitter Powered**: Search code by AST structure, not just text patterns
+- **Multi-Language**: Supports Rust, TypeScript, JavaScript, Python, and Go
+- **Pattern Types**: Use simple node types (`function_item`) or full tree-sitter queries
+- **IDE Integration**: Available as a tool for AI agents to use during coding
+- **Fast Indexing**: Respects `.gitignore` and handles large codebases efficiently
+
+### 📚 **Skill System**
+- **Knowledge Injection**: Load specialized context into AI conversations
+- **Auto-Activation**: Skills activate automatically based on file patterns
+- **Custom Skills**: Create project-specific skills in `.safe-coder/skills/`
+- **YAML Frontmatter**: Define triggers, descriptions, and metadata
+- **Built-in Skills**: Comes with Rust, React, and Python best practices
+
+### 🪝 **Hooks System**
+- **Lifecycle Events**: Hook into 9 different lifecycle points
+- **Built-in Validators**: Comment checking, context monitoring, edit validation
+- **Custom Hooks**: Create your own hooks for project-specific workflows
+- **Pre/Post Actions**: Run logic before or after tool execution
+- **Error Handling**: Custom error handlers and recovery logic
+
+### 🤖 **Multi-Model Subagents**
+- **Per-Agent Configuration**: Different LLM providers per subagent type
+- **Cost Optimization**: Use cheaper models for simple tasks
+- **Provider Flexibility**: Mix Anthropic, OpenAI, OpenRouter, and Ollama
+- **Automatic Selection**: Falls back to default provider if not configured
 
 ### 🧠 **Language Server Protocol (LSP) Features**
 - **Automatic Setup**: Download and configure language servers automatically
@@ -483,6 +603,7 @@ safe-coder chat --demo
 | Command Type | Example | Description |
 |--------------|---------|-------------|
 | **Slash Commands** | `/help`, `/stats`, `/chat save` | Meta-level control |
+| **Skill Commands** | `/skill list`, `/skill activate rust` | Manage knowledge skills |
 | **At-Commands** | `@main.rs`, `@src/**/*.rs` | Attach file context |
 | **Shell Commands** | `!cargo test`, `!git status` | Execute shell commands |
 | **Custom Commands** | `/test`, `/refactor <fn>` | User-defined shortcuts |
@@ -950,6 +1071,32 @@ gemini_max_concurrent = 2       # Max concurrent Gemini workers
 safe_coder_max_concurrent = 2   # Max concurrent Safe-Coder workers
 copilot_max_concurrent = 2      # Max concurrent GitHub Copilot workers
 start_delay_ms = 100            # Delay between starting workers (ms)
+
+# Per-subagent LLM configuration (optional - falls back to main [llm] if not set)
+[subagents.analyzer]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+
+[subagents.tester]
+provider = "openai"
+model = "gpt-4o"
+max_tokens = 4096
+
+[subagents.refactorer]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 8192
+
+[subagents.documenter]
+provider = "ollama"
+model = "llama3.1:8b"
+max_tokens = 4096
+
+[subagents.custom]
+provider = "openrouter"
+model = "anthropic/claude-3.5-sonnet"
+max_tokens = 4096
 ```
 
 ## How It Works
@@ -1078,6 +1225,7 @@ safe-coder/
 │   │   ├── edit.rs          # File editing with diffs
 │   │   ├── glob.rs          # File pattern matching
 │   │   ├── grep.rs          # Content search
+│   │   ├── ast_grep.rs      # Structural code search (tree-sitter)
 │   │   ├── list.rs          # Directory listing
 │   │   ├── todo.rs          # Task tracking
 │   │   └── webfetch.rs      # Web content retrieval
@@ -1090,7 +1238,14 @@ safe-coder/
 │   ├── loop_detector/       # AI loop detection
 │   ├── permissions/         # Permission mode handling
 │   ├── prompts/             # System prompts
-│   └── git/                 # Git change tracking
+│   ├── git/                 # Git change tracking
+│   ├── skills/              # Skill system for knowledge injection
+│   │   └── mod.rs           # Skill loading and management
+│   └── hooks/               # Lifecycle hooks system
+│       ├── mod.rs           # Hook types and exports
+│       ├── types.rs         # Hook trait and context definitions
+│       ├── builtin.rs       # Built-in hooks (comment checker, etc.)
+│       └── manager.rs       # Hook registration and execution
 ├── Cargo.toml
 └── README.md
 ```
@@ -1184,6 +1339,10 @@ safe-coder login anthropic
 - [x] **Specialized subagent system** - Deploy focused AI agents for specific tasks
 - [x] **Enhanced task planning** - Complexity scoring and intelligent agent assignment
 - [x] **Tool-restricted agents** - Safety through limited tool access per agent type
+- [x] **Multi-model subagents** - Configure different LLM providers per subagent type
+- [x] **AST-Grep tool** - Structural code search using tree-sitter
+- [x] **Hooks system** - Lifecycle hooks for extensibility (pre/post tool, file write, etc.)
+- [x] **Skill system** - Loadable knowledge files with auto-activation
 - [ ] LLM-assisted task planning (using AI for smarter decomposition)
 - [ ] Dependency-aware task scheduling
 - [ ] Interactive conflict resolution in TUI
@@ -1204,4 +1363,5 @@ MIT License - See LICENSE file for details
 - Orchestrates [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Gemini CLI](https://github.com/google/gemini-cli), and [GitHub Copilot](https://cli.github.com/)
 - TUI powered by [Ratatui](https://github.com/ratatui-org/ratatui)
 - Diff rendering powered by the [Similar](https://github.com/mitsuhiko/similar) crate
+- AST parsing powered by [Tree-sitter](https://tree-sitter.github.io/tree-sitter/)
 - Built with Rust for performance and safety

@@ -285,3 +285,62 @@ impl Message {
         }
     }
 }
+
+/// Create an LLM client from a SubagentModelConfig
+/// Used for per-subagent model configuration
+pub async fn create_client_from_subagent_config(
+    subagent_config: &crate::config::SubagentModelConfig,
+) -> Result<Box<dyn LlmClient>> {
+    let api_key = subagent_config.get_api_key();
+
+    match subagent_config.provider {
+        LlmProvider::Anthropic => {
+            let key = api_key.context("Anthropic API key not set for subagent")?;
+            Ok(Box::new(anthropic::AnthropicClient::new(
+                key,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
+        }
+        LlmProvider::OpenAI => {
+            let key = api_key.context("OpenAI API key not set for subagent")?;
+            Ok(Box::new(openai::OpenAiClient::new(
+                key,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+                None, // No custom base URL for subagents
+            )))
+        }
+        LlmProvider::OpenRouter => {
+            let key = api_key.context("OpenRouter API key not set for subagent")?;
+            tracing::info!(
+                "🌐 Subagent using OpenRouter model: {}",
+                subagent_config.model
+            );
+            Ok(Box::new(openrouter::OpenRouterClient::new(
+                key,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
+        }
+        LlmProvider::Ollama => {
+            tracing::info!("🦙 Subagent using Ollama model: {}", subagent_config.model);
+            Ok(Box::new(ollama::OllamaClient::new(
+                None, // Default Ollama URL
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
+        }
+        LlmProvider::GitHubCopilot => {
+            let github_token = api_key.context("GitHub Copilot token not set for subagent")?;
+            let copilot_token = copilot::get_copilot_token(&github_token)
+                .await
+                .context("Failed to get Copilot token for subagent")?;
+            Ok(Box::new(copilot::CopilotClient::new(
+                copilot_token,
+                subagent_config.model.clone(),
+                subagent_config.max_tokens,
+            )))
+        }
+    }
+}

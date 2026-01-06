@@ -21,6 +21,60 @@ pub struct Config {
     pub mcp: McpConfig,
     #[serde(default)]
     pub checkpoint: CheckpointConfig,
+    #[serde(default)]
+    pub subagents: SubagentConfig,
+}
+
+/// Configuration for subagent models
+/// Allows different LLM providers/models for each subagent type
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubagentConfig {
+    /// Model for Code Analyzer subagent (read-only analysis)
+    #[serde(default)]
+    pub analyzer: Option<SubagentModelConfig>,
+    /// Model for Tester subagent (test creation/execution)
+    #[serde(default)]
+    pub tester: Option<SubagentModelConfig>,
+    /// Model for Refactorer subagent (code improvements)
+    #[serde(default)]
+    pub refactorer: Option<SubagentModelConfig>,
+    /// Model for Documenter subagent (documentation)
+    #[serde(default)]
+    pub documenter: Option<SubagentModelConfig>,
+    /// Model for Custom subagent
+    #[serde(default)]
+    pub custom: Option<SubagentModelConfig>,
+}
+
+impl Default for SubagentConfig {
+    fn default() -> Self {
+        Self {
+            analyzer: None,
+            tester: None,
+            refactorer: None,
+            documenter: None,
+            custom: None,
+        }
+    }
+}
+
+/// Per-subagent model configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubagentModelConfig {
+    /// Provider to use (anthropic, openai, openrouter, ollama)
+    pub provider: LlmProvider,
+    /// Model name/ID
+    pub model: String,
+    /// Optional API key (falls back to main config or env var)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Max tokens for this subagent
+    #[serde(default = "default_subagent_max_tokens")]
+    pub max_tokens: usize,
+}
+
+fn default_subagent_max_tokens() -> usize {
+    4096
 }
 
 /// LSP configuration wrapper
@@ -414,6 +468,19 @@ impl Config {
             .clone()
             .context("No API key or valid token found")
     }
+
+    /// Get the model configuration for a specific subagent kind
+    /// Returns None if no specific config is set (falls back to main LLM)
+    pub fn get_subagent_model(&self, kind: &str) -> Option<&SubagentModelConfig> {
+        match kind {
+            "analyzer" | "code_analyzer" => self.subagents.analyzer.as_ref(),
+            "tester" => self.subagents.tester.as_ref(),
+            "refactorer" => self.subagents.refactorer.as_ref(),
+            "documenter" => self.subagents.documenter.as_ref(),
+            "custom" => self.subagents.custom.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 impl Default for Config {
@@ -461,6 +528,26 @@ impl Default for Config {
             cache: CacheConfig::default(),
             mcp: McpConfig::default(),
             checkpoint: CheckpointConfig::default(),
+            subagents: SubagentConfig::default(),
+        }
+    }
+}
+
+impl SubagentModelConfig {
+    /// Get the API key for this subagent config, falling back to environment variables
+    pub fn get_api_key(&self) -> Option<String> {
+        // First check explicit config
+        if let Some(ref key) = self.api_key {
+            return Some(key.clone());
+        }
+
+        // Fall back to environment variables based on provider
+        match self.provider {
+            LlmProvider::Anthropic => std::env::var("ANTHROPIC_API_KEY").ok(),
+            LlmProvider::OpenAI => std::env::var("OPENAI_API_KEY").ok(),
+            LlmProvider::OpenRouter => std::env::var("OPENROUTER_API_KEY").ok(),
+            LlmProvider::GitHubCopilot => std::env::var("GITHUB_COPILOT_TOKEN").ok(),
+            LlmProvider::Ollama => None, // Ollama doesn't need API key
         }
     }
 }

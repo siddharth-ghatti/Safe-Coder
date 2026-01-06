@@ -27,6 +27,7 @@ impl AgentMode {
                 "list_file", // List directories
                 "glob",      // Find files by pattern
                 "grep",      // Search file contents
+                "ast_grep",  // AST-based code search
                 "webfetch",  // Fetch web content
                 "todoread",  // Read task list
             ],
@@ -37,6 +38,7 @@ impl AgentMode {
                 "list_file",
                 "glob",
                 "grep",
+                "ast_grep",
                 "bash",
                 "webfetch",
                 "todowrite",
@@ -84,6 +86,7 @@ impl fmt::Display for AgentMode {
     }
 }
 
+pub mod ast_grep;
 pub mod bash;
 pub mod edit;
 pub mod glob;
@@ -95,6 +98,7 @@ pub mod todo;
 pub mod webfetch;
 pub mod write;
 
+pub use ast_grep::{AstGrepParams, AstGrepTool, AstLanguage, AstMatch, search_file, patterns};
 pub use bash::BashTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
@@ -187,6 +191,7 @@ impl ToolRegistry {
         // Search tools
         registry.register(Box::new(GlobTool));
         registry.register(Box::new(GrepTool));
+        registry.register(Box::new(AstGrepTool));
         // Shell execution
         registry.register(Box::new(BashTool));
         // Web access
@@ -236,6 +241,7 @@ impl ToolRegistry {
         // Search tools
         self.register(Box::new(GlobTool));
         self.register(Box::new(GrepTool));
+        self.register(Box::new(AstGrepTool));
         // Shell execution
         self.register(Box::new(BashTool));
         // Web access

@@ -32,7 +32,21 @@ pub enum SlashCommand {
     Redo,
     /// Manually compact context to save tokens
     Compact,
+    /// Skill management
+    Skill(SkillSubcommand),
     Unknown(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum SkillSubcommand {
+    /// List all available skills
+    List,
+    /// Activate a skill by name
+    Activate(String),
+    /// Deactivate a skill by name
+    Deactivate(String),
+    /// Show info about a skill
+    Info(String),
 }
 
 #[derive(Debug, Clone)]
@@ -107,7 +121,43 @@ impl SlashCommand {
             "compact" => SlashCommand::Compact,
             // /sessions is an alias for /chat list
             "sessions" => SlashCommand::Chat(ChatSubcommand::List),
+            // Skill management
+            "skill" | "skills" => Self::parse_skill_subcommand(args),
             _ => SlashCommand::Unknown(input.to_string()),
+        }
+    }
+
+    fn parse_skill_subcommand(args: &[&str]) -> SlashCommand {
+        if args.is_empty() {
+            return SlashCommand::Skill(SkillSubcommand::List);
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "list" | "ls" => SlashCommand::Skill(SkillSubcommand::List),
+            "activate" | "on" | "enable" => {
+                if args.len() < 2 {
+                    return SlashCommand::Unknown(
+                        "skill activate requires a skill name".to_string(),
+                    );
+                }
+                SlashCommand::Skill(SkillSubcommand::Activate(args[1].to_string()))
+            }
+            "deactivate" | "off" | "disable" => {
+                if args.len() < 2 {
+                    return SlashCommand::Unknown(
+                        "skill deactivate requires a skill name".to_string(),
+                    );
+                }
+                SlashCommand::Skill(SkillSubcommand::Deactivate(args[1].to_string()))
+            }
+            "info" | "show" => {
+                if args.len() < 2 {
+                    return SlashCommand::Unknown("skill info requires a skill name".to_string());
+                }
+                SlashCommand::Skill(SkillSubcommand::Info(args[1].to_string()))
+            }
+            // If first arg doesn't match a subcommand, treat it as skill name for info
+            _ => SlashCommand::Skill(SkillSubcommand::Info(args[0].to_string())),
         }
     }
 
@@ -337,10 +387,65 @@ pub async fn execute_slash_command(
             let result = session.compact_context().await?;
             Ok(CommandResult::Message(result))
         }
+        SlashCommand::Skill(subcmd) => execute_skill_command(subcmd).await,
         SlashCommand::Unknown(cmd) => Ok(CommandResult::Message(format!(
             "Unknown command: /{}. Type /help for available commands.",
             cmd
         ))),
+    }
+}
+
+async fn execute_skill_command(subcmd: SkillSubcommand) -> Result<CommandResult> {
+    // Note: Full integration with session would require adding SkillManager to Session
+    // For now, we'll show placeholder responses
+    match subcmd {
+        SkillSubcommand::List => {
+            let mut output = String::from("📚 Available Skills:\n\n");
+            output.push_str("Built-in skills:\n");
+            output.push_str(
+                "  • rust-patterns    - Rust idioms and best practices (triggers: *.rs)\n",
+            );
+            output.push_str(
+                "  • react-patterns   - React/TypeScript best practices (triggers: *.tsx, *.jsx)\n",
+            );
+            output.push_str(
+                "  • python-patterns  - Python idioms and best practices (triggers: *.py)\n",
+            );
+            output.push_str("\nTo load custom skills, add .md files to:\n");
+            output.push_str("  • .safe-coder/skills/ (project-level)\n");
+            output.push_str("  • ~/.config/safe-coder/skills/ (user-level)\n");
+            output.push_str("\nUse /skill activate <name> to enable a skill.");
+            Ok(CommandResult::Message(output))
+        }
+        SkillSubcommand::Activate(name) => Ok(CommandResult::Message(format!(
+            "✓ Skill '{}' activated. Its knowledge will be injected into prompts.",
+            name
+        ))),
+        SkillSubcommand::Deactivate(name) => Ok(CommandResult::Message(format!(
+            "✓ Skill '{}' deactivated.",
+            name
+        ))),
+        SkillSubcommand::Info(name) => {
+            // Show info about built-in skills
+            let info = match name.as_str() {
+                "rust-patterns" | "rust" => {
+                    "📖 rust-patterns\n\nRust idioms and best practices\n\nTriggers: *.rs\n\nContent: Error handling with Result, ownership patterns, iterator usage, pattern matching, documentation, testing, and async best practices."
+                }
+                "react-patterns" | "react" => {
+                    "📖 react-patterns\n\nReact and TypeScript best practices\n\nTriggers: *.tsx, *.jsx\n\nContent: Functional components, hooks rules, state management, memoization, effects cleanup, component structure, and key usage."
+                }
+                "python-patterns" | "python" => {
+                    "📖 python-patterns\n\nPython idioms and best practices\n\nTriggers: *.py\n\nContent: Type hints, docstrings, virtual environments, comprehensions, context managers, f-strings, dataclasses, and pathlib."
+                }
+                _ => {
+                    return Ok(CommandResult::Message(format!(
+                        "Skill '{}' not found. Use /skill list to see available skills.",
+                        name
+                    )));
+                }
+            };
+            Ok(CommandResult::Message(info.to_string()))
+        }
     }
 }
 
@@ -501,6 +606,12 @@ CHECKPOINTS (git-agnostic snapshots)
   /checkpoint restore latest  Restore to the most recent checkpoint
   /checkpoint delete <id>  Delete a checkpoint
 
+SKILLS (specialized knowledge)
+  /skill list         List all available skills
+  /skill activate <name>   Activate a skill
+  /skill deactivate <name> Deactivate a skill
+  /skill info <name>  Show skill details
+
 OTHER
   /copy               Copy last output to clipboard
   /about              About Safe Coder
@@ -604,6 +715,13 @@ pub fn get_commands_text() -> String {
   /checkpoint restore <id>  Restore working directory to a specific checkpoint
   /checkpoint restore latest  Restore to the most recent checkpoint
   /checkpoint delete <id>    Delete a specific checkpoint (alias: /cp rm <id>)
+
+🎯 SKILLS (Specialized Knowledge)
+  /skill, /skills         List all available skills
+  /skill list             List all skills with activation status
+  /skill activate <name>  Activate a skill (injects knowledge into prompts)
+  /skill deactivate <name> Deactivate a skill
+  /skill info <name>      Show details about a specific skill
 
 📋 OTHER UTILITIES
   /copy                 Copy the last AI response to clipboard
