@@ -13,6 +13,7 @@ use crate::custom_commands::CustomCommandManager;
 use crate::git::GitManager;
 use crate::llm::{create_client, ContentBlock, LlmClient, Message, ToolDefinition};
 use crate::loop_detector::{DoomLoopAction, LoopDetector};
+use crate::lsp::LspManager;
 use crate::mcp::McpManager;
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
@@ -110,6 +111,9 @@ pub struct Session {
 
     // MCP server manager
     mcp_manager: McpManager,
+
+    // LSP manager for diagnostics
+    lsp_manager: LspManager,
 }
 
 impl Session {
@@ -164,6 +168,16 @@ impl Session {
         let dir_checkpoints =
             DirectoryCheckpointManager::new(project_path.clone(), config.checkpoint.clone())?;
 
+        // Initialize LSP manager for diagnostics
+        // Pass None to use default LSP configs - the LspConfigWrapper from config.lsp
+        // is for user overrides which we'll apply later if needed
+        let mut lsp_manager = LspManager::new(project_path.clone(), None);
+        if config.lsp.enabled {
+            if let Err(e) = lsp_manager.initialize().await {
+                tracing::warn!("LSP initialization failed (continuing without LSP): {}", e);
+            }
+        }
+
         Ok(Self {
             config,
             llm_client,
@@ -190,6 +204,7 @@ impl Session {
             last_output: String::new(),
             subagent_event_tx: event_tx,
             mcp_manager,
+            lsp_manager,
         })
     }
 
@@ -498,9 +513,39 @@ impl Session {
 
             // Add tool results as a new user message
             if !tool_results.is_empty() {
+                let mut final_results = tool_results;
+
+                // Check if any file modifications were made
+                let had_file_edits = tools_executed
+                    .iter()
+                    .any(|t| t == "edit_file" || t == "write_file");
+
+                if had_file_edits {
+                    // Run build verification after file modifications
+                    if let Some(build_errors) = self.verify_build().await {
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
+                                build_errors
+                            ),
+                        });
+                    }
+
+                    // Check for LSP diagnostics after file modifications
+                    let diagnostics_summary = self.lsp_manager.get_diagnostics_summary().await;
+                    if !diagnostics_summary.is_empty() {
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                diagnostics_summary
+                            ),
+                        });
+                    }
+                }
+
                 self.messages.push(Message {
                     role: crate::llm::Role::User,
-                    content: tool_results,
+                    content: final_results,
                 });
             }
         }
@@ -870,21 +915,28 @@ impl Session {
                     // For edit_file, send diff if we have old content
                     // Note: edit_file uses "file_path", write_file uses "path"
                     if (name == "edit_file" || name == "write_file") && success {
-                        if let Some(old) = old_content {
-                            let path_key = if name == "edit_file" {
-                                "file_path"
-                            } else {
-                                "path"
-                            };
-                            if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
-                                let full_path = self.project_path.join(path);
+                        let path_key = if name == "edit_file" {
+                            "file_path"
+                        } else {
+                            "path"
+                        };
+                        if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
+                            let full_path = self.project_path.join(path);
+
+                            // Send diff event if we have old content
+                            if let Some(old) = old_content {
                                 if let Ok(new_content) = std::fs::read_to_string(&full_path) {
                                     let _ = event_tx.send(SessionEvent::FileDiff {
                                         path: path.to_string(),
                                         old_content: old,
-                                        new_content,
+                                        new_content: new_content.clone(),
                                     });
                                 }
+                            }
+
+                            // Notify LSP of file change for diagnostics
+                            if let Err(e) = self.lsp_manager.notify_file_changed(&full_path).await {
+                                tracing::debug!("LSP file change notification failed: {}", e);
                             }
                         }
                     }
@@ -947,9 +999,57 @@ impl Session {
 
             // Add tool results as a new user message
             if !tool_results.is_empty() {
+                let mut final_results = tool_results;
+                let mut has_issues = false;
+
+                // Check if any file modifications were made
+                let had_file_edits = tools_executed
+                    .iter()
+                    .any(|t| t == "edit_file" || t == "write_file");
+
+                if had_file_edits {
+                    // Run build verification after file modifications
+                    if let Some(build_errors) = self.verify_build().await {
+                        has_issues = true;
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
+                                build_errors
+                            ),
+                        });
+
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n❌ Build failed - errors detected\n".to_string(),
+                        ));
+                    }
+
+                    // Check for LSP diagnostics after file modifications
+                    let diagnostics_summary = self.lsp_manager.get_diagnostics_summary().await;
+                    if !diagnostics_summary.is_empty() {
+                        has_issues = true;
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                diagnostics_summary
+                            ),
+                        });
+
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n⚠️ LSP detected issues - see diagnostics above\n".to_string(),
+                        ));
+                    }
+
+                    // If no issues, confirm build success
+                    if !has_issues {
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n✓ Build verified successfully\n".to_string(),
+                        ));
+                    }
+                }
+
                 self.messages.push(Message {
                     role: crate::llm::Role::User,
-                    content: tool_results,
+                    content: final_results,
                 });
             }
         }
@@ -1029,6 +1129,79 @@ impl Session {
         }
 
         plan
+    }
+
+    /// Detect the project type and return the appropriate build command
+    fn detect_build_command(&self) -> Option<&'static str> {
+        // Check for Rust project
+        if self.project_path.join("Cargo.toml").exists() {
+            return Some("cargo build 2>&1");
+        }
+        // Check for Node.js/TypeScript project
+        if self.project_path.join("package.json").exists() {
+            // Check if there's a build script
+            if let Ok(content) = std::fs::read_to_string(self.project_path.join("package.json")) {
+                if content.contains("\"build\"") {
+                    return Some("npm run build 2>&1");
+                }
+                // TypeScript check
+                if content.contains("\"tsc\"") || self.project_path.join("tsconfig.json").exists() {
+                    return Some("npx tsc --noEmit 2>&1");
+                }
+            }
+        }
+        // Check for Go project
+        if self.project_path.join("go.mod").exists() {
+            return Some("go build ./... 2>&1");
+        }
+        // Check for Python project
+        if self.project_path.join("pyproject.toml").exists()
+            || self.project_path.join("setup.py").exists()
+        {
+            // Python doesn't have a traditional "build" but we can type-check
+            if self.project_path.join("pyproject.toml").exists() {
+                return Some("python -m py_compile $(find . -name '*.py' -not -path './venv/*' | head -20) 2>&1");
+            }
+        }
+        None
+    }
+
+    /// Run build verification and return any errors
+    ///
+    /// This runs the project's build command and returns the output if there are errors.
+    /// Returns None if build succeeds or if no build command is available.
+    pub async fn verify_build(&self) -> Option<String> {
+        let build_cmd = self.detect_build_command()?;
+
+        // Run the build command
+        let output = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(build_cmd)
+            .current_dir(&self.project_path)
+            .output()
+            .await
+            .ok()?;
+
+        if output.status.success() {
+            None
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let combined = format!("{}{}", stdout, stderr);
+
+            // Only return if there's meaningful output
+            if combined.trim().is_empty() {
+                Some("Build failed with no output".to_string())
+            } else {
+                // Limit output to avoid overwhelming the context
+                let truncated = if combined.len() > 2000 {
+                    format!("{}...\n[output truncated]", &combined[..2000])
+                } else {
+                    combined.to_string()
+                };
+                Some(truncated)
+            }
+        }
     }
 
     /// Generate a human-readable description of a tool action

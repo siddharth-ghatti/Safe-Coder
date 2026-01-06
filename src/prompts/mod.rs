@@ -121,9 +121,18 @@ subagent(kind: "tester", task: "Write tests for api", file_patterns: ["src/api/*
 
 1. **READ BEFORE EDIT**: Always read a file before modifying it
 2. **ONE CHANGE AT A TIME**: Make a single edit, verify it works, then continue
-3. **VERIFY AFTER CHANGES**: Run `cargo build`, `cargo test`, or equivalent
+3. **AUTOMATIC BUILD VERIFICATION**: After file edits, the system automatically runs build verification and LSP diagnostics. If errors are detected, they will be shown to you - FIX THEM before proceeding.
 4. **PREFER EDIT OVER WRITE**: Use `edit_file` for existing files, `write_file` only for NEW files
 5. **DELEGATE WHEN APPROPRIATE**: Use subagents for focused subtasks
+
+### Automatic Verification (NEW)
+
+After you edit files, the system will:
+- Run `cargo build` (or equivalent for your project type)
+- Check LSP diagnostics for type errors, unused imports, etc.
+- Show you any errors that need fixing
+
+**You MUST fix all build errors before marking a task complete.**
 
 ### Error Handling
 

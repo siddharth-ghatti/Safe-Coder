@@ -34,7 +34,19 @@ pub enum SlashCommand {
     Compact,
     /// Skill management
     Skill(SkillSubcommand),
+    /// Show current unified plan status
+    Plan(PlanSubcommand),
     Unknown(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum PlanSubcommand {
+    /// Show current plan status
+    Show,
+    /// List all step groups
+    Groups,
+    /// Show plan history
+    History,
 }
 
 #[derive(Debug, Clone)]
@@ -123,7 +135,22 @@ impl SlashCommand {
             "sessions" => SlashCommand::Chat(ChatSubcommand::List),
             // Skill management
             "skill" | "skills" => Self::parse_skill_subcommand(args),
+            // Plan management
+            "plan" => Self::parse_plan_subcommand(args),
             _ => SlashCommand::Unknown(input.to_string()),
+        }
+    }
+
+    fn parse_plan_subcommand(args: &[&str]) -> SlashCommand {
+        if args.is_empty() {
+            return SlashCommand::Plan(PlanSubcommand::Show);
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "show" | "status" => SlashCommand::Plan(PlanSubcommand::Show),
+            "groups" | "parallel" => SlashCommand::Plan(PlanSubcommand::Groups),
+            "history" | "log" => SlashCommand::Plan(PlanSubcommand::History),
+            _ => SlashCommand::Plan(PlanSubcommand::Show),
         }
     }
 
@@ -388,10 +415,57 @@ pub async fn execute_slash_command(
             Ok(CommandResult::Message(result))
         }
         SlashCommand::Skill(subcmd) => execute_skill_command(subcmd).await,
+        SlashCommand::Plan(subcmd) => execute_plan_command(subcmd).await,
         SlashCommand::Unknown(cmd) => Ok(CommandResult::Message(format!(
             "Unknown command: /{}. Type /help for available commands.",
             cmd
         ))),
+    }
+}
+
+async fn execute_plan_command(subcmd: PlanSubcommand) -> Result<CommandResult> {
+    match subcmd {
+        PlanSubcommand::Show => {
+            let mut output = String::from("📋 Unified Planning System\n\n");
+            output.push_str("The unified planning system centralizes all task planning across execution modes.\n\n");
+            output.push_str("Execution Modes:\n");
+            output.push_str("  • Direct      - Sequential inline execution (simple tasks)\n");
+            output.push_str("  • Subagent    - Parallel internal agents (medium complexity)\n");
+            output.push_str(
+                "  • Orchestration - Parallel CLI workers in git worktrees (large tasks)\n\n",
+            );
+            output.push_str("Current Status: No active plan\n");
+            output.push_str(
+                "\nUse /mode to set execution mode, then submit a task to create a plan.\n",
+            );
+            output.push_str("Plans are created by the LLM with mode-aware parallelism.\n");
+            Ok(CommandResult::Message(output))
+        }
+        PlanSubcommand::Groups => {
+            let mut output = String::from("📊 Step Groups (Parallelism)\n\n");
+            output.push_str("No active plan with step groups.\n\n");
+            output.push_str("When a plan is active, this shows:\n");
+            output.push_str("  • Groups of steps that execute sequentially\n");
+            output.push_str("  • Steps within each group that can run in parallel\n");
+            output.push_str("  • Dependencies between groups\n\n");
+            output.push_str("Example:\n");
+            output.push_str("  Group 1 (parallel: 2 steps)\n");
+            output.push_str("    ├─ Step 1: Add auth module\n");
+            output.push_str("    └─ Step 2: Add user model\n");
+            output.push_str("  Group 2 (depends on Group 1)\n");
+            output.push_str("    └─ Step 3: Write tests\n");
+            Ok(CommandResult::Message(output))
+        }
+        PlanSubcommand::History => {
+            let mut output = String::from("📜 Plan History\n\n");
+            output.push_str("No plans executed in this session.\n\n");
+            output.push_str("Plan history shows:\n");
+            output.push_str("  • Previously executed plans\n");
+            output.push_str("  • Execution mode used\n");
+            output.push_str("  • Success/failure status\n");
+            output.push_str("  • Duration and step counts\n");
+            Ok(CommandResult::Message(output))
+        }
     }
 }
 
@@ -612,6 +686,11 @@ SKILLS (specialized knowledge)
   /skill deactivate <name> Deactivate a skill
   /skill info <name>  Show skill details
 
+UNIFIED PLANNING
+  /plan               Show current plan status
+  /plan groups        Show step groups and parallelism
+  /plan history       Show plan execution history
+
 OTHER
   /copy               Copy last output to clipboard
   /about              About Safe Coder
@@ -722,6 +801,15 @@ pub fn get_commands_text() -> String {
   /skill activate <name>  Activate a skill (injects knowledge into prompts)
   /skill deactivate <name> Deactivate a skill
   /skill info <name>      Show details about a specific skill
+
+📐 UNIFIED PLANNING
+  /plan                   Show current plan status and execution mode
+  /plan groups            Show step groups with parallelism info
+  /plan history           Show execution history of plans
+                          The unified planning system creates mode-aware plans:
+                          • Direct - Sequential inline execution
+                          • Subagent - Parallel internal agents
+                          • Orchestration - Parallel CLI workers in git worktrees
 
 📋 OTHER UTILITIES
   /copy                 Copy the last AI response to clipboard

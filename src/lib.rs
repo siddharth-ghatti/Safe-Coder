@@ -27,3 +27,4 @@ pub mod skills;
 pub mod subagent;
 pub mod tools;
 pub mod tui;
+pub mod unified_planning;

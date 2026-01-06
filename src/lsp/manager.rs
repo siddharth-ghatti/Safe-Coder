@@ -394,6 +394,30 @@ impl LspManager {
         Ok(())
     }
 
+    /// Notify LSP that a file has changed (convenience method)
+    ///
+    /// This reads the file content and notifies the LSP server.
+    /// If the file wasn't previously opened, it opens it first.
+    pub async fn notify_file_changed(&mut self, path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let content = std::fs::read_to_string(path)?;
+
+        // Check if document is already open
+        let uri = format!("file://{}", path.display());
+        if self.document_versions.contains_key(&uri) {
+            // Update existing document
+            self.update_document(path, &content).await?;
+        } else {
+            // Open the document first
+            self.open_document(path).await?;
+        }
+
+        Ok(())
+    }
+
     /// Close a document
     pub async fn close_document(&mut self, path: &Path) -> Result<()> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
