@@ -29,7 +29,10 @@ mod ui;
 
 // Markdown rendering
 mod markdown;
-pub use markdown::{create_sample_markdown, has_markdown, parse_inline_markdown, render_markdown, render_markdown_lines, render_markdown_with_border};
+pub use markdown::{
+    create_sample_markdown, has_markdown, parse_inline_markdown, render_markdown,
+    render_markdown_lines, render_markdown_with_border,
+};
 
 // New shell-first TUI modules
 mod shell_app;
@@ -165,13 +168,16 @@ impl TuiRunner {
                 self.app.clear_dirty();
             }
 
-            // Handle events with a shorter timeout for responsiveness
-            if event::poll(Duration::from_millis(30))? {
+            // Handle events (16ms = ~60fps for smooth scrolling)
+            if event::poll(Duration::from_millis(16))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             self.app.set_status("Shutting down...");
                             break;
+                        }
+                        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.app.cycle_agent_mode();
                         }
                         KeyCode::Char(c) => {
                             self.app.input_push(c);
@@ -378,12 +384,15 @@ impl TuiRunner {
                 self.app.clear_dirty();
             }
 
-            // Handle events with a shorter timeout for responsiveness
-            if event::poll(Duration::from_millis(50))? {
+            // Handle events (16ms = ~60fps for smooth scrolling)
+            if event::poll(Duration::from_millis(16))? {
                 if let Event::Key(key) = event::read()? {
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             break;
+                        }
+                        KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            self.app.cycle_agent_mode();
                         }
                         KeyCode::Char(c) => {
                             self.app.input_push(c);

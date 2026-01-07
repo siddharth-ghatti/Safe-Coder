@@ -234,6 +234,8 @@ pub struct CommandBlock {
     pub children: Vec<CommandBlock>,
     /// File diff for edit operations (tool blocks only)
     pub diff: Option<FileDiff>,
+    /// Version counter for render cache invalidation (increments on content change)
+    pub render_version: u32,
 }
 
 impl CommandBlock {
@@ -251,6 +253,7 @@ impl CommandBlock {
             collapsed: false,
             children: Vec::new(),
             diff: None,
+            render_version: 0,
         }
     }
 
@@ -258,7 +261,14 @@ impl CommandBlock {
     pub fn system(message: String, prompt: ShellPrompt) -> Self {
         let mut block = Self::new(String::new(), BlockType::SystemMessage, prompt);
         block.output = BlockOutput::Success(message);
+        block.render_version = 1;
         block
+    }
+
+    /// Bump render version (call after any content change)
+    #[inline]
+    fn bump_version(&mut self) {
+        self.render_version = self.render_version.wrapping_add(1);
     }
 
     /// Mark the block as completed with success
@@ -269,6 +279,7 @@ impl CommandBlock {
         self.output = BlockOutput::Success(output);
         self.exit_code = Some(exit_code);
         self.duration_ms = Some(elapsed);
+        self.bump_version();
     }
 
     /// Mark the block as failed
@@ -279,6 +290,7 @@ impl CommandBlock {
         self.output = BlockOutput::Error { message, stderr };
         self.exit_code = Some(exit_code);
         self.duration_ms = Some(elapsed);
+        self.bump_version();
     }
 
     /// Append streaming output
@@ -295,6 +307,7 @@ impl CommandBlock {
             }
             _ => {}
         }
+        self.bump_version();
     }
 
     /// Mark streaming as complete
@@ -307,11 +320,13 @@ impl CommandBlock {
                 .num_milliseconds() as u64;
             self.duration_ms = Some(elapsed);
         }
+        self.bump_version();
     }
 
     /// Add a child block (for AI tool executions)
     pub fn add_child(&mut self, child: CommandBlock) {
         self.children.push(child);
+        self.bump_version();
     }
 
     /// Check if this block is still running
@@ -403,6 +418,8 @@ pub struct ShellTuiApp {
     pub input_mode: InputMode,
     /// Scroll offset for block list (0 = bottom/most recent)
     pub scroll_offset: usize,
+    /// Whether user is "pinned" to bottom (auto-scroll on new content)
+    pub auto_scroll: bool,
     /// Currently selected block index (for block selection mode)
     pub selected_block: Option<usize>,
     /// Current focus area
@@ -441,6 +458,12 @@ pub struct ShellTuiApp {
     // === Sidebar State ===
     /// Sidebar with plan progress, token usage, and connections
     pub sidebar: SidebarState,
+
+    // === Render Cache ===
+    /// Cached render width (invalidate cache if width changes)
+    pub cached_render_width: usize,
+    /// Total cached line count (for fast scrollbar calculation)
+    pub cached_total_lines: usize,
 }
 
 impl ShellTuiApp {
@@ -474,6 +497,7 @@ impl ShellTuiApp {
             cursor_pos: 0,
             input_mode: InputMode::Normal,
             scroll_offset: 0,
+            auto_scroll: true, // Start pinned to bottom
             selected_block: None,
             focus: FocusArea::Input,
             search_query: String::new(),
@@ -493,6 +517,9 @@ impl ShellTuiApp {
             lsp_initializing: true,
 
             sidebar: SidebarState::new(),
+
+            cached_render_width: 0,
+            cached_total_lines: 0,
         };
 
         // Add welcome message
@@ -555,25 +582,34 @@ impl ShellTuiApp {
         self.needs_redraw = false;
     }
 
-    /// Tick animation state
+    /// Tick animation state - optimized to minimize redraws
     pub fn tick(&mut self) {
-        self.animation_frame = (self.animation_frame + 1) % 100;
+        self.animation_frame = self.animation_frame.wrapping_add(1);
 
-        if self.ai_thinking {
-            self.spinner.tick();
-            self.needs_redraw = true;
+        // Only redraw for spinner animation every 4 ticks (~64ms at 60fps)
+        // This is fast enough for smooth spinners but reduces CPU load
+        if self.animation_frame % 4 == 0 {
+            if self.ai_thinking {
+                self.spinner.tick();
+                self.needs_redraw = true;
+            }
+
+            // Cursor blink - only check when we might redraw anyway
+            // Blink every ~20 ticks = ~320ms
+            let cursor_phase = (self.animation_frame / 4) % 20;
+            if cursor_phase == 0 || cursor_phase == 10 {
+                self.needs_redraw = true;
+            }
         }
 
-        // Cursor blink
-        let old_cursor = (self.animation_frame.wrapping_sub(1) % 20) < 10;
-        let new_cursor = (self.animation_frame % 20) < 10;
-        if old_cursor != new_cursor {
-            self.needs_redraw = true;
-        }
-
-        // Check for any running blocks
-        if self.blocks.iter().any(|b| b.is_running()) {
-            self.needs_redraw = true;
+        // Running block check - only every 8 ticks (~128ms) to reduce overhead
+        // This is still responsive enough for spinner updates
+        if self.animation_frame % 8 == 0 {
+            // Only check last few blocks (most likely to be running)
+            let has_running = self.blocks.iter().rev().take(5).any(|b| b.is_running());
+            if has_running {
+                self.needs_redraw = true;
+            }
         }
     }
 
@@ -765,7 +801,7 @@ impl ShellTuiApp {
     /// Add a new command block
     pub fn add_block(&mut self, block: CommandBlock) {
         self.blocks.push(block);
-        self.scroll_to_bottom();
+        self.auto_scroll_to_bottom(); // Only scroll if user is at bottom
         self.needs_redraw = true;
     }
 
@@ -801,6 +837,7 @@ impl ShellTuiApp {
     pub fn append_to_block(&mut self, id: &str, line: String) {
         if let Some(block) = self.get_block_mut(id) {
             block.append_output(line);
+            self.auto_scroll_to_bottom(); // Keep scrolling if user is at bottom
             self.needs_redraw = true;
         }
     }
@@ -808,28 +845,47 @@ impl ShellTuiApp {
     // === Scrolling ===
 
     pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
+        self.scroll_offset = self.scroll_offset.saturating_add(3); // Scroll 3 lines for smoother feel
+        self.auto_scroll = false; // User scrolled up, disable auto-scroll
         self.needs_redraw = true;
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.scroll_offset = self.scroll_offset.saturating_sub(3); // Scroll 3 lines for smoother feel
+                                                                   // Re-enable auto-scroll if user scrolls back to bottom
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+        }
         self.needs_redraw = true;
     }
 
     pub fn scroll_page_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(10);
+        self.scroll_offset = self.scroll_offset.saturating_add(20);
+        self.auto_scroll = false; // User scrolled up, disable auto-scroll
         self.needs_redraw = true;
     }
 
     pub fn scroll_page_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(10);
+        self.scroll_offset = self.scroll_offset.saturating_sub(20);
+        // Re-enable auto-scroll if user scrolls back to bottom
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+        }
         self.needs_redraw = true;
     }
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+        self.auto_scroll = true; // Re-enable auto-scroll
         self.needs_redraw = true;
+    }
+
+    /// Auto-scroll to bottom only if user hasn't manually scrolled up
+    pub fn auto_scroll_to_bottom(&mut self) {
+        if self.auto_scroll {
+            self.scroll_offset = 0;
+            self.needs_redraw = true;
+        }
     }
 
     // === AI State ===
@@ -1197,6 +1253,7 @@ impl ShellTuiApp {
             "help" => Some(SlashCommand::Help),
             "tools" => Some(SlashCommand::Tools),
             "mode" => Some(SlashCommand::Mode),
+            "agent" => Some(SlashCommand::Agent),
             "commands" => Some(SlashCommand::Commands),
             _ => None,
         }
@@ -1236,6 +1293,8 @@ pub enum SlashCommand {
     Tools,
     /// Show/toggle permission mode
     Mode,
+    /// Show/toggle agent mode (PLAN/BUILD)
+    Agent,
     /// Show commands reference
     Commands,
 }

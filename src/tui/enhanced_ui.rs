@@ -43,6 +43,7 @@ pub fn draw_enhanced(f: &mut Frame, app: &mut App, theme: &Theme) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // Title only - mode moved to sidebar
     let title_spans = StyledComponents::gradient_text("Safe Coder", 400, 600);
     let title = Paragraph::new(Line::from(title_spans))
         .style(Style::default().bg(theme.colors.surface))
@@ -59,11 +60,48 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let sidebar_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(5),  // Mode indicator
             Constraint::Length(8),  // Connection status
             Constraint::Length(6),  // Token usage
             Constraint::Min(0),     // Session info
         ])
         .split(area);
+
+    // Mode indicator card
+    let mode = app.agent_mode;
+    let mode_color = match mode {
+        crate::tools::AgentMode::Plan => theme.colors.info,
+        crate::tools::AgentMode::Build => theme.colors.success,
+    };
+    
+    let mode_description = match mode {
+        crate::tools::AgentMode::Plan => "Read-only exploration",
+        crate::tools::AgentMode::Build => "Full tool access",
+    };
+    
+    let mode_text = vec![
+        Line::from(vec![
+            Span::styled(
+                format!("{}", mode.short_name()),
+                Style::default()
+                    .fg(mode_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                mode_description,
+                Style::default()
+                    .fg(theme.colors.secondary),
+            ),
+        ]),
+    ];
+    
+    let mode_card = Paragraph::new(mode_text)
+        .block(StyledComponents::card("Mode", theme))
+        .alignment(Alignment::Center);
+    
+    f.render_widget(mode_card, sidebar_layout[0]);
 
     // Connection Status Card
     let connection_block = if app.sidebar_state.connections.has_connected_lsp() {
@@ -106,7 +144,7 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .block(connection_block)
         .wrap(Wrap { trim: true });
 
-    f.render_widget(connection_status, sidebar_layout[0]);
+    f.render_widget(connection_status, sidebar_layout[1]);
 
     // Token Usage Card with Progress Bar
     let token_usage = &app.sidebar_state.token_usage;
@@ -128,13 +166,13 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     ];
 
     let token_info = Paragraph::new(token_text).block(token_block);
-    f.render_widget(token_info, sidebar_layout[1]);
+    f.render_widget(token_info, sidebar_layout[2]);
 
     // Progress bar below token info
     let progress_area = Rect {
-        x: sidebar_layout[1].x + 1,
-        y: sidebar_layout[1].y + sidebar_layout[1].height - 2,
-        width: sidebar_layout[1].width - 2,
+        x: sidebar_layout[2].x + 1,
+        y: sidebar_layout[2].y + sidebar_layout[2].height - 2,
+        width: sidebar_layout[2].width - 2,
         height: 1,
     };
     let progress = StyledComponents::progress_bar(usage_ratio, theme);
@@ -171,7 +209,7 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .block(StyledComponents::card("Session", theme))
         .style(Style::default().fg(theme.colors.on_surface));
 
-    f.render_widget(session_list, sidebar_layout[2]);
+    f.render_widget(session_list, sidebar_layout[3]);
 }
 
 fn draw_enhanced_main_content(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -296,7 +334,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(0),      // Status
-            Constraint::Length(20),  // Shortcuts
+            Constraint::Length(30),  // Shortcuts
         ])
         .split(area);
 
@@ -307,7 +345,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(status, footer_layout[0]);
 
     // Shortcuts
-    let shortcuts = Paragraph::new("Tab: Focus | Esc: Help | Ctrl+C: Quit")
+    let shortcuts = Paragraph::new("Tab: Focus | Esc: Help | Ctrl+G: Mode | Ctrl+C: Quit")
         .style(Style::default().fg(theme.colors.secondary))
         .alignment(Alignment::Right);
     f.render_widget(shortcuts, footer_layout[1]);
@@ -328,7 +366,12 @@ fn draw_help_modal(f: &mut Frame, theme: &Theme) {
         Line::from("• Enter - Send message"),
         Line::from("• Esc - Close this help"),
         Line::from("• F1 - Cycle theme (Dark → Light → Monokai)"),
+        Line::from("• Ctrl+G - Cycle agent mode (Plan ↔ Build)"),
         Line::from("• Ctrl+C - Quit application"),
+        Line::from(""),
+        Line::from("Agent Modes:"),
+        Line::from("• PLAN - Read-only exploration and planning"),
+        Line::from("• BUILD - Full execution with file modifications"),
         Line::from(""),
         Line::from("Commands:"),
         Line::from("• /orchestrate <task> - Run orchestrated task"),

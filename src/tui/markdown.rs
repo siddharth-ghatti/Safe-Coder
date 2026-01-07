@@ -9,10 +9,17 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
 };
+use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+
+/// Cached syntax set - expensive to load, so we do it once at startup
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| SyntaxSet::load_defaults_newlines());
+
+/// Cached theme set - expensive to load, so we do it once at startup
+static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(|| ThemeSet::load_defaults());
 
 /// Colors for markdown rendering (matching shell_ui palette)
 const ACCENT_CYAN: Color = Color::Rgb(80, 200, 220);
@@ -71,7 +78,8 @@ fn main() {
 ---
 
 Try typing some markdown in the chat and see it rendered automatically!
-"#.to_string()
+"#
+    .to_string()
 }
 
 /// Markdown renderer state
@@ -92,8 +100,7 @@ struct MarkdownRenderer {
     table_rows: Vec<Vec<String>>,
     in_table_header: bool,
     current_cell: String,
-    syntax_set: SyntaxSet,
-    theme_set: ThemeSet,
+    // Note: syntax_set and theme_set are now global statics (SYNTAX_SET, THEME_SET)
 }
 
 impl MarkdownRenderer {
@@ -114,8 +121,6 @@ impl MarkdownRenderer {
             table_rows: Vec::new(),
             in_table_header: false,
             current_cell: String::new(),
-            syntax_set: SyntaxSet::load_defaults_newlines(),
-            theme_set: ThemeSet::load_defaults(),
         }
     }
 
@@ -173,7 +178,9 @@ impl MarkdownRenderer {
             Span::styled("┌─ ", Style::default().fg(BORDER_SUBTLE)),
             Span::styled(
                 lang_display.to_string(),
-                Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(ACCENT_CYAN)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 " ".to_string() + &"─".repeat(40),
@@ -181,22 +188,23 @@ impl MarkdownRenderer {
             ),
         ]));
 
-        // Syntax highlighting
+        // Syntax highlighting (using cached global statics)
         let syntax = lang
             .as_ref()
-            .and_then(|l| self.syntax_set.find_syntax_by_token(l))
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
+            .and_then(|l| SYNTAX_SET.find_syntax_by_token(l))
+            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
 
-        let theme = &self.theme_set.themes["base16-ocean.dark"];
+        let theme = &THEME_SET.themes["base16-ocean.dark"];
         let mut highlighter = HighlightLines::new(syntax, theme);
 
         for line in LinesWithEndings::from(&content) {
             let mut spans = vec![Span::styled("│ ", Style::default().fg(BORDER_SUBTLE))];
 
-            match highlighter.highlight_line(line, &self.syntax_set) {
+            match highlighter.highlight_line(line, &SYNTAX_SET) {
                 Ok(ranges) => {
                     for (style, text) in ranges {
-                        let fg = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
+                        let fg =
+                            Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
                         let mut ratatui_style = Style::default().fg(fg).bg(BG_CODE);
 
                         if style.font_style.contains(FontStyle::BOLD) {
@@ -209,7 +217,10 @@ impl MarkdownRenderer {
                             ratatui_style = ratatui_style.add_modifier(Modifier::UNDERLINED);
                         }
 
-                        spans.push(Span::styled(text.trim_end_matches('\n').to_string(), ratatui_style));
+                        spans.push(Span::styled(
+                            text.trim_end_matches('\n').to_string(),
+                            ratatui_style,
+                        ));
                     }
                 }
                 Err(_) => {
@@ -288,7 +299,9 @@ impl MarkdownRenderer {
 
                 let style = if row_idx == 0 {
                     // Header row
-                    Style::default().fg(ACCENT_CYAN).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(ACCENT_CYAN)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(TEXT_PRIMARY)
                 };
@@ -374,10 +387,8 @@ impl MarkdownRenderer {
                     HeadingLevel::H5 => ("##### ", ACCENT_BLUE),
                     HeadingLevel::H6 => ("###### ", TEXT_SECONDARY),
                 };
-                self.current_line.push(Span::styled(
-                    prefix.to_string(),
-                    Style::default().fg(color),
-                ));
+                self.current_line
+                    .push(Span::styled(prefix.to_string(), Style::default().fg(color)));
                 self.push_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
             }
             Tag::Paragraph => {
@@ -417,10 +428,7 @@ impl MarkdownRenderer {
                         Style::default().fg(ACCENT_YELLOW),
                     )
                 } else {
-                    Span::styled(
-                        format!("{}• ", indent),
-                        Style::default().fg(ACCENT_GREEN),
-                    )
+                    Span::styled(format!("{}• ", indent), Style::default().fg(ACCENT_GREEN))
                 };
 
                 self.current_line.push(bullet);
@@ -445,7 +453,8 @@ impl MarkdownRenderer {
                         .add_modifier(Modifier::UNDERLINED),
                 );
                 // We'll store the URL to display after the link text
-                self.current_line.push(Span::styled("[", Style::default().fg(TEXT_DIM)));
+                self.current_line
+                    .push(Span::styled("[", Style::default().fg(TEXT_DIM)));
             }
             Tag::Table(_) => {
                 self.flush_line();
@@ -501,7 +510,8 @@ impl MarkdownRenderer {
             }
             TagEnd::Link => {
                 self.pop_style();
-                self.current_line.push(Span::styled("]", Style::default().fg(TEXT_DIM)));
+                self.current_line
+                    .push(Span::styled("]", Style::default().fg(TEXT_DIM)));
             }
             TagEnd::Table => {
                 self.in_table = false;
@@ -740,7 +750,7 @@ pub fn has_markdown(text: &str) -> bool {
         || text.contains("---")       // Horizontal rules
         || text.contains("- [ ]")     // Task lists (unchecked)
         || text.contains("- [x]")     // Task lists (checked)
-        || text.contains("- [X]")     // Task lists (checked, uppercase)
+        || text.contains("- [X]") // Task lists (checked, uppercase)
 }
 
 #[cfg(test)]
@@ -807,7 +817,8 @@ mod tests {
 
     #[test]
     fn test_render_table() {
-        let md = "| Header1 | Header2 |\n|---------|--------|\n| Cell1 | Cell2 |\n| Cell3 | Cell4 |";
+        let md =
+            "| Header1 | Header2 |\n|---------|--------|\n| Cell1 | Cell2 |\n| Cell3 | Cell4 |";
         let lines = render_markdown_lines(md);
         // Should have top border, header, separator, 2 data rows, bottom border
         assert!(lines.len() >= 5, "Got {} lines", lines.len());

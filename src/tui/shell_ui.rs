@@ -164,27 +164,51 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
     }
 
     let content_width = area.width.saturating_sub(4) as usize;
+    let max_visible = area.height as usize;
 
-    // Build all rendered lines
-    let mut all_lines: Vec<MessageLine> = Vec::new();
+    // Performance optimization: Only process recent blocks when at bottom (common case)
+    // When scrolled up, we need to process more blocks
+    let blocks_to_process = if app.scroll_offset == 0 {
+        // At bottom: only process last ~10 blocks (usually enough for viewport)
+        app.blocks.len().min(15)
+    } else {
+        // Scrolled up: process more blocks based on scroll offset
+        let estimated_blocks_needed = (app.scroll_offset / 10) + 15;
+        app.blocks.len().min(estimated_blocks_needed)
+    };
 
-    for block in &app.blocks {
+    let start_block = app.blocks.len().saturating_sub(blocks_to_process);
+
+    // Estimate lines for blocks we're skipping (for scrollbar accuracy)
+    let skipped_lines: usize = app
+        .blocks
+        .iter()
+        .take(start_block)
+        .map(|b| estimate_block_line_count(b))
+        .sum();
+
+    // Build rendered lines for visible portion
+    let mut all_lines: Vec<MessageLine> = Vec::with_capacity(max_visible * 3);
+
+    for block in app.blocks.iter().skip(start_block) {
         render_block(&mut all_lines, block, content_width, app.animation_frame);
-        all_lines.push(MessageLine::Empty); // Gap between blocks
+        all_lines.push(MessageLine::Empty);
     }
 
-    // Calculate visible portion (auto-scroll to bottom)
-    let max_visible = area.height as usize;
-    let total_lines = all_lines.len();
+    // Total includes skipped + rendered
+    let total_lines = skipped_lines + all_lines.len();
 
-    let visible_start = if total_lines > max_visible {
-        total_lines
+    // Calculate visible window
+    let effective_scroll = app.scroll_offset.saturating_sub(skipped_lines);
+    let visible_start = if all_lines.len() > max_visible {
+        all_lines
+            .len()
             .saturating_sub(max_visible)
-            .saturating_sub(app.scroll_offset)
+            .saturating_sub(effective_scroll)
     } else {
         0
     };
-    let visible_end = (visible_start + max_visible).min(total_lines);
+    let visible_end = (visible_start + max_visible).min(all_lines.len());
 
     // Render visible lines
     let items: Vec<ListItem> = all_lines
@@ -223,6 +247,19 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
 
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
     }
+}
+
+/// Fast line count estimate for a block (avoids full rendering)
+#[inline]
+fn estimate_block_line_count(block: &CommandBlock) -> usize {
+    let base = match &block.output {
+        BlockOutput::Streaming { lines, .. } => lines.len().min(25),
+        BlockOutput::Success(text) => text.lines().count().min(25),
+        BlockOutput::Error { .. } => 3,
+        BlockOutput::Pending => 1,
+    };
+    let children: usize = block.children.iter().map(estimate_block_line_count).sum();
+    base + children + 3 // +3 for headers/gaps
 }
 
 // ============================================================================
@@ -1100,9 +1137,10 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         (modified_count.min(5) + 2) as u16 // Header + files (max 5) + potential overflow
     };
 
-    // Sidebar sections: [TASK] [CONTEXT] [FILES] [PLAN] [LSP]
+    // Sidebar sections: [TASK] [MODE] [CONTEXT] [FILES] [PLAN] [LSP]
     let sections = Layout::vertical([
         Constraint::Length(4),               // TASK section
+        Constraint::Length(3),               // MODE (agent mode)
         Constraint::Length(3),               // CONTEXT (token usage)
         Constraint::Length(modified_height), // FILES (modified files)
         Constraint::Min(6),                  // PLAN (variable height)
@@ -1111,10 +1149,11 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     .split(inner);
 
     draw_sidebar_task(f, app, sections[0]);
-    draw_sidebar_context(f, app, sections[1]);
-    draw_sidebar_files(f, app, sections[2]);
-    draw_sidebar_plan(f, app, sections[3]);
-    draw_sidebar_lsp(f, app, sections[4]);
+    draw_sidebar_mode(f, app, sections[1]);
+    draw_sidebar_context(f, app, sections[2]);
+    draw_sidebar_files(f, app, sections[3]);
+    draw_sidebar_plan(f, app, sections[4]);
+    draw_sidebar_lsp(f, app, sections[5]);
 }
 
 fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
@@ -1169,6 +1208,42 @@ fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             )));
         }
     }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        " MODE",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    let mode = app.agent_mode.short_name();
+    let description = app.agent_mode.description();
+
+    // Color based on mode
+    let mode_color = match mode {
+        "BUILD" => ACCENT_GREEN,
+        "PLAN" => ACCENT_CYAN,
+        _ => TEXT_PRIMARY,
+    };
+
+    // Mode display with color
+    lines.push(Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            format!("{}", mode),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                " - {}",
+                description.split('.').next().unwrap_or(description)
+            ),
+            Style::default().fg(TEXT_SECONDARY),
+        ),
+    ]));
 
     let para = Paragraph::new(lines);
     f.render_widget(para, area);

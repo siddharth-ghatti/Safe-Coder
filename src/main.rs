@@ -37,21 +37,40 @@ use session::Session;
 
 #[derive(Parser)]
 #[command(name = "safe-coder")]
-#[command(about = "AI coding orchestrator that delegates to Claude Code, Gemini CLI, and other AI agents", long_about = None)]
+#[command(about = "AI coding shell with interactive shell interface and AI assistance", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+    
+    /// Path to the project directory (default: current directory)
+    #[arg(short, long, default_value = ".", global = true)]
+    path: PathBuf,
+    
+    /// Automatically connect to AI on startup (only for shell mode)
+    #[arg(long, global = true)]
+    ai: bool,
+    
+    /// Use legacy text-based shell instead of TUI (only for shell mode)
+    #[arg(long, global = true)]
+    no_tui: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start an interactive shell with AI assistance (Warp-like experience)
+    /// Start the interactive shell with AI assistance (default mode)
     ///
-    /// This is the default mode. Run shell commands directly with visual blocks.
-    /// Use @ prefix for AI assistance:
-    ///   @connect        - Connect to AI
-    ///   @ <query>       - Ask AI for help (with shell context)
-    ///   @orchestrate    - Run multi-agent task
+    /// This is the primary way to use safe-coder. Run shell commands directly 
+    /// in a visual interface with optional AI assistance. Features include:
+    ///   - Full shell functionality with command history
+    ///   - Real-time command output streaming  
+    ///   - AI assistance with context awareness
+    ///   - Git integration and safety features
+    ///   - TUI or text-based interface options
+    ///
+    /// AI Commands (when connected):
+    ///   ai-connect        - Connect to AI assistant
+    ///   ai <query>        - Ask AI for help with shell context
+    ///   chat              - Enter interactive coding mode
     #[command(alias = "sh")]
     Shell {
         /// Path to the project directory (default: current directory)
@@ -64,7 +83,11 @@ enum Commands {
         #[arg(long)]
         no_tui: bool,
     },
-    /// Start an interactive coding session (legacy chat mode)
+    /// Legacy interactive coding session (chat-first mode)
+    ///
+    /// This is the legacy chat-focused interface. Consider using the shell 
+    /// mode instead for a more integrated experience.
+    #[command(alias = "c")]
     Chat {
         /// Path to the project directory (default: current directory)
         #[arg(short, long, default_value = ".")]
@@ -79,7 +102,8 @@ enum Commands {
         #[arg(short, long, default_value = "act")]
         mode: String,
     },
-    /// Orchestrate a task by delegating to external AI CLIs
+    /// Orchestrate complex tasks by delegating to multiple AI agents
+    #[command(alias = "orch")]
     Orchestrate {
         /// The task or request to execute
         #[arg(short, long)]
@@ -109,7 +133,8 @@ enum Commands {
         #[arg(short, long, default_value = "act")]
         mode: String,
     },
-    /// Configure safe-coder
+    /// Configure safe-coder settings and authentication
+    #[command(alias = "cfg")]
     Config {
         /// Show current configuration
         #[arg(short, long)]
@@ -126,7 +151,7 @@ enum Commands {
         /// Provider to login to (anthropic or github-copilot)
         provider: String,
     },
-    /// Initialize a new project
+    /// Initialize a new project with safe-coder
     Init {
         /// Path to initialize (default: current directory)
         #[arg(default_value = ".")]
@@ -140,10 +165,12 @@ async fn main() -> Result<()> {
 
     // Only initialize tracing for non-TUI modes
     // TUI mode uses its own rendering and tracing would interfere with the alternate screen
-    let use_tui = matches!(
-        &cli.command,
-        Commands::Chat { tui: true, .. } | Commands::Shell { no_tui: false, .. }
-    );
+    let use_tui = match &cli.command {
+        Some(Commands::Chat { tui: true, .. }) => true,
+        Some(Commands::Shell { no_tui: false, .. }) => true,
+        None if !cli.no_tui => true, // Default shell mode uses TUI
+        _ => false,
+    };
 
     if !use_tui {
         tracing_subscriber::registry()
@@ -155,7 +182,11 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    match cli.command {
+    match cli.command.unwrap_or(Commands::Shell {
+        path: cli.path,
+        ai: cli.ai,
+        no_tui: cli.no_tui,
+    }) {
         Commands::Shell { path, ai, no_tui } => {
             if no_tui {
                 // Legacy text-based shell
@@ -738,12 +769,21 @@ fn init_project(path: PathBuf) -> Result<()> {
 
     println!("✓ Initialized safe-coder project at: {}", path.display());
     println!("\nNext steps:");
-    println!("  1. Configure your API key: safe-coder config --api-key YOUR_API_KEY");
-    println!("  2. Or login with device flow: safe-coder login github-copilot");
-    println!(
-        "  3. Start coding: safe-coder chat --path {}",
-        path.display()
-    );
+    println!("  1. Configure authentication:");
+    println!("     safe-coder login anthropic        # Login with Claude");
+    println!("     safe-coder login github-copilot   # Login with GitHub Copilot");
+    println!("     # OR manually set API key:");
+    println!("     safe-coder config --api-key YOUR_API_KEY");
+    println!();
+    println!("  2. Start the interactive shell:");
+    println!("     cd {}", path.display());
+    println!("     safe-coder                        # Starts shell mode");
+    println!("     safe-coder --ai                   # Starts with AI connected");
+    println!();
+    println!("  3. In the shell, use AI commands:");
+    println!("     ai-connect                        # Connect to AI");
+    println!("     ai how do I list files?           # Ask for help");
+    println!("     chat                              # Enter interactive coding mode");
 
     Ok(())
 }

@@ -316,8 +316,8 @@ impl ShellTuiRunner {
                 self.app.clear_dirty();
             }
 
-            // Poll for events
-            if event::poll(Duration::from_millis(30))? {
+            // Poll for events (16ms = ~60fps for smooth scrolling)
+            if event::poll(Duration::from_millis(16))? {
                 match event::read()? {
                     Event::Key(key) => {
                         match self
@@ -1340,6 +1340,27 @@ Keyboard Shortcuts:
                 self.disconnect_ai();
             }
 
+            SlashCommand::Agent => {
+                self.app.cycle_agent_mode();
+                let mode = self.app.agent_mode;
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    format!("Agent mode: {} - {}", mode.short_name(), mode.description()),
+                    prompt,
+                );
+                self.app.add_block(block);
+
+                // Sync agent mode with session if connected
+                if let Some(session) = &self.app.session {
+                    let session = session.clone();
+                    let agent_mode = mode;
+                    tokio::spawn(async move {
+                        let mut session = session.lock().await;
+                        session.set_agent_mode(agent_mode);
+                    });
+                }
+            }
+
             SlashCommand::Help => {
                 let prompt = self.app.current_prompt();
                 let help_text = r#"Safe Coder Shell - AI-Powered Development
@@ -1350,6 +1371,7 @@ Commands:
   /help             Show this help
   /tools            List available AI tools
   /mode             Toggle permission mode (ASK/EDIT/YOLO)
+  /agent            Toggle agent mode (PLAN/BUILD)
   /orchestrate      Run multi-agent task
 
 Shell:
@@ -1367,6 +1389,7 @@ Examples:
 Keyboard:
   Ctrl+C      Cancel/exit
   Ctrl+P      Toggle permission mode
+  Ctrl+G      Toggle agent mode
   Ctrl+L      Clear screen
   Tab         Autocomplete"#;
                 let block = CommandBlock::system(help_text.to_string(), prompt);
