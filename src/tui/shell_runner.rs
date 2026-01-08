@@ -107,6 +107,8 @@ enum AiUpdate {
         block_id: String,
         tokens_compressed: usize,
     },
+    /// Plan approval sender (for TUI to respond to plan approval)
+    PlanApprovalSender(tokio::sync::mpsc::UnboundedSender<bool>),
 }
 
 /// Message types for orchestration updates
@@ -611,6 +613,10 @@ impl ShellTuiRunner {
                         // Update sidebar with plan event
                         self.app.update_plan(&event);
                     }
+                    AiUpdate::PlanApprovalSender(tx) => {
+                        // Store approval sender for TUI to use when user approves/rejects
+                        self.app.set_plan_approval_tx(tx);
+                    }
                     AiUpdate::TokenUsage {
                         input_tokens,
                         output_tokens,
@@ -853,6 +859,24 @@ impl ShellTuiRunner {
             }
         }
 
+        // Handle plan approval popup
+        if self.app.is_plan_approval_visible() {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.app.approve_plan();
+                    return Ok(false);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.app.reject_plan();
+                    return Ok(false);
+                }
+                _ => {
+                    // Ignore other keys while popup is visible
+                    return Ok(false);
+                }
+            }
+        }
+
         match code {
             // Ctrl+C - cancel or clear
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -996,7 +1020,9 @@ impl ShellTuiRunner {
                 if self.app.file_picker.visible {
                     // Left arrow does nothing in file picker
                 } else if self.app.autocomplete_visible() {
+                    // Hide any autocomplete and move cursor
                     self.app.autocomplete.hide();
+                    self.app.command_autocomplete.hide();
                     self.app.cursor_left();
                 } else {
                     self.app.cursor_left();
@@ -2270,6 +2296,10 @@ Keyboard:
                                 block_id: block_id_inner.clone(),
                                 event: plan_event,
                             },
+                            // Plan approval sender - forward to TUI
+                            SessionEvent::PlanApprovalSender(tx) => {
+                                AiUpdate::PlanApprovalSender(tx)
+                            }
                             // Token usage updates
                             SessionEvent::TokenUsage {
                                 input_tokens,

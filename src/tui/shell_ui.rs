@@ -106,6 +106,11 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     if app.file_picker.visible {
         draw_file_picker_popup(f, app, size);
     }
+    
+    // Command autocomplete popup (for slash commands)
+    if app.command_autocomplete.visible && !app.command_autocomplete.suggestions.is_empty() {
+        draw_command_autocomplete_popup(f, app, size);
+    }
 
     if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
         draw_autocomplete_popup(f, app, size);
@@ -113,6 +118,11 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
 
     if app.commands_modal_visible {
         draw_commands_modal(f, app, size);
+    }
+
+    // Plan approval popup (highest priority)
+    if app.plan_approval_visible {
+        draw_plan_approval_popup(f, app, size);
     }
 }
 
@@ -1794,6 +1804,87 @@ fn draw_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     f.render_widget(list, inner);
 }
 
+/// Draw command autocomplete popup for slash commands
+fn draw_command_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let suggestions = &app.command_autocomplete.suggestions;
+    if suggestions.is_empty() {
+        return;
+    }
+
+    // Calculate popup position and size
+    let popup_height = (suggestions.len() as u16 + 2).min(10); // +2 for borders, max 10 items
+    let popup_width = (suggestions
+        .iter()
+        .map(|s| s.command.len() + s.description.len() + 4) // Extra space for formatting
+        .max()
+        .unwrap_or(40) as u16)
+        .min(80)
+        .max(40);
+
+    // Position above the input line
+    let popup_area = Rect {
+        x: 2, // Align with input area
+        y: area.height.saturating_sub(popup_height + 4), // Above input area (4 = input height estimate)
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the background
+    f.render_widget(Clear, popup_area);
+
+    // Create block with title
+    let block = Block::default()
+        .title(" Commands ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_ACCENT))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Create list items
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let is_selected = i == app.command_autocomplete.selected;
+            
+            // Format: "/command - description"
+            let content = format!("{} - {}", cmd.command, cmd.description);
+            
+            let style = if is_selected {
+                Style::default()
+                    .bg(ACCENT_BLUE)
+                    .fg(BG_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(&cmd.command, 
+                    if is_selected {
+                        Style::default().bg(ACCENT_BLUE).fg(BG_PRIMARY).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)
+                    }
+                ),
+                Span::styled(" - ", style),
+                Span::styled(&cmd.description, 
+                    if is_selected {
+                        Style::default().bg(ACCENT_BLUE).fg(BG_PRIMARY)
+                    } else {
+                        Style::default().fg(TEXT_SECONDARY)
+                    }
+                ),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items);
+    f.render_widget(list, inner);
+}
+
 /// Draw the commands reference modal
 fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
     use crate::commands::slash::get_commands_text;
@@ -1895,5 +1986,135 @@ fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((0, 0)); // TODO: Add scrolling support with arrow keys
 
+    f.render_widget(paragraph, inner);
+}
+
+/// Draw plan approval popup for Plan mode
+fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    use crate::planning::PlanStepStatus;
+
+    // Calculate modal size - centered, not too big
+    let modal_width = (area.width as f32 * 0.7).min(80.0) as u16;
+    let modal_height = (area.height as f32 * 0.7).min(30.0) as u16;
+
+    let popup_area = Rect {
+        x: (area.width.saturating_sub(modal_width)) / 2,
+        y: (area.height.saturating_sub(modal_height)) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the background
+    f.render_widget(Clear, popup_area);
+
+    // Create the modal block
+    let block = Block::default()
+        .title(" Plan Approval ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_CYAN))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Build content
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Review the plan before execution",
+            Style::default()
+                .fg(TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Plan info
+    if let Some(ref plan) = app.pending_approval_plan {
+        // Title
+        lines.push(Line::from(vec![
+            Span::styled("Plan: ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled(
+                &plan.title,
+                Style::default()
+                    .fg(ACCENT_GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        // Steps
+        lines.push(Line::from(Span::styled(
+            "Steps:",
+            Style::default()
+                .fg(TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        for (i, step) in plan.steps.iter().enumerate() {
+            let status_icon = match step.status {
+                PlanStepStatus::Pending => "○",
+                PlanStepStatus::InProgress => "◐",
+                PlanStepStatus::Completed => "✓",
+                PlanStepStatus::Failed => "✗",
+                PlanStepStatus::Skipped => "−",
+            };
+
+            // Truncate description if too long
+            let max_desc_len = (modal_width as usize).saturating_sub(10);
+            let description = if step.description.len() > max_desc_len {
+                format!("{}...", &step.description[..max_desc_len.saturating_sub(3)])
+            } else {
+                step.description.clone()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} {}. ", status_icon, i + 1),
+                    Style::default().fg(TEXT_SECONDARY),
+                ),
+                Span::styled(description, Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Total: {} steps", plan.steps.len()),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Loading plan details...",
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    }
+
+    // Footer with key hints
+    lines.push(Line::from(""));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            " Y ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(ACCENT_GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Approve and execute  ", Style::default().fg(TEXT_PRIMARY)),
+        Span::styled(
+            " N ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(ACCENT_RED)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Reject and cancel", Style::default().fg(TEXT_PRIMARY)),
+    ]));
+
+    // Render paragraph
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);
 }

@@ -508,6 +508,91 @@ impl UnifiedPlan {
         };
         self.completed_at = Some(Utc::now());
     }
+
+    /// Update status of a specific step by ID
+    pub fn update_step_status(&mut self, step_id: &str, status: StepStatus) {
+        for group in &mut self.groups {
+            for step in &mut group.steps {
+                if step.id == step_id {
+                    step.status = status;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Find a step by ID
+    pub fn find_step(&self, step_id: &str) -> Option<&UnifiedStep> {
+        for group in &self.groups {
+            for step in &group.steps {
+                if step.id == step_id {
+                    return Some(step);
+                }
+            }
+        }
+        None
+    }
+
+    /// Find a step mutably by ID
+    pub fn find_step_mut(&mut self, step_id: &str) -> Option<&mut UnifiedStep> {
+        for group in &mut self.groups {
+            for step in &mut group.steps {
+                if step.id == step_id {
+                    return Some(step);
+                }
+            }
+        }
+        None
+    }
+
+    /// Convert to legacy TaskPlan for TUI compatibility
+    pub fn to_legacy_plan(&self) -> crate::planning::TaskPlan {
+        use crate::planning::{PlanStatus as LegacyStatus, PlanStep, PlanStepStatus, TaskPlan};
+
+        let legacy_status = match self.status {
+            PlanStatus::Planning => LegacyStatus::Planning,
+            PlanStatus::Ready => LegacyStatus::Ready,
+            PlanStatus::AwaitingApproval => LegacyStatus::AwaitingApproval,
+            PlanStatus::Executing => LegacyStatus::Executing,
+            PlanStatus::Completed => LegacyStatus::Completed,
+            PlanStatus::Failed => LegacyStatus::Failed,
+            PlanStatus::Cancelled => LegacyStatus::Cancelled,
+        };
+
+        let mut legacy_plan = TaskPlan::new(self.id.clone(), self.request.clone())
+            .with_title(self.title.clone());
+        legacy_plan.status = legacy_status;
+
+        // Convert steps from groups
+        let mut legacy_steps: Vec<PlanStep> = Vec::new();
+        for group in &self.groups {
+            for step in &group.steps {
+                let legacy_step_status = match step.status {
+                    StepStatus::Pending => PlanStepStatus::Pending,
+                    StepStatus::InProgress => PlanStepStatus::InProgress,
+                    StepStatus::Completed => PlanStepStatus::Completed,
+                    StepStatus::Failed => PlanStepStatus::Failed,
+                    StepStatus::Skipped => PlanStepStatus::Skipped,
+                };
+
+                let mut legacy_step = PlanStep::new(step.id.clone(), step.description.clone())
+                    .with_instructions(step.instructions.clone())
+                    .with_files(step.relevant_files.clone());
+                legacy_step.active_description = step.active_description.clone();
+                legacy_step.status = legacy_step_status;
+
+                // Add dependencies from group
+                if !group.depends_on.is_empty() {
+                    legacy_step.dependencies = group.depends_on.clone();
+                }
+
+                legacy_steps.push(legacy_step);
+            }
+        }
+
+        legacy_plan.steps = legacy_steps;
+        legacy_plan
+    }
 }
 
 /// Convert imperative description to present continuous form
@@ -589,12 +674,14 @@ fn should_double_consonant(word: &str) -> bool {
 /// Events emitted during plan execution
 #[derive(Debug, Clone)]
 pub enum PlanEvent {
-    /// Plan was created
+    /// Plan was created - includes full plan for UI display
     PlanCreated {
         plan_id: String,
         title: String,
         total_steps: usize,
         execution_mode: ExecutionMode,
+        /// Full plan for UI display
+        plan: UnifiedPlan,
     },
     /// Plan is awaiting user approval
     PlanAwaitingApproval { plan_id: String },

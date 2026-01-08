@@ -341,14 +341,14 @@ pub async fn execute_slash_command(
             }
         },
         SlashCommand::ExecutionMode(mode) => {
-            use crate::approval::ExecutionMode;
+            use crate::approval::UserMode;
             match mode {
                 Some(m) => {
-                    let exec_mode = ExecutionMode::from_str(&m)?;
-                    session.set_execution_mode(exec_mode);
-                    let description = match exec_mode {
-                        ExecutionMode::Plan => "Deep planning with user approval before execution",
-                        ExecutionMode::Act => "Lightweight planning with auto-execution",
+                    let user_mode = UserMode::from_str(&m)?;
+                    session.set_user_mode(user_mode);
+                    let description = match user_mode {
+                        UserMode::Plan => "Deep planning with user approval before execution",
+                        UserMode::Build => "Lightweight planning with auto-execution",
                     };
                     Ok(CommandResult::Message(format!(
                         "✓ Execution mode set to: {} ({})",
@@ -356,12 +356,16 @@ pub async fn execute_slash_command(
                     )))
                 }
                 None => {
-                    let current = session.execution_mode();
+                    let current = session.user_mode();
                     let description = match current {
-                        ExecutionMode::Plan => "Deep planning with user approval before execution",
-                        ExecutionMode::Act => "Lightweight planning with auto-execution",
+                        UserMode::Plan => "Deep planning with user approval before execution",
+                        UserMode::Build => "Lightweight planning with auto-execution",
                     };
-                    Ok(CommandResult::Message(format!("Current execution mode: {} ({})\n\nAvailable modes:\n  plan - Deep planning with user approval\n  act  - Auto-execution with brief summaries", current, description)))
+                    Ok(CommandResult::Message(format!(
+                        "Current execution mode: {} ({})",
+                        current.as_str(),
+                        description
+                    )))
                 }
             }
         }
@@ -415,7 +419,7 @@ pub async fn execute_slash_command(
             Ok(CommandResult::Message(result))
         }
         SlashCommand::Skill(subcmd) => execute_skill_command(subcmd).await,
-        SlashCommand::Plan(subcmd) => execute_plan_command(subcmd).await,
+        SlashCommand::Plan(subcmd) => execute_plan_command(subcmd, session).await,
         SlashCommand::Unknown(cmd) => Ok(CommandResult::Message(format!(
             "Unknown command: /{}. Type /help for available commands.",
             cmd
@@ -423,47 +427,18 @@ pub async fn execute_slash_command(
     }
 }
 
-async fn execute_plan_command(subcmd: PlanSubcommand) -> Result<CommandResult> {
+async fn execute_plan_command(subcmd: PlanSubcommand, session: &Session) -> Result<CommandResult> {
     match subcmd {
         PlanSubcommand::Show => {
-            let mut output = String::from("📋 Unified Planning System\n\n");
-            output.push_str("The unified planning system centralizes all task planning across execution modes.\n\n");
-            output.push_str("Execution Modes:\n");
-            output.push_str("  • Direct      - Sequential inline execution (simple tasks)\n");
-            output.push_str("  • Subagent    - Parallel internal agents (medium complexity)\n");
-            output.push_str(
-                "  • Orchestration - Parallel CLI workers in git worktrees (large tasks)\n\n",
-            );
-            output.push_str("Current Status: No active plan\n");
-            output.push_str(
-                "\nUse /mode to set execution mode, then submit a task to create a plan.\n",
-            );
-            output.push_str("Plans are created by the LLM with mode-aware parallelism.\n");
+            let output = session.format_current_plan();
             Ok(CommandResult::Message(output))
         }
         PlanSubcommand::Groups => {
-            let mut output = String::from("📊 Step Groups (Parallelism)\n\n");
-            output.push_str("No active plan with step groups.\n\n");
-            output.push_str("When a plan is active, this shows:\n");
-            output.push_str("  • Groups of steps that execute sequentially\n");
-            output.push_str("  • Steps within each group that can run in parallel\n");
-            output.push_str("  • Dependencies between groups\n\n");
-            output.push_str("Example:\n");
-            output.push_str("  Group 1 (parallel: 2 steps)\n");
-            output.push_str("    ├─ Step 1: Add auth module\n");
-            output.push_str("    └─ Step 2: Add user model\n");
-            output.push_str("  Group 2 (depends on Group 1)\n");
-            output.push_str("    └─ Step 3: Write tests\n");
+            let output = session.format_plan_groups();
             Ok(CommandResult::Message(output))
         }
         PlanSubcommand::History => {
-            let mut output = String::from("📜 Plan History\n\n");
-            output.push_str("No plans executed in this session.\n\n");
-            output.push_str("Plan history shows:\n");
-            output.push_str("  • Previously executed plans\n");
-            output.push_str("  • Execution mode used\n");
-            output.push_str("  • Success/failure status\n");
-            output.push_str("  • Duration and step counts\n");
+            let output = session.format_plan_history();
             Ok(CommandResult::Message(output))
         }
     }

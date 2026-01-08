@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::config::Config;
+use crate::llm::LlmClient;
+use crate::tools::ToolRegistry;
 
 use super::executor_trait::{ExecutorContext, ExecutorRegistry, PlanExecutor};
 use super::types::{ExecutionMode, PlanEvent, PlanStatus, StepStatus, UnifiedPlan};
@@ -25,10 +27,16 @@ pub struct PlanRunner {
     config: Arc<Config>,
     /// Executor registry
     registry: Arc<ExecutorRegistry>,
+    /// LLM client for AI interactions
+    llm_client: Arc<dyn LlmClient>,
+    /// Tool registry for executing tools
+    tool_registry: Arc<ToolRegistry>,
     /// Whether to require user approval before execution
     requires_approval: bool,
-    /// Approval callback (returns true if approved)
+    /// Approval callback (returns true if approved) - for sync approval
     approval_callback: Option<Box<dyn Fn(&UnifiedPlan) -> bool + Send + Sync>>,
+    /// Async approval receiver - for TUI-based approval (using unbounded for cloneable sender)
+    approval_rx: Option<UnboundedReceiver<bool>>,
 }
 
 impl PlanRunner {
@@ -37,13 +45,18 @@ impl PlanRunner {
         project_path: PathBuf,
         config: Arc<Config>,
         registry: Arc<ExecutorRegistry>,
+        llm_client: Arc<dyn LlmClient>,
+        tool_registry: Arc<ToolRegistry>,
     ) -> Self {
         Self {
             project_path,
             config,
             registry,
+            llm_client,
+            tool_registry,
             requires_approval: false,
             approval_callback: None,
+            approval_rx: None,
         }
     }
 
@@ -53,7 +66,7 @@ impl PlanRunner {
         self
     }
 
-    /// Set an approval callback
+    /// Set an approval callback (sync version)
     pub fn with_approval_callback<F>(mut self, callback: F) -> Self
     where
         F: Fn(&UnifiedPlan) -> bool + Send + Sync + 'static,
@@ -63,86 +76,135 @@ impl PlanRunner {
         self
     }
 
+    /// Set async approval receiver (for TUI-based approval)
+    pub fn with_async_approval(mut self, rx: UnboundedReceiver<bool>) -> Self {
+        self.approval_rx = Some(rx);
+        self.requires_approval = true;
+        self
+    }
+
     /// Execute a plan and return the event receiver
     ///
-    /// Events are emitted throughout execution for UI updates.
+    /// execution happens in a background task, allowing events to be streamed immediately.
+    /// Note: Takes `mut self` to allow taking the approval receiver.
     pub async fn execute(
-        &self,
+        mut self,
         mut plan: UnifiedPlan,
     ) -> Result<(UnifiedPlan, UnboundedReceiver<PlanEvent>)> {
         // Create event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
-        // Emit plan created event
+        // Emit plan created event with full plan for UI display
         event_tx
             .send(PlanEvent::PlanCreated {
                 plan_id: plan.id.clone(),
                 title: plan.title.clone(),
                 total_steps: plan.total_steps(),
                 execution_mode: plan.execution_mode,
+                plan: plan.clone(),
             })
             .ok();
 
-        // Handle approval if required
-        if self.requires_approval {
-            plan.status = PlanStatus::AwaitingApproval;
-            event_tx
-                .send(PlanEvent::PlanAwaitingApproval {
-                    plan_id: plan.id.clone(),
-                })
-                .ok();
+        // Prepare for background execution
+        // We execute on a clone so we can return the original plan handle immediately
+        let mut plan_for_exec = plan.clone();
 
-            // Check approval
-            let approved = if let Some(ref callback) = self.approval_callback {
-                callback(&plan)
-            } else {
-                // Default: approved
-                true
-            };
+        // Capture dependencies for the background task
+        let project_path = self.project_path.clone();
+        let config = self.config.clone();
+        let registry = self.registry.clone();
+        let llm_client = self.llm_client.clone();
+        let tool_registry = self.tool_registry.clone();
+        let requires_approval = self.requires_approval;
+        let approval_rx = self.approval_rx.take();
 
-            if !approved {
+        // Spawn execution task (includes approval handling so events can flow immediately)
+        tokio::spawn(async move {
+            // Handle approval if required (inside spawned task so events flow)
+            if requires_approval {
+                plan_for_exec.status = PlanStatus::AwaitingApproval;
                 event_tx
-                    .send(PlanEvent::PlanRejected {
-                        plan_id: plan.id.clone(),
-                        reason: "User rejected the plan".to_string(),
+                    .send(PlanEvent::PlanAwaitingApproval {
+                        plan_id: plan_for_exec.id.clone(),
                     })
                     .ok();
-                plan.status = PlanStatus::Cancelled;
-                return Ok((plan, event_rx));
+
+                // Wait for async approval
+                let approved = if let Some(mut rx) = approval_rx {
+                    match rx.recv().await {
+                        Some(approved) => approved,
+                        None => {
+                            // Channel closed, treat as rejection
+                            false
+                        }
+                    }
+                } else {
+                    // No async approval channel, auto-approve
+                    true
+                };
+
+                if !approved {
+                    event_tx
+                        .send(PlanEvent::PlanRejected {
+                            plan_id: plan_for_exec.id.clone(),
+                            reason: "User rejected the plan".to_string(),
+                        })
+                        .ok();
+                    plan_for_exec.status = PlanStatus::Cancelled;
+                    return;
+                }
+
+                event_tx
+                    .send(PlanEvent::PlanApproved {
+                        plan_id: plan_for_exec.id.clone(),
+                    })
+                    .ok();
             }
 
-            event_tx
-                .send(PlanEvent::PlanApproved {
-                    plan_id: plan.id.clone(),
-                })
-                .ok();
-        }
+            let result = Self::execute_plan_logic(
+                &mut plan_for_exec,
+                event_tx.clone(),
+                project_path,
+                config,
+                registry,
+                llm_client,
+                tool_registry,
+            )
+            .await;
 
-        // Execute the plan
-        self.execute_plan(&mut plan, event_tx.clone()).await?;
+            if let Err(e) = result {
+                tracing::error!("Plan execution failed: {}", e);
+            }
+        });
 
         Ok((plan, event_rx))
     }
 
-    /// Execute the plan using the appropriate executor
-    async fn execute_plan(
-        &self,
+    /// Static implementation of plan execution logic to be run in background
+    async fn execute_plan_logic(
         plan: &mut UnifiedPlan,
         event_tx: UnboundedSender<PlanEvent>,
+        project_path: PathBuf,
+        config: Arc<Config>,
+        registry: Arc<ExecutorRegistry>,
+        llm_client: Arc<dyn LlmClient>,
+        tool_registry: Arc<ToolRegistry>,
     ) -> Result<()> {
         // Get executor for this mode
-        let executor = self.registry.get(plan.execution_mode).context(format!(
+        let executor = registry.get(plan.execution_mode).context(format!(
             "No executor registered for mode: {:?}",
             plan.execution_mode
         ))?;
 
         // Create executor context
         let ctx = ExecutorContext::new(
-            self.project_path.clone(),
-            self.config.clone(),
+            project_path,
+            config,
             event_tx.clone(),
             plan.id.clone(),
             plan.execution_mode,
+            llm_client,
+            tool_registry,
         );
 
         // Mark plan as executing
@@ -264,6 +326,8 @@ pub struct PlanRunnerBuilder {
     project_path: PathBuf,
     config: Arc<Config>,
     registry: Arc<ExecutorRegistry>,
+    llm_client: Option<Arc<dyn LlmClient>>,
+    tool_registry: Option<Arc<ToolRegistry>>,
     requires_approval: bool,
 }
 
@@ -274,6 +338,8 @@ impl PlanRunnerBuilder {
             project_path,
             config,
             registry: Arc::new(ExecutorRegistry::new()),
+            llm_client: None,
+            tool_registry: None,
             requires_approval: false,
         }
     }
@@ -281,6 +347,18 @@ impl PlanRunnerBuilder {
     /// Set the executor registry
     pub fn with_registry(mut self, registry: Arc<ExecutorRegistry>) -> Self {
         self.registry = registry;
+        self
+    }
+
+    /// Set the LLM client
+    pub fn with_llm_client(mut self, llm_client: Arc<dyn LlmClient>) -> Self {
+        self.llm_client = Some(llm_client);
+        self
+    }
+
+    /// Set the tool registry
+    pub fn with_tool_registry(mut self, tool_registry: Arc<ToolRegistry>) -> Self {
+        self.tool_registry = Some(tool_registry);
         self
     }
 
@@ -300,8 +378,17 @@ impl PlanRunnerBuilder {
 
     /// Build the runner
     pub fn build(self) -> PlanRunner {
-        PlanRunner::new(self.project_path, self.config, self.registry)
-            .with_approval(self.requires_approval)
+        let llm_client = self.llm_client.expect("LLM client must be set");
+        let tool_registry = self.tool_registry.expect("Tool registry must be set");
+
+        PlanRunner::new(
+            self.project_path,
+            self.config,
+            self.registry,
+            llm_client,
+            tool_registry,
+        )
+        .with_approval(self.requires_approval)
     }
 }
 
@@ -336,26 +423,56 @@ mod tests {
 
     #[test]
     fn test_plan_runner_creation() {
+        use crate::llm::create_client;
+
         let config = Arc::new(Config::default());
         let registry = Arc::new(ExecutorRegistry::new());
-        let runner = PlanRunner::new(PathBuf::from("/tmp"), config, registry);
+        let llm_client = Arc::new(create_client(&config).unwrap());
+        let tool_registry = Arc::new(ToolRegistry::new());
+
+        let runner = PlanRunner::new(
+            PathBuf::from("/tmp"),
+            config,
+            registry,
+            llm_client,
+            tool_registry,
+        );
 
         assert!(!runner.requires_approval);
     }
 
     #[test]
     fn test_plan_runner_with_approval() {
+        use crate::llm::create_client;
+
         let config = Arc::new(Config::default());
         let registry = Arc::new(ExecutorRegistry::new());
-        let runner = PlanRunner::new(PathBuf::from("/tmp"), config, registry).with_approval(true);
+        let llm_client = Arc::new(create_client(&config).unwrap());
+        let tool_registry = Arc::new(ToolRegistry::new());
+
+        let runner = PlanRunner::new(
+            PathBuf::from("/tmp"),
+            config,
+            registry,
+            llm_client,
+            tool_registry,
+        )
+        .with_approval(true);
 
         assert!(runner.requires_approval);
     }
 
     #[test]
     fn test_plan_builder() {
+        use crate::llm::create_client;
+
         let config = Arc::new(Config::default());
+        let llm_client = Arc::new(create_client(&config).unwrap());
+        let tool_registry = Arc::new(ToolRegistry::new());
+
         let runner = PlanRunnerBuilder::new(PathBuf::from("/tmp"), config)
+            .with_llm_client(llm_client)
+            .with_tool_registry(tool_registry)
             .require_approval()
             .build();
 

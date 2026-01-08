@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::approval::{ApprovalMode, ExecutionMode, ExecutionPlan, PlannedTool};
+use crate::approval::{ApprovalMode, ExecutionPlan, PlannedTool, UserMode};
 use crate::checkpoint::{CheckpointManager, DirectoryCheckpointManager};
 use crate::config::Config;
 use crate::context::ContextManager;
@@ -22,7 +22,7 @@ use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan}
 use crate::prompts;
 use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
-use crate::unified_planning::{ExecutionMode as PlanExecutionMode, UnifiedPlanner};
+use crate::unified_planning::{ExecutionMode as UnifiedExecutionMode, UnifiedPlanner};
 
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
@@ -67,6 +67,9 @@ pub enum SessionEvent {
     },
     /// Plan event (from planning system)
     Plan(PlanEvent),
+    /// Plan approval sender (TUI should store this to send approval)
+    /// Note: Using unbounded channel since oneshot::Sender doesn't implement Clone
+    PlanApprovalSender(tokio::sync::mpsc::UnboundedSender<bool>),
     /// Token usage update from LLM response
     TokenUsage {
         input_tokens: usize,
@@ -82,8 +85,8 @@ pub enum SessionEvent {
 
 pub struct Session {
     config: Config,
-    llm_client: Box<dyn LlmClient>,
-    tool_registry: ToolRegistry,
+    llm_client: Arc<dyn LlmClient>,
+    tool_registry: Arc<ToolRegistry>,
     messages: Vec<Message>,
     project_path: PathBuf,
 
@@ -96,7 +99,7 @@ pub struct Session {
     // Features
     persistence: SessionPersistence,
     approval_mode: ApprovalMode,
-    execution_mode: ExecutionMode,
+    user_mode: UserMode,
     agent_mode: AgentMode,
     stats: SessionStats,
     memory: MemoryManager,
@@ -115,6 +118,10 @@ pub struct Session {
 
     // LSP manager for diagnostics
     lsp_manager: LspManager,
+
+    // Unified planning state
+    current_plan: Option<crate::unified_planning::UnifiedPlan>,
+    plan_history: Vec<crate::unified_planning::UnifiedPlan>,
 }
 
 impl Session {
@@ -128,12 +135,12 @@ impl Session {
         project_path: PathBuf,
         event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
     ) -> Result<Self> {
-        let llm_client = create_client(&config).await?;
+        let llm_client: Arc<dyn LlmClient> = Arc::from(create_client(&config).await?);
 
         // Initialize tool registry with subagent support
-        let mut tool_registry = if let Some(ref tx) = event_tx {
+        let mut tool_registry = if let Some(tx) = event_tx.clone() {
             ToolRegistry::new()
-                .with_subagent_support_and_events(config.clone(), project_path.clone(), tx.clone())
+                .with_subagent_support_and_events(config.clone(), project_path.clone(), tx)
                 .await
         } else {
             ToolRegistry::new()
@@ -145,10 +152,12 @@ impl Session {
         let mut mcp_manager = McpManager::new(config.mcp.clone());
         mcp_manager.initialize(&project_path).await?;
 
-        // Register MCP tools with the tool registry
+        // Register MCP tools with the tool registry before wrapping in Arc
         for tool in mcp_manager.get_tools() {
             tool_registry.register(tool);
         }
+
+        let tool_registry = Arc::new(tool_registry);
 
         if mcp_manager.is_active() {
             tracing::info!(
@@ -193,7 +202,7 @@ impl Session {
 
             persistence,
             approval_mode: ApprovalMode::default(),
-            execution_mode: ExecutionMode::default(),
+            user_mode: UserMode::default(),
             agent_mode: AgentMode::default(),
             stats: SessionStats::new(),
             memory,
@@ -206,18 +215,20 @@ impl Session {
             subagent_event_tx: event_tx,
             mcp_manager,
             lsp_manager,
+            current_plan: None,
+            plan_history: Vec::new(),
         })
     }
 
-    /// Set execution mode (Plan or Act)
-    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
-        self.execution_mode = mode;
-        tracing::info!("Execution mode set to: {}", mode);
+    /// Set user mode (Plan or Build)
+    pub fn set_user_mode(&mut self, mode: UserMode) {
+        self.user_mode = mode;
+        tracing::info!("User mode set to: {}", mode);
     }
 
-    /// Get current execution mode
-    pub fn execution_mode(&self) -> ExecutionMode {
-        self.execution_mode
+    /// Get current user mode
+    pub fn user_mode(&self) -> UserMode {
+        self.user_mode
     }
 
     /// Set agent mode (Plan or Build)
@@ -246,6 +257,383 @@ impl Session {
     /// Get permission manager summary
     pub fn permission_summary(&self) -> String {
         self.permission_manager.summary()
+    }
+
+    /// Get LLM client for unified planning
+    pub fn get_llm_client(&self) -> Arc<dyn LlmClient> {
+        self.llm_client.clone()
+    }
+
+    /// Get tool registry for unified planning
+    pub fn get_tool_registry(&self) -> Arc<ToolRegistry> {
+        self.tool_registry.clone()
+    }
+
+    /// Get the current plan (if any)
+    pub fn get_current_plan(&self) -> Option<&crate::unified_planning::UnifiedPlan> {
+        self.current_plan.as_ref()
+    }
+
+    /// Get plan history
+    pub fn get_plan_history(&self) -> &[crate::unified_planning::UnifiedPlan] {
+        &self.plan_history
+    }
+
+    /// Set the current plan
+    fn set_current_plan(&mut self, plan: crate::unified_planning::UnifiedPlan) {
+        // Move any existing plan to history
+        if let Some(old_plan) = self.current_plan.take() {
+            // Only keep last 10 plans in history
+            if self.plan_history.len() >= 10 {
+                self.plan_history.remove(0);
+            }
+            self.plan_history.push(old_plan);
+        }
+        self.current_plan = Some(plan);
+    }
+
+    /// Format current plan for display
+    pub fn format_current_plan(&self) -> String {
+        match &self.current_plan {
+            Some(plan) => {
+                let mut output = String::new();
+                output.push_str(&format!("## {}\n\n", plan.title));
+                output.push_str(&format!("Status: {:?}\n", plan.status));
+                output.push_str(&format!("Mode: {:?}\n\n", plan.execution_mode));
+
+                output.push_str("### Steps:\n");
+                for (group_idx, group) in plan.groups.iter().enumerate() {
+                    if plan.groups.len() > 1 {
+                        output.push_str(&format!("\n**Phase {}**", group_idx + 1));
+                        if !group.depends_on.is_empty() {
+                            output.push_str(&format!(" (depends on: {})", group.depends_on.join(", ")));
+                        }
+                        output.push('\n');
+                    }
+                    for step in &group.steps {
+                        let status_icon = match step.status {
+                            crate::unified_planning::StepStatus::Pending => "◯",
+                            crate::unified_planning::StepStatus::InProgress => "◐",
+                            crate::unified_planning::StepStatus::Completed => "✓",
+                            crate::unified_planning::StepStatus::Failed => "✗",
+                            crate::unified_planning::StepStatus::Skipped => "○",
+                        };
+                        output.push_str(&format!("{} {}\n", status_icon, step.description));
+                    }
+                }
+
+                if let Some(summary) = plan.groups.iter()
+                    .flat_map(|g| g.steps.iter())
+                    .filter_map(|s| s.result.as_ref())
+                    .last()
+                    .map(|r| &r.output)
+                {
+                    if !summary.is_empty() {
+                        output.push_str(&format!("\n### Summary:\n{}\n", summary));
+                    }
+                }
+
+                output
+            }
+            None => "No active plan. Submit a task to create a plan.".to_string(),
+        }
+    }
+
+    /// Format plan groups for display
+    pub fn format_plan_groups(&self) -> String {
+        match &self.current_plan {
+            Some(plan) => {
+                let mut output = String::new();
+                output.push_str(&format!("## Plan Groups: {}\n\n", plan.title));
+
+                for (i, group) in plan.groups.iter().enumerate() {
+                    let status = if group.steps.iter().all(|s| s.status == crate::unified_planning::StepStatus::Completed) {
+                        "✓ Completed"
+                    } else if group.steps.iter().any(|s| s.status == crate::unified_planning::StepStatus::InProgress) {
+                        "◐ In Progress"
+                    } else if group.steps.iter().any(|s| s.status == crate::unified_planning::StepStatus::Failed) {
+                        "✗ Failed"
+                    } else {
+                        "◯ Pending"
+                    };
+
+                    let parallel_note = if group.steps.len() > 1 {
+                        format!(" (parallel: {} steps)", group.steps.len())
+                    } else {
+                        String::new()
+                    };
+
+                    output.push_str(&format!("### Group {}: {}{}\n", i + 1, status, parallel_note));
+
+                    if !group.depends_on.is_empty() {
+                        output.push_str(&format!("  Dependencies: {}\n", group.depends_on.join(", ")));
+                    }
+
+                    for step in &group.steps {
+                        let status_icon = match step.status {
+                            crate::unified_planning::StepStatus::Pending => "  ◯",
+                            crate::unified_planning::StepStatus::InProgress => "  ◐",
+                            crate::unified_planning::StepStatus::Completed => "  ✓",
+                            crate::unified_planning::StepStatus::Failed => "  ✗",
+                            crate::unified_planning::StepStatus::Skipped => "  ○",
+                        };
+                        output.push_str(&format!("{} {}\n", status_icon, step.description));
+                    }
+                    output.push('\n');
+                }
+
+                output
+            }
+            None => "No active plan with groups.".to_string(),
+        }
+    }
+
+    /// Format plan history for display
+    pub fn format_plan_history(&self) -> String {
+        if self.plan_history.is_empty() && self.current_plan.is_none() {
+            return "No plans executed in this session.".to_string();
+        }
+
+        let mut output = String::new();
+        output.push_str("## Plan History\n\n");
+
+        // Show current plan first
+        if let Some(ref plan) = self.current_plan {
+            let status = match plan.status {
+                crate::unified_planning::PlanStatus::Completed => "✓ Completed",
+                crate::unified_planning::PlanStatus::Failed => "✗ Failed",
+                crate::unified_planning::PlanStatus::Executing => "◐ Executing",
+                crate::unified_planning::PlanStatus::AwaitingApproval => "⏳ Awaiting Approval",
+                _ => "◯ Pending",
+            };
+            output.push_str(&format!("**Current**: {} [{}] ({:?})\n", plan.title, status, plan.execution_mode));
+        }
+
+        // Show history (most recent first)
+        for (i, plan) in self.plan_history.iter().rev().enumerate() {
+            let status = match plan.status {
+                crate::unified_planning::PlanStatus::Completed => "✓",
+                crate::unified_planning::PlanStatus::Failed => "✗",
+                _ => "○",
+            };
+            output.push_str(&format!("{}. {} {} ({:?})\n", i + 1, status, plan.title, plan.execution_mode));
+        }
+
+        output
+    }
+
+    /// Send message using unified planning system
+    ///
+    /// This uses the new unified planning approach:
+    /// 1. Create a plan with the LLM
+    /// 2. Show plan (if Plan mode) or execute (if Build mode)
+    /// 3. Execute steps with DirectExecutor
+    /// 4. Return summary
+    pub async fn send_message_with_planning(&mut self, request: String) -> Result<String> {
+        use crate::unified_planning::{
+            integration::{create_runner, create_runner_with_approval},
+            ExecutionMode as UnifiedExecutionMode, UnifiedPlanner,
+        };
+
+        // Emit thinking event
+        if let Some(ref tx) = self.subagent_event_tx {
+            let _ = tx.send(SessionEvent::Thinking(
+                "Creating execution plan...".to_string(),
+            ));
+        }
+
+        // Always use Direct execution for inline shell execution
+        let execution_mode = UnifiedExecutionMode::Direct;
+
+        // Create planner
+        let planner = UnifiedPlanner::new(execution_mode);
+
+        // Get context
+        let project_context = self.memory.get_system_prompt().await.ok();
+
+        // Create plan
+        let plan = planner
+            .create_plan(&*self.llm_client, &request, project_context.as_deref())
+            .await
+            .context("Failed to create execution plan")?;
+
+        // Store the plan for /plan commands
+        self.set_current_plan(plan.clone());
+
+        // In Plan mode: Create plan, show it, wait for approval, but DON'T execute
+        // User must switch to Build mode to execute
+        if self.user_mode.requires_approval() {
+            use crate::planning::PlanEvent as LegacyEvent;
+
+            // Send plan to UI for display
+            if let Some(ref tx) = self.subagent_event_tx {
+                let _ = tx.send(SessionEvent::Plan(LegacyEvent::PlanCreated {
+                    plan: plan.to_legacy_plan(),
+                }));
+            }
+
+            // Format plan summary for text response
+            let mut plan_text = format!("## Plan: {}\n\n", plan.title);
+            plan_text.push_str("**Plan Mode is READ-ONLY. This plan shows what will be done.**\n\n");
+
+            for (i, group) in plan.groups.iter().enumerate() {
+                plan_text.push_str(&format!("### Phase {}\n", i + 1));
+                for step in &group.steps {
+                    plan_text.push_str(&format!("- **{}**: {}\n", step.description, step.instructions));
+                    if !step.relevant_files.is_empty() {
+                        plan_text.push_str(&format!("  Files: {}\n", step.relevant_files.join(", ")));
+                    }
+                }
+                plan_text.push('\n');
+            }
+
+            plan_text.push_str("\n---\n");
+            plan_text.push_str("**Plan complete. Switch to BUILD mode (Ctrl+G) to execute this plan.**\n");
+            plan_text.push_str("*In Plan mode, Safe-Coder only creates plans - no files are modified.*\n");
+
+            // Send text chunk for display
+            if let Some(ref tx) = self.subagent_event_tx {
+                let _ = tx.send(SessionEvent::TextChunk(plan_text.clone()));
+            }
+
+            return Ok(plan_text);
+        }
+
+        // Build mode: Execute the plan immediately
+        let runner = create_runner(
+            self.project_path.clone(),
+            Arc::new(self.config.clone()),
+            self.llm_client.clone(),
+            self.get_tool_registry(),
+        );
+
+        // Execute plan and get events
+        let (initial_plan, mut events) = runner.execute(plan).await?;
+        let mut final_summary = initial_plan.summary();
+        let mut final_success = false;
+
+        // Forward plan events to session events and await completion
+        while let Some(event) = events.recv().await {
+            use crate::planning::PlanEvent as LegacyEvent;
+            use crate::unified_planning::PlanEvent as UPEvent;
+
+            // Update current plan based on events
+            match &event {
+                UPEvent::PlanCompleted { summary, success, .. } => {
+                    final_summary = summary.clone();
+                    final_success = *success;
+                    // Update the stored plan's status
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.status = if *success {
+                            crate::unified_planning::PlanStatus::Completed
+                        } else {
+                            crate::unified_planning::PlanStatus::Failed
+                        };
+                    }
+                }
+                UPEvent::StepStarted { step_id, .. } => {
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.update_step_status(step_id, crate::unified_planning::StepStatus::InProgress);
+                    }
+                }
+                UPEvent::StepCompleted { step_id, success, .. } => {
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.update_step_status(
+                            step_id,
+                            if *success {
+                                crate::unified_planning::StepStatus::Completed
+                            } else {
+                                crate::unified_planning::StepStatus::Failed
+                            },
+                        );
+                    }
+                }
+                UPEvent::PlanStarted { .. } => {
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.status = crate::unified_planning::PlanStatus::Executing;
+                    }
+                }
+                _ => {}
+            }
+
+            // Forward to session event stream if available
+            if let Some(ref tx) = self.subagent_event_tx {
+                // Map common events to legacy format for UI compatibility
+                let legacy_event = match &event {
+                    UPEvent::PlanCreated { plan, .. } => Some(LegacyEvent::PlanCreated {
+                        plan: plan.to_legacy_plan(),
+                    }),
+                    UPEvent::StepStarted {
+                        plan_id,
+                        step_id,
+                        description,
+                        ..
+                    } => Some(LegacyEvent::StepStarted {
+                        plan_id: plan_id.clone(),
+                        step_id: step_id.clone(),
+                        description: description.clone(),
+                    }),
+                    UPEvent::StepProgress {
+                        plan_id,
+                        step_id,
+                        message,
+                    } => Some(LegacyEvent::StepProgress {
+                        plan_id: plan_id.clone(),
+                        step_id: step_id.clone(),
+                        message: message.clone(),
+                    }),
+                    UPEvent::StepCompleted {
+                        plan_id,
+                        step_id,
+                        success,
+                        ..
+                    } => Some(LegacyEvent::StepCompleted {
+                        plan_id: plan_id.clone(),
+                        step_id: step_id.clone(),
+                        success: *success,
+                        output: None,
+                        error: None,
+                    }),
+                    UPEvent::PlanCompleted {
+                        plan_id,
+                        success,
+                        summary,
+                    } => Some(LegacyEvent::PlanCompleted {
+                        plan_id: plan_id.clone(),
+                        success: *success,
+                        summary: summary.clone(),
+                    }),
+                    UPEvent::PlanAwaitingApproval { plan_id } => {
+                        Some(LegacyEvent::AwaitingApproval {
+                            plan_id: plan_id.clone(),
+                        })
+                    }
+                    UPEvent::PlanApproved { plan_id } => Some(LegacyEvent::PlanApproved {
+                        plan_id: plan_id.clone(),
+                    }),
+                    UPEvent::PlanRejected { plan_id, .. } => Some(LegacyEvent::PlanRejected {
+                        plan_id: plan_id.clone(),
+                    }),
+                    _ => None,
+                };
+
+                if let Some(le) = legacy_event {
+                    let _ = tx.send(SessionEvent::Plan(le));
+                }
+            }
+        }
+
+        // Return summary
+        Ok(final_summary)
+    }
+
+    /// Convert unified plan to legacy plan format for events
+    fn convert_unified_plan_to_legacy(
+        &self,
+        plan: &crate::unified_planning::UnifiedPlan,
+    ) -> crate::planning::TaskPlan {
+        // Use the built-in conversion method
+        plan.to_legacy_plan()
     }
 
     /// Get mutable reference to permission manager for advanced configuration
@@ -278,6 +666,20 @@ impl Session {
             if let Err(e) = self.dir_checkpoints.create_checkpoint(&label).await {
                 tracing::warn!("Failed to create checkpoint: {}", e);
             }
+        }
+
+        // Try unified planning path (creates internal event channel)
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let prev_tx = self.subagent_event_tx.clone();
+        self.subagent_event_tx = Some(event_tx);
+        let planning_result = self.send_message_with_planning(user_message.clone()).await;
+        self.subagent_event_tx = prev_tx;
+
+        // Drain events (no UI to send them to in this method)
+        while event_rx.try_recv().is_ok() {}
+
+        if let Ok(resp) = planning_result {
+            return Ok(resp);
         }
 
         // Track stats
@@ -360,9 +762,9 @@ impl Session {
             // Build execution plan from tool calls
             let execution_plan = self.build_execution_plan(&assistant_message);
 
-            // Handle based on execution mode
-            match self.execution_mode {
-                ExecutionMode::Plan => {
+            // Handle based on user mode
+            match self.user_mode {
+                UserMode::Plan => {
                     // Show detailed plan and ask for approval
                     let plan_output = execution_plan.format_detailed(true);
                     response_text.push_str("\n");
@@ -396,7 +798,7 @@ impl Session {
 
                     response_text.push_str("\n✅ Plan approved. Executing...\n\n");
                 }
-                ExecutionMode::Act => {
+                UserMode::Build => {
                     // Show brief plan summary (not detailed)
                     if !execution_plan.tools.is_empty() {
                         let brief = format!(
@@ -611,6 +1013,22 @@ impl Session {
 
         let mut response_text = String::new();
 
+        // Use unified planning path for shell/TUI to stream plan events
+        let prev_tx = self.subagent_event_tx.clone();
+        self.subagent_event_tx = Some(event_tx.clone());
+        let planning_result = self.send_message_with_planning(user_message.clone()).await;
+        self.subagent_event_tx = prev_tx;
+
+        if let Ok(resp) = planning_result {
+            let _ = event_tx.send(SessionEvent::TextChunk(resp.clone()));
+            return Ok(resp);
+        }
+
+        tracing::warn!(
+            "Unified planning failed, falling back to legacy mode: {:?}",
+            planning_result.err()
+        );
+
         // Build hierarchical system prompt
         let project_context = self.memory.get_system_prompt().await.ok();
         let system_prompt =
@@ -623,8 +1041,8 @@ impl Session {
         let _ = event_tx.send(SessionEvent::Thinking("Creating plan...".to_string()));
 
         let execution_mode = match self.agent_mode {
-            AgentMode::Plan => PlanExecutionMode::Direct, // Plan mode uses simple direct planning
-            AgentMode::Build => PlanExecutionMode::Direct, // Build mode also uses direct for inline execution
+            AgentMode::Plan => UnifiedExecutionMode::Direct, // Plan mode uses simple direct planning
+            AgentMode::Build => UnifiedExecutionMode::Direct, // Build mode also uses direct for inline execution
         };
 
         let planner = UnifiedPlanner::new(execution_mode);
@@ -662,9 +1080,11 @@ impl Session {
                 plan: task_plan.clone(),
             }));
 
-            // In Plan mode, just show the plan and return without executing
-            if self.agent_mode == AgentMode::Plan {
+            // In Plan mode (AgentMode::Plan OR UserMode::Plan), just show the plan and return without executing
+            // Plan mode is READ-ONLY - no file modifications allowed
+            if self.agent_mode == AgentMode::Plan || self.user_mode.requires_approval() {
                 response_text.push_str(&format!("## Plan: {}\n\n", plan.title));
+                response_text.push_str("**Plan Mode is READ-ONLY. This plan shows what will be done.**\n\n");
                 for (i, group) in plan.groups.iter().enumerate() {
                     response_text.push_str(&format!("### Phase {}\n", i + 1));
                     for step in &group.steps {
@@ -681,8 +1101,10 @@ impl Session {
                     }
                     response_text.push('\n');
                 }
+                response_text.push_str("\n---\n");
                 response_text
-                    .push_str("\n**Plan complete. Switch to BUILD mode (Ctrl+G) to execute.**\n");
+                    .push_str("**Plan complete. Switch to BUILD mode (Ctrl+G) to execute this plan.**\n");
+                response_text.push_str("*In Plan mode, Safe-Coder only creates plans - no files are modified.*\n");
                 let _ = event_tx.send(SessionEvent::TextChunk(response_text.clone()));
                 return Ok(response_text);
             }
@@ -692,11 +1114,23 @@ impl Session {
                 plan_id: task_plan_id.clone(),
             }));
         } else if let Err(ref e) = unified_plan {
-            // Planning failed - log but continue with reactive planning
-            tracing::warn!(
-                "Upfront planning failed: {}. Continuing with reactive planning.",
-                e
-            );
+            // Planning failed
+            tracing::warn!("Upfront planning failed: {}", e);
+
+            // In Plan mode, don't fall through to reactive execution - just report the error
+            if self.agent_mode == AgentMode::Plan || self.user_mode.requires_approval() {
+                let error_msg = format!(
+                    "**Plan Mode Error**: Unable to create plan.\n\n\
+                    Error: {}\n\n\
+                    Plan mode is READ-ONLY and cannot proceed without a plan.\n\
+                    Try rephrasing your request or switch to BUILD mode (Ctrl+G) for direct execution.",
+                    e
+                );
+                let _ = event_tx.send(SessionEvent::TextChunk(error_msg.clone()));
+                return Ok(error_msg);
+            }
+
+            // In Build mode, continue with reactive planning
             let _ = event_tx.send(SessionEvent::TextChunk(format!(
                 "Note: Upfront planning unavailable, using reactive execution.\n"
             )));
@@ -1483,7 +1917,7 @@ impl Session {
     /// Switch to a different model
     pub async fn switch_model(&mut self, model: &str) -> Result<()> {
         self.config.llm.model = model.to_string();
-        self.llm_client = create_client(&self.config).await?;
+        self.llm_client = Arc::from(create_client(&self.config).await?);
         Ok(())
     }
 

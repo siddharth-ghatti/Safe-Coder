@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::llm::LlmClient;
+use crate::tools::ToolRegistry;
 
 use super::executors::create_full_registry;
 use super::planner::UnifiedPlanner;
@@ -21,20 +22,34 @@ pub fn create_planner(mode: ExecutionMode) -> UnifiedPlanner {
 }
 
 /// Create a plan runner with all built-in executors registered
-pub fn create_runner(project_path: PathBuf, config: Arc<Config>) -> PlanRunner {
+pub fn create_runner(
+    project_path: PathBuf,
+    config: Arc<Config>,
+    llm_client: Arc<dyn LlmClient>,
+    tool_registry: Arc<ToolRegistry>,
+) -> PlanRunner {
     let registry = Arc::new(create_full_registry());
 
     PlanRunnerBuilder::new(project_path, config)
         .with_registry(registry)
+        .with_llm_client(llm_client)
+        .with_tool_registry(tool_registry)
         .build()
 }
 
 /// Create a plan runner that requires user approval
-pub fn create_runner_with_approval(project_path: PathBuf, config: Arc<Config>) -> PlanRunner {
+pub fn create_runner_with_approval(
+    project_path: PathBuf,
+    config: Arc<Config>,
+    llm_client: Arc<dyn LlmClient>,
+    tool_registry: Arc<ToolRegistry>,
+) -> PlanRunner {
     let registry = Arc::new(create_full_registry());
 
     PlanRunnerBuilder::new(project_path, config)
         .with_registry(registry)
+        .with_llm_client(llm_client)
+        .with_tool_registry(tool_registry)
         .require_approval()
         .build()
 }
@@ -50,7 +65,8 @@ pub fn create_runner_with_approval(project_path: PathBuf, config: Arc<Config>) -
 pub async fn plan_and_execute(
     request: &str,
     mode: ExecutionMode,
-    llm_client: &dyn LlmClient,
+    llm_client: Arc<dyn LlmClient>,
+    tool_registry: Arc<ToolRegistry>,
     project_path: PathBuf,
     config: Arc<Config>,
     project_context: Option<&str>,
@@ -59,14 +75,14 @@ pub async fn plan_and_execute(
     // Create planner and runner
     let planner = create_planner(mode);
     let runner = if require_approval {
-        create_runner_with_approval(project_path, config)
+        create_runner_with_approval(project_path, config, llm_client.clone(), tool_registry)
     } else {
-        create_runner(project_path, config)
+        create_runner(project_path, config, llm_client.clone(), tool_registry)
     };
 
     // Create the plan
     let plan = planner
-        .create_plan(llm_client, request, project_context)
+        .create_plan(llm_client.as_ref(), request, project_context)
         .await?;
 
     // Execute the plan
@@ -136,24 +152,11 @@ fn convert_to_legacy_event(event: &PlanEvent) -> Option<crate::planning::PlanEve
     };
 
     match event {
-        PlanEvent::PlanCreated {
-            plan_id,
-            title,
-            total_steps,
-            ..
-        } => {
-            // Create a minimal TaskPlan for legacy compatibility
-            let mut plan = TaskPlan::new(plan_id.clone(), String::new());
-            plan.title = title.clone();
-            plan.status = PlanStatus::Ready;
-            // Create placeholder steps
-            for i in 0..*total_steps {
-                plan.steps.push(PlanStep::new(
-                    format!("step-{}", i + 1),
-                    format!("Step {}", i + 1),
-                ));
-            }
-            Some(LegacyEvent::PlanCreated { plan })
+        PlanEvent::PlanCreated { plan, .. } => {
+            // Convert UnifiedPlan to legacy TaskPlan
+            Some(LegacyEvent::PlanCreated {
+                plan: plan.to_legacy_plan(),
+            })
         }
         PlanEvent::PlanAwaitingApproval { plan_id } => Some(LegacyEvent::AwaitingApproval {
             plan_id: plan_id.clone(),

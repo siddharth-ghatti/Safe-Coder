@@ -11,13 +11,14 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
+use crate::llm::LlmClient;
+use crate::tools::ToolRegistry;
 
 use super::types::{ExecutionMode, PlanEvent, StepResult, UnifiedPlan, UnifiedStep};
 
 /// Context passed to every executor
 ///
 /// Contains all the information an executor needs to execute steps.
-#[derive(Clone)]
 pub struct ExecutorContext {
     /// Path to the project root
     pub project_path: PathBuf,
@@ -29,6 +30,10 @@ pub struct ExecutorContext {
     pub plan_id: String,
     /// The execution mode
     pub execution_mode: ExecutionMode,
+    /// LLM client for AI interactions
+    pub llm_client: Arc<dyn LlmClient>,
+    /// Tool registry for executing tools
+    pub tool_registry: Arc<ToolRegistry>,
 }
 
 impl ExecutorContext {
@@ -39,6 +44,8 @@ impl ExecutorContext {
         event_tx: UnboundedSender<PlanEvent>,
         plan_id: String,
         execution_mode: ExecutionMode,
+        llm_client: Arc<dyn LlmClient>,
+        tool_registry: Arc<ToolRegistry>,
     ) -> Self {
         Self {
             project_path,
@@ -46,6 +53,8 @@ impl ExecutorContext {
             event_tx,
             plan_id,
             execution_mode,
+            llm_client,
+            tool_registry,
         }
     }
 
@@ -328,8 +337,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_executor_context_emit() {
+        use crate::llm::create_client;
+        use crate::tools::ToolRegistry;
+
         let (tx, mut rx) = mpsc::unbounded_channel();
         let config = Arc::new(Config::default());
+        let llm_client = Arc::new(create_client(&config).unwrap());
+        let tool_registry = Arc::new(ToolRegistry::new());
 
         let ctx = ExecutorContext::new(
             PathBuf::from("/tmp"),
@@ -337,6 +351,8 @@ mod tests {
             tx,
             "plan-1".to_string(),
             ExecutionMode::Direct,
+            llm_client,
+            tool_registry,
         );
 
         ctx.emit(PlanEvent::PlanStarted {

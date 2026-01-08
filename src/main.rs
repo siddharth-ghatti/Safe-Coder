@@ -41,15 +41,15 @@ use session::Session;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-    
+
     /// Path to the project directory (default: current directory)
     #[arg(short, long, default_value = ".", global = true)]
     path: PathBuf,
-    
+
     /// Automatically connect to AI on startup (only for shell mode)
     #[arg(long, global = true)]
     ai: bool,
-    
+
     /// Use legacy text-based shell instead of TUI (only for shell mode)
     #[arg(long, global = true)]
     no_tui: bool,
@@ -59,10 +59,10 @@ struct Cli {
 enum Commands {
     /// Start the interactive shell with AI assistance (default mode)
     ///
-    /// This is the primary way to use safe-coder. Run shell commands directly 
+    /// This is the primary way to use safe-coder. Run shell commands directly
     /// in a visual interface with optional AI assistance. Features include:
     ///   - Full shell functionality with command history
-    ///   - Real-time command output streaming  
+    ///   - Real-time command output streaming
     ///   - AI assistance with context awareness
     ///   - Git integration and safety features
     ///   - TUI or text-based interface options
@@ -85,7 +85,7 @@ enum Commands {
     },
     /// Legacy interactive coding session (chat-first mode)
     ///
-    /// This is the legacy chat-focused interface. Consider using the shell 
+    /// This is the legacy chat-focused interface. Consider using the shell
     /// mode instead for a more integrated experience.
     #[command(alias = "c")]
     Chat {
@@ -247,12 +247,12 @@ async fn main() -> Result<()> {
 }
 
 async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String) -> Result<()> {
-    use approval::ExecutionMode;
+    use approval::UserMode;
 
     let canonical_path = project_path.canonicalize()?;
 
-    // Parse execution mode
-    let execution_mode = ExecutionMode::from_str(&mode)?;
+    // Parse user mode
+    let user_mode = UserMode::from_str(&mode)?;
 
     // Demo mode - no API required
     if demo && use_tui {
@@ -265,13 +265,13 @@ async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String
     let config = Config::load()?;
     let mut session = Session::new(config, canonical_path.clone()).await?;
 
-    // Set execution mode
-    session.set_execution_mode(execution_mode);
+    // Set user mode
+    session.set_user_mode(user_mode);
 
     // Show mode on startup
-    let mode_desc = match execution_mode {
-        ExecutionMode::Plan => "PLAN mode - deep planning with approval before execution",
-        ExecutionMode::Act => "ACT mode - lightweight planning with auto-execution",
+    let mode_desc = match user_mode {
+        UserMode::Plan => "PLAN mode - deep planning with approval before execution",
+        UserMode::Build => "BUILD mode - lightweight planning with auto-execution",
     };
 
     if use_tui {
@@ -378,12 +378,12 @@ async fn run_orchestrate(
     start_delay_ms: Option<u64>,
     mode: String,
 ) -> Result<()> {
-    use approval::ExecutionMode;
+    use approval::UserMode;
 
     let canonical_path = project_path.canonicalize()?;
 
-    // Parse execution mode
-    let execution_mode = ExecutionMode::from_str(&mode)?;
+    // Parse user mode
+    let user_mode = UserMode::from_str(&mode)?;
 
     // Load config for throttle limits
     let user_config = Config::load().unwrap_or_default();
@@ -459,15 +459,15 @@ async fn run_orchestrate(
             start_delay_ms: start_delay_ms
                 .unwrap_or(user_config.orchestrator.throttle_limits.start_delay_ms),
         },
-        execution_mode,
+        user_mode,
     };
 
     // Create orchestrator
     let mut orchestrator = Orchestrator::new(canonical_path.clone(), config).await?;
 
-    let mode_desc = match execution_mode {
-        ExecutionMode::Plan => "PLAN (requires approval before execution)",
-        ExecutionMode::Act => "ACT (auto-execute)",
+    let mode_desc = match user_mode {
+        UserMode::Plan => "PLAN (requires approval before execution)",
+        UserMode::Build => "BUILD (auto-execute)",
     };
 
     println!("🎯 Safe Coder Orchestrator");

@@ -100,7 +100,150 @@ const MAX_HISTORY_SIZE: usize = 1000;
 /// Default number of recent commands to include in AI context
 const DEFAULT_AI_CONTEXT_COMMANDS: usize = 10;
 
-/// Type of command block
+/// Command suggestion for autocomplete
+#[derive(Debug, Clone)]
+pub struct CommandSuggestion {
+    /// The command itself (e.g., "/help", "/connect")
+    pub command: String,
+    /// Short description of what the command does
+    pub description: String,
+    /// Optional longer help text
+    pub usage: Option<String>,
+}
+
+/// Command autocomplete state
+#[derive(Debug, Clone)]
+pub struct CommandAutocomplete {
+    /// Current suggestions based on input
+    pub suggestions: Vec<CommandSuggestion>,
+    /// Selected suggestion index  
+    pub selected: usize,
+    /// Whether the autocomplete is visible
+    pub visible: bool,
+    /// The current input prefix being completed
+    pub prefix: String,
+}
+
+impl CommandAutocomplete {
+    pub fn new() -> Self {
+        Self {
+            suggestions: Vec::new(),
+            selected: 0,
+            visible: false,
+            prefix: String::new(),
+        }
+    }
+
+    /// Get all available commands with descriptions
+    fn get_all_commands() -> Vec<CommandSuggestion> {
+        vec![
+            CommandSuggestion {
+                command: "/help".to_string(),
+                description: "Show help information".to_string(),
+                usage: Some("Show available commands and their descriptions".to_string()),
+            },
+            CommandSuggestion {
+                command: "/connect".to_string(),
+                description: "Connect to AI service".to_string(),
+                usage: Some("Establish connection to the AI assistant".to_string()),
+            },
+            CommandSuggestion {
+                command: "/disconnect".to_string(),
+                description: "Disconnect from AI service".to_string(),
+                usage: Some("Close connection to the AI assistant".to_string()),
+            },
+            CommandSuggestion {
+                command: "/orchestrate".to_string(),
+                description: "Run complex tasks with orchestration".to_string(),
+                usage: Some("/orchestrate <task description> - Execute multi-step tasks with parallel workers".to_string()),
+            },
+            CommandSuggestion {
+                command: "/tools".to_string(),
+                description: "Show available development tools".to_string(),
+                usage: Some("List all tools available to the AI assistant".to_string()),
+            },
+            CommandSuggestion {
+                command: "/mode".to_string(),
+                description: "Change execution mode".to_string(),
+                usage: Some("Toggle between planning and execution modes".to_string()),
+            },
+            CommandSuggestion {
+                command: "/agent".to_string(),
+                description: "Change agent mode".to_string(),
+                usage: Some("Switch agent behavior mode".to_string()),
+            },
+            CommandSuggestion {
+                command: "/commands".to_string(),
+                description: "Show detailed commands reference".to_string(),
+                usage: Some("Open full commands modal with comprehensive help".to_string()),
+            },
+        ]
+    }
+
+    /// Update suggestions based on current input
+    pub fn update(&mut self, input: &str) {
+        if !input.starts_with('/') {
+            self.visible = false;
+            return;
+        }
+
+        self.prefix = input.to_string();
+        self.suggestions.clear();
+        self.selected = 0;
+
+        let query = input[1..].to_lowercase(); // Remove the leading /
+        
+        // Filter commands that start with the query
+        for cmd in Self::get_all_commands() {
+            if cmd.command[1..].to_lowercase().starts_with(&query) {
+                self.suggestions.push(cmd);
+            }
+        }
+
+        self.visible = !self.suggestions.is_empty() && !input.ends_with(' ');
+    }
+
+    /// Select next suggestion
+    pub fn next(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected = (self.selected + 1) % self.suggestions.len();
+        }
+    }
+
+    /// Select previous suggestion
+    pub fn prev(&mut self) {
+        if !self.suggestions.is_empty() {
+            if self.selected == 0 {
+                self.selected = self.suggestions.len() - 1;
+            } else {
+                self.selected -= 1;
+            }
+        }
+    }
+
+    /// Get current selected suggestion
+    pub fn current(&self) -> Option<&CommandSuggestion> {
+        self.suggestions.get(self.selected)
+    }
+
+    /// Hide the autocomplete
+    pub fn hide(&mut self) {
+        self.visible = false;
+        self.suggestions.clear();
+        self.selected = 0;
+    }
+
+    /// Apply current suggestion (replace input)
+    pub fn apply_current(&self) -> Option<String> {
+        self.current().map(|cmd| cmd.command.clone())
+    }
+}
+
+impl Default for CommandAutocomplete {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockType {
     /// Regular shell command (ls, git, cargo, etc.)
@@ -356,6 +499,8 @@ pub enum InputMode {
     Normal,
     /// AI mode (after typing @)
     AiPrefix,
+    /// Slash command mode (after typing /)
+    SlashCommand,
     /// History search mode (Ctrl+R)
     Search,
     /// Block selection mode
@@ -434,6 +579,8 @@ pub struct ShellTuiApp {
     pub autocomplete: Autocomplete,
     /// File picker for @mentions
     pub file_picker: FilePicker,
+    /// Command autocomplete for slash commands
+    pub command_autocomplete: CommandAutocomplete,
     /// Commands modal visibility
     pub commands_modal_visible: bool,
 
@@ -458,6 +605,14 @@ pub struct ShellTuiApp {
     // === Sidebar State ===
     /// Sidebar with plan progress, token usage, and connections
     pub sidebar: SidebarState,
+
+    // === Plan Approval State ===
+    /// Whether plan approval popup is visible
+    pub plan_approval_visible: bool,
+    /// The plan awaiting approval (contains summary and steps)
+    pub pending_approval_plan: Option<crate::planning::TaskPlan>,
+    /// Sender to approve/reject the plan (using unbounded since sender needs Clone)
+    pub plan_approval_tx: Option<tokio::sync::mpsc::UnboundedSender<bool>>,
 
     // === Render Cache ===
     /// Cached render width (invalidate cache if width changes)
@@ -505,6 +660,7 @@ impl ShellTuiApp {
             search_result_pos: 0,
             autocomplete: Autocomplete::new(),
             file_picker: FilePicker::new(),
+            command_autocomplete: CommandAutocomplete::new(),
             commands_modal_visible: false,
 
             needs_redraw: true,
@@ -517,6 +673,10 @@ impl ShellTuiApp {
             lsp_initializing: true,
 
             sidebar: SidebarState::new(),
+
+            plan_approval_visible: false,
+            pending_approval_plan: None,
+            plan_approval_tx: None,
 
             cached_render_width: 0,
             cached_total_lines: 0,
@@ -719,49 +879,84 @@ impl ShellTuiApp {
             return;
         }
 
-        self.autocomplete.complete(&self.input, &self.cwd);
-
-        // If there's exactly one match, apply it immediately
-        if self.autocomplete.single_match() {
-            self.apply_autocomplete();
+        // If in slash command mode, update command suggestions
+        if self.input.starts_with('/') {
+            self.command_autocomplete.update(&self.input);
+            // If there's exactly one match, apply it immediately
+            if self.command_autocomplete.suggestions.len() == 1 {
+                self.apply_autocomplete();
+            }
+        } else {
+            // Regular autocomplete for paths/commands
+            self.autocomplete.complete(&self.input, &self.cwd);
+            // If there's exactly one match, apply it immediately
+            if self.autocomplete.single_match() {
+                self.apply_autocomplete();
+            }
         }
 
         self.needs_redraw = true;
     }
 
-    /// Apply the currently selected autocomplete suggestion
+    /// Check if autocomplete is currently visible (either command or file)
+    pub fn autocomplete_visible(&self) -> bool {
+        self.autocomplete.visible || self.command_autocomplete.visible
+    }
+
+    /// Apply autocomplete suggestion (either command or file)
     pub fn apply_autocomplete(&mut self) {
-        if let Some(new_input) = self.autocomplete.apply(&self.input) {
-            self.input = new_input;
-            self.cursor_pos = self.input.len();
-            self.autocomplete.hide();
+        if self.command_autocomplete.visible {
+            if let Some(command) = self.command_autocomplete.apply_current() {
+                self.input = command + " "; // Add space after command
+                self.cursor_pos = self.input.len();
+                self.command_autocomplete.hide();
+                self.update_input_mode();
+                self.needs_redraw = true;
+            }
+        } else if self.autocomplete.visible {
+            if let Some(completion) = self.autocomplete.apply(&self.input) {
+                self.input = completion;
+                self.cursor_pos = self.input.len();
+                self.autocomplete.hide();
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    /// Navigate autocomplete suggestions
+    pub fn autocomplete_next(&mut self) {
+        if self.command_autocomplete.visible {
+            self.command_autocomplete.next();
+            self.needs_redraw = true;
+        } else if self.autocomplete.visible {
+            self.autocomplete.next();
             self.needs_redraw = true;
         }
     }
 
-    /// Move to next autocomplete suggestion
-    pub fn autocomplete_next(&mut self) {
-        self.autocomplete.next();
-        self.needs_redraw = true;
-    }
-
-    /// Move to previous autocomplete suggestion
+    /// Navigate autocomplete suggestions backwards
     pub fn autocomplete_prev(&mut self) {
-        self.autocomplete.prev();
-        self.needs_redraw = true;
-    }
-
-    /// Check if autocomplete is currently visible
-    pub fn autocomplete_visible(&self) -> bool {
-        self.autocomplete.visible
+        if self.command_autocomplete.visible {
+            self.command_autocomplete.prev();
+            self.needs_redraw = true;
+        } else if self.autocomplete.visible {
+            self.autocomplete.prev();
+            self.needs_redraw = true;
+        }
     }
 
     /// Update input mode based on current input
     fn update_input_mode(&mut self) {
         if self.input.starts_with('@') {
             self.input_mode = InputMode::AiPrefix;
+            self.command_autocomplete.hide(); // Hide command autocomplete when in @mode
+        } else if self.input.starts_with('/') {
+            self.input_mode = InputMode::SlashCommand;
+            // Update command autocomplete suggestions
+            self.command_autocomplete.update(&self.input);
         } else {
             self.input_mode = InputMode::Normal;
+            self.command_autocomplete.hide(); // Hide when not in slash mode
         }
     }
 
@@ -935,7 +1130,53 @@ impl ShellTuiApp {
     /// Update sidebar from a plan event
     pub fn update_plan(&mut self, event: &PlanEvent) {
         self.sidebar.update_from_event(event);
+
+        // Show approval popup when plan is awaiting approval
+        match event {
+            PlanEvent::PlanCreated { plan } => {
+                // Store the plan for potential approval display
+                self.pending_approval_plan = Some(plan.clone());
+            }
+            PlanEvent::AwaitingApproval { .. } => {
+                self.plan_approval_visible = true;
+            }
+            PlanEvent::PlanApproved { .. } | PlanEvent::PlanRejected { .. } => {
+                self.plan_approval_visible = false;
+                self.pending_approval_plan = None;
+            }
+            _ => {}
+        }
+
         self.needs_redraw = true;
+    }
+
+    /// Approve the pending plan
+    pub fn approve_plan(&mut self) {
+        if let Some(tx) = self.plan_approval_tx.take() {
+            let _ = tx.send(true);
+        }
+        self.plan_approval_visible = false;
+        self.needs_redraw = true;
+    }
+
+    /// Reject the pending plan
+    pub fn reject_plan(&mut self) {
+        if let Some(tx) = self.plan_approval_tx.take() {
+            let _ = tx.send(false);
+        }
+        self.plan_approval_visible = false;
+        self.pending_approval_plan = None;
+        self.needs_redraw = true;
+    }
+
+    /// Set the approval sender (called when session starts plan approval)
+    pub fn set_plan_approval_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<bool>) {
+        self.plan_approval_tx = Some(tx);
+    }
+
+    /// Check if plan approval popup is visible
+    pub fn is_plan_approval_visible(&self) -> bool {
+        self.plan_approval_visible
     }
 
     /// Update token usage in sidebar
