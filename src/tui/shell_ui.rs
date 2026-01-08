@@ -1378,8 +1378,125 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
     ))];
 
-    // In build mode, show tool execution steps
-    if show_tool_steps && !app.sidebar.tool_steps.is_empty() {
+    // In build mode, show active plan if available
+    if show_tool_steps && app.sidebar.active_plan.is_some() {
+        let active_plan = app.sidebar.active_plan.as_ref().unwrap();
+
+        // Show progress bar
+        let percent = active_plan.progress_percent();
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+
+        // Show step count
+        let progress = format!(
+            " {}/{} steps",
+            active_plan.completed_count(),
+            active_plan.steps.len()
+        );
+        lines.push(Line::from(Span::styled(
+            progress,
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+
+        // Show awaiting approval indicator if needed
+        if active_plan.awaiting_approval {
+            lines.push(Line::from(Span::styled(
+                " ⏸ Awaiting approval",
+                Style::default().fg(ACCENT_YELLOW),
+            )));
+        }
+
+        // Calculate visible steps
+        let max_items = area.height.saturating_sub(5) as usize;
+        let total_steps = active_plan.steps.len();
+
+        // Find the in-progress step index, or show from start
+        let in_progress_idx = active_plan.current_step_idx;
+
+        let scroll_start = if let Some(idx) = in_progress_idx {
+            if total_steps <= max_items {
+                0
+            } else if idx < max_items / 2 {
+                0
+            } else if idx > total_steps - max_items / 2 {
+                total_steps.saturating_sub(max_items)
+            } else {
+                idx.saturating_sub(max_items / 2)
+            }
+        } else {
+            0
+        };
+
+        let visible_steps: Vec<&PlanStepDisplay> = active_plan
+            .steps
+            .iter()
+            .skip(scroll_start)
+            .take(max_items)
+            .collect();
+
+        // Show scroll indicator at top if needed
+        if scroll_start > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ↑ {} more above", scroll_start),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+
+        // Show each visible step with status icon
+        for step in visible_steps.iter() {
+            let (icon, icon_color) = match step.status {
+                PlanStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+                PlanStepStatus::InProgress => {
+                    let spinner_chars = ["◐", "◓", "◑", "◒"];
+                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                    (spinner.to_string(), ACCENT_CYAN)
+                }
+                PlanStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
+                PlanStepStatus::Skipped => ("⊘".to_string(), TEXT_DIM),
+                PlanStepStatus::Pending => ("◯".to_string(), TEXT_DIM),
+            };
+
+            // Truncate step description
+            let max_len = area.width.saturating_sub(5) as usize;
+            let desc = if step.description.len() > max_len {
+                format!("{}...", &step.description[..max_len.saturating_sub(3)])
+            } else {
+                step.description.clone()
+            };
+
+            // Style based on status
+            let desc_style = match step.status {
+                PlanStepStatus::InProgress => Style::default().fg(TEXT_PRIMARY),
+                PlanStepStatus::Completed => Style::default().fg(TEXT_DIM),
+                PlanStepStatus::Failed => Style::default().fg(ACCENT_RED),
+                _ => Style::default().fg(TEXT_SECONDARY),
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+                Span::styled(desc, desc_style),
+            ]));
+        }
+
+        // Show scroll indicator at bottom if needed
+        let items_below = total_steps.saturating_sub(scroll_start + visible_steps.len());
+        if items_below > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(" ↓ {} more below", items_below),
+                Style::default().fg(TEXT_MUTED),
+            )));
+        }
+    }
+    // Fall back to tool execution steps if no active plan
+    else if show_tool_steps && !app.sidebar.tool_steps.is_empty() {
         let tool_steps = &app.sidebar.tool_steps;
 
         // Show progress bar based on completed vs total tool steps

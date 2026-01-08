@@ -137,11 +137,182 @@ impl CommandAutocomplete {
     /// Get all available commands with descriptions
     fn get_all_commands() -> Vec<CommandSuggestion> {
         vec![
+            // System commands
             CommandSuggestion {
                 command: "/help".to_string(),
                 description: "Show help information".to_string(),
                 usage: Some("Show available commands and their descriptions".to_string()),
             },
+            CommandSuggestion {
+                command: "/commands".to_string(),
+                description: "Show detailed commands reference".to_string(),
+                usage: Some("Open full commands modal with comprehensive help".to_string()),
+            },
+            CommandSuggestion {
+                command: "/quit".to_string(),
+                description: "Exit the application".to_string(),
+                usage: Some("Exit safe-coder session".to_string()),
+            },
+            CommandSuggestion {
+                command: "/exit".to_string(),
+                description: "Exit the application".to_string(),
+                usage: Some("Exit safe-coder session".to_string()),
+            },
+            CommandSuggestion {
+                command: "/clear".to_string(),
+                description: "Clear the screen".to_string(),
+                usage: Some("Clear the terminal display".to_string()),
+            },
+            CommandSuggestion {
+                command: "/stats".to_string(),
+                description: "Show session statistics".to_string(),
+                usage: Some("Display token usage, time, and other statistics".to_string()),
+            },
+            CommandSuggestion {
+                command: "/about".to_string(),
+                description: "About Safe Coder".to_string(),
+                usage: Some("Show version and application information".to_string()),
+            },
+            
+            // Chat and session management
+            CommandSuggestion {
+                command: "/chat".to_string(),
+                description: "Chat session management".to_string(),
+                usage: Some("/chat save [name] | resume <id> | list | delete <id> | share <id>".to_string()),
+            },
+            CommandSuggestion {
+                command: "/sessions".to_string(),
+                description: "List all saved sessions".to_string(),
+                usage: Some("Alias for /chat list".to_string()),
+            },
+            
+            // Undo/Redo
+            CommandSuggestion {
+                command: "/undo".to_string(),
+                description: "Undo the last change".to_string(),
+                usage: Some("Revert to previous git commit".to_string()),
+            },
+            CommandSuggestion {
+                command: "/redo".to_string(),
+                description: "Redo a previously undone change".to_string(),
+                usage: Some("Re-apply previously undone changes".to_string()),
+            },
+            
+            // Memory and context
+            CommandSuggestion {
+                command: "/memory".to_string(),
+                description: "Memory management".to_string(),
+                usage: Some("/memory add <text> | show | refresh".to_string()),
+            },
+            CommandSuggestion {
+                command: "/compact".to_string(),
+                description: "Compact context to save tokens".to_string(),
+                usage: Some("Manually compress conversation history".to_string()),
+            },
+            
+            // Configuration
+            CommandSuggestion {
+                command: "/mode".to_string(),
+                description: "Set execution mode".to_string(),
+                usage: Some("/mode [plan|act] - Toggle between planning and execution modes".to_string()),
+            },
+            CommandSuggestion {
+                command: "/agent".to_string(),
+                description: "Change agent mode".to_string(),
+                usage: Some("Alias for /mode".to_string()),
+            },
+            CommandSuggestion {
+                command: "/model".to_string(),
+                description: "Switch AI model".to_string(),
+                usage: Some("/model [name] - Switch model or show current".to_string()),
+            },
+            CommandSuggestion {
+                command: "/approval-mode".to_string(),
+                description: "Set approval mode".to_string(),
+                usage: Some("/approval-mode [plan|default|auto-edit|yolo]".to_string()),
+            },
+            CommandSuggestion {
+                command: "/settings".to_string(),
+                description: "Show current settings".to_string(),
+                usage: Some("Display all configuration settings".to_string()),
+            },
+            
+            // Project tools
+            CommandSuggestion {
+                command: "/summary".to_string(),
+                description: "Generate project summary".to_string(),
+                usage: Some("Create a summary of the current project".to_string()),
+            },
+            CommandSuggestion {
+                command: "/compress".to_string(),
+                description: "Compress conversation".to_string(),
+                usage: Some("Compress conversation to save tokens".to_string()),
+            },
+            CommandSuggestion {
+                command: "/restore".to_string(),
+                description: "Restore file(s) from git".to_string(),
+                usage: Some("/restore [file] - Restore from git checkpoint".to_string()),
+            },
+            CommandSuggestion {
+                command: "/tools".to_string(),
+                description: "List available tools".to_string(),
+                usage: Some("Show all development tools available to AI".to_string()),
+            },
+            CommandSuggestion {
+                command: "/directory".to_string(),
+                description: "Workspace directory management".to_string(),
+                usage: Some("/directory add <path> | show".to_string()),
+            },
+            CommandSuggestion {
+                command: "/dir".to_string(),
+                description: "Workspace directory management".to_string(),
+                usage: Some("Alias for /directory".to_string()),
+            },
+            CommandSuggestion {
+                command: "/init".to_string(),
+                description: "Initialize project context".to_string(),
+                usage: Some("Create SAFE_CODER.md project context file".to_string()),
+            },
+            
+            // Checkpoints
+            CommandSuggestion {
+                command: "/checkpoint".to_string(),
+                description: "Git-agnostic snapshots".to_string(),
+                usage: Some("/checkpoint list | restore <id> | restore latest | delete <id>".to_string()),
+            },
+            CommandSuggestion {
+                command: "/cp".to_string(),
+                description: "Git-agnostic snapshots".to_string(),
+                usage: Some("Alias for /checkpoint".to_string()),
+            },
+            
+            // Skills
+            CommandSuggestion {
+                command: "/skill".to_string(),
+                description: "Skill management".to_string(),
+                usage: Some("/skill list | activate <name> | deactivate <name> | info <name>".to_string()),
+            },
+            CommandSuggestion {
+                command: "/skills".to_string(),
+                description: "Skill management".to_string(),
+                usage: Some("Alias for /skill".to_string()),
+            },
+            
+            // Unified planning
+            CommandSuggestion {
+                command: "/plan".to_string(),
+                description: "Show planning status".to_string(),
+                usage: Some("/plan show | groups | history".to_string()),
+            },
+            
+            // Other utilities
+            CommandSuggestion {
+                command: "/copy".to_string(),
+                description: "Copy last output to clipboard".to_string(),
+                usage: Some("Copy the last AI response to clipboard".to_string()),
+            },
+            
+            // AI connection commands (specific to shell mode)
             CommandSuggestion {
                 command: "/connect".to_string(),
                 description: "Connect to AI service".to_string(),
@@ -157,26 +328,6 @@ impl CommandAutocomplete {
                 description: "Run complex tasks with orchestration".to_string(),
                 usage: Some("/orchestrate <task description> - Execute multi-step tasks with parallel workers".to_string()),
             },
-            CommandSuggestion {
-                command: "/tools".to_string(),
-                description: "Show available development tools".to_string(),
-                usage: Some("List all tools available to the AI assistant".to_string()),
-            },
-            CommandSuggestion {
-                command: "/mode".to_string(),
-                description: "Change execution mode".to_string(),
-                usage: Some("Toggle between planning and execution modes".to_string()),
-            },
-            CommandSuggestion {
-                command: "/agent".to_string(),
-                description: "Change agent mode".to_string(),
-                usage: Some("Switch agent behavior mode".to_string()),
-            },
-            CommandSuggestion {
-                command: "/commands".to_string(),
-                description: "Show detailed commands reference".to_string(),
-                usage: Some("Open full commands modal with comprehensive help".to_string()),
-            },
         ]
     }
 
@@ -191,16 +342,216 @@ impl CommandAutocomplete {
         self.suggestions.clear();
         self.selected = 0;
 
-        let query = input[1..].to_lowercase(); // Remove the leading /
+        // Split input into command and args
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let command_part = parts[0];
+        let args_part = parts.get(1).map_or("", |s| *s);
         
-        // Filter commands that start with the query
-        for cmd in Self::get_all_commands() {
-            if cmd.command[1..].to_lowercase().starts_with(&query) {
-                self.suggestions.push(cmd);
+        if parts.len() == 1 || (parts.len() == 2 && !input.ends_with(' ')) {
+            // Still completing the main command
+            let query = command_part[1..].to_lowercase(); // Remove the leading /
+            
+            // Filter commands that start with the query
+            for cmd in Self::get_all_commands() {
+                if cmd.command[1..].to_lowercase().starts_with(&query) {
+                    self.suggestions.push(cmd);
+                }
             }
+        } else {
+            // Completing arguments/subcommands
+            self.complete_arguments(command_part, args_part);
         }
 
-        self.visible = !self.suggestions.is_empty() && !input.ends_with(' ');
+        self.visible = !self.suggestions.is_empty();
+    }
+    
+    /// Complete arguments for specific commands
+    fn complete_arguments(&mut self, command: &str, args: &str) {
+        match command {
+            "/chat" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "save".to_string(),
+                        description: "Save current conversation".to_string(),
+                        usage: Some("save [name] - Save with optional name".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "resume".to_string(),
+                        description: "Resume a saved conversation".to_string(),
+                        usage: Some("resume <id> - Resume by ID".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "list".to_string(),
+                        description: "List all saved conversations".to_string(),
+                        usage: Some("list - Show all saved chats".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "delete".to_string(),
+                        description: "Delete a saved conversation".to_string(),
+                        usage: Some("delete <id> - Delete by ID".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "share".to_string(),
+                        description: "Generate shareable link".to_string(),
+                        usage: Some("share <id> - Create share link".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/memory" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "add".to_string(),
+                        description: "Add to memory".to_string(),
+                        usage: Some("add <text> - Add custom instruction".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "show".to_string(),
+                        description: "Show current memory".to_string(),
+                        usage: Some("show - Display all memory".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "refresh".to_string(),
+                        description: "Reload from SAFE_CODER.md".to_string(),
+                        usage: Some("refresh - Reload instructions".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/directory" | "/dir" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "add".to_string(),
+                        description: "Add directory to workspace".to_string(),
+                        usage: Some("add <path> - Add directory".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "show".to_string(),
+                        description: "Show workspace directories".to_string(),
+                        usage: Some("show - List directories".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/checkpoint" | "/cp" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "list".to_string(),
+                        description: "List all checkpoints".to_string(),
+                        usage: Some("list - Show all saved checkpoints".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "restore".to_string(),
+                        description: "Restore a checkpoint".to_string(),
+                        usage: Some("restore <id|latest> - Restore checkpoint".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "delete".to_string(),
+                        description: "Delete a checkpoint".to_string(),
+                        usage: Some("delete <id> - Remove checkpoint".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/skill" | "/skills" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "list".to_string(),
+                        description: "List all skills".to_string(),
+                        usage: Some("list - Show available skills".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "activate".to_string(),
+                        description: "Activate a skill".to_string(),
+                        usage: Some("activate <name> - Enable skill".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "deactivate".to_string(),
+                        description: "Deactivate a skill".to_string(),
+                        usage: Some("deactivate <name> - Disable skill".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "info".to_string(),
+                        description: "Show skill details".to_string(),
+                        usage: Some("info <name> - Get skill information".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/plan" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "show".to_string(),
+                        description: "Show current plan status".to_string(),
+                        usage: Some("show - Display plan status".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "groups".to_string(),
+                        description: "Show step groups".to_string(),
+                        usage: Some("groups - Show parallelism info".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "history".to_string(),
+                        description: "Show plan history".to_string(),
+                        usage: Some("history - Show execution history".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/mode" | "/agent" => {
+                let modes = vec![
+                    CommandSuggestion {
+                        command: "plan".to_string(),
+                        description: "Deep planning mode".to_string(),
+                        usage: Some("plan - Deep planning with approval".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "act".to_string(),
+                        description: "Auto-execution mode".to_string(),
+                        usage: Some("act - Lightweight auto-execution".to_string()),
+                    },
+                ];
+                self.filter_subcommands(modes, args);
+            }
+            "/approval-mode" => {
+                let modes = vec![
+                    CommandSuggestion {
+                        command: "plan".to_string(),
+                        description: "Show execution plan before running".to_string(),
+                        usage: Some("plan - Show plans before execution".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "default".to_string(),
+                        description: "Ask before each tool use".to_string(),
+                        usage: Some("default - Ask for each action".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "auto-edit".to_string(),
+                        description: "Auto-approve edits only".to_string(),
+                        usage: Some("auto-edit - Auto-approve file edits".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "yolo".to_string(),
+                        description: "Auto-approve everything".to_string(),
+                        usage: Some("yolo - Auto-approve all actions".to_string()),
+                    },
+                ];
+                self.filter_subcommands(modes, args);
+            }
+            _ => {
+                // No subcommand completion for this command
+            }
+        }
+    }
+    
+    /// Filter and add subcommands that match the current input
+    fn filter_subcommands(&mut self, subcommands: Vec<CommandSuggestion>, args: &str) {
+        let query = args.to_lowercase();
+        for subcmd in subcommands {
+            if subcmd.command.to_lowercase().starts_with(&query) {
+                self.suggestions.push(subcmd);
+            }
+        }
     }
 
     /// Select next suggestion
