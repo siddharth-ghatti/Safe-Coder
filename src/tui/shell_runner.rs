@@ -936,20 +936,47 @@ impl ShellTuiRunner {
 
             // Ctrl+G - cycle agent mode (PLAN/BUILD)
             KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let _old_mode = self.app.agent_mode;
                 self.app.cycle_agent_mode();
-                // Show feedback and sync with session
-                let mode = self.app.agent_mode;
+                let new_mode = self.app.agent_mode;
                 let prompt = self.app.current_prompt();
-                let block = CommandBlock::system(
-                    format!("Agent mode: {} - {}", mode.short_name(), mode.description()),
-                    prompt,
-                );
+
+                // Show prominent mode switch feedback
+                let message = if new_mode == crate::tools::AgentMode::Plan {
+                    format!(
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         🔍 PLAN MODE ACTIVATED\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         • Read-only exploration mode\n\
+                         • AI will analyze and create plans\n\
+                         • No files will be modified\n\
+                         • Type 'approve' or press Ctrl+G to switch to BUILD mode"
+                    )
+                } else {
+                    // Switching to BUILD mode
+                    let pending_plan_msg = if self.app.pending_approval_plan.is_some() {
+                        "\n• Ready to execute pending plan!"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         🔨 BUILD MODE ACTIVATED\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         • Full execution mode\n\
+                         • AI can modify files and run commands\n\
+                         • Press Ctrl+G to switch to PLAN mode{}",
+                        pending_plan_msg
+                    )
+                };
+
+                let block = CommandBlock::system(message, prompt);
                 self.app.add_block(block);
 
                 // Sync agent mode with session if connected
                 if let Some(session) = &self.app.session {
                     let session = session.clone();
-                    let agent_mode = mode;
+                    let agent_mode = new_mode;
                     tokio::spawn(async move {
                         let mut session = session.lock().await;
                         session.set_agent_mode(agent_mode);
@@ -1151,6 +1178,42 @@ impl ShellTuiRunner {
         orch_tx: mpsc::UnboundedSender<OrchestrationUpdate>,
     ) -> Result<()> {
         let input = input.trim();
+        let input_lower = input.to_lowercase();
+
+        // Check for plan approval commands when a plan is pending
+        if self.app.plan_approval_tx.is_some() || self.app.pending_approval_plan.is_some() {
+            if input_lower == "approve" || input_lower == "yes" || input_lower == "y" {
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    "✅ Plan approved! Switching to BUILD mode and executing...".to_string(),
+                    prompt,
+                );
+                self.app.add_block(block);
+
+                // Switch to build mode and approve
+                self.app.set_agent_mode(crate::tools::AgentMode::Build);
+                self.app.approve_plan();
+
+                // Sync with session
+                if let Some(session) = &self.app.session {
+                    let session = session.clone();
+                    tokio::spawn(async move {
+                        let mut session = session.lock().await;
+                        session.set_agent_mode(crate::tools::AgentMode::Build);
+                    });
+                }
+                return Ok(());
+            } else if input_lower == "reject" || input_lower == "no" || input_lower == "n" {
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    "❌ Plan rejected. You can modify your request and try again.".to_string(),
+                    prompt,
+                );
+                self.app.add_block(block);
+                self.app.reject_plan();
+                return Ok(());
+            }
+        }
 
         // Check for slash commands first (e.g., /connect, /help)
         if let Some(slash_cmd) = ShellTuiApp::parse_slash_command(input) {

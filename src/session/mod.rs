@@ -1177,10 +1177,17 @@ impl Session {
                     response_text.push('\n');
                 }
                 response_text.push_str("\n---\n");
-                response_text
-                    .push_str("**Plan complete. Switch to BUILD mode (Ctrl+G) to execute this plan.**\n");
-                response_text.push_str("*In Plan mode, Safe-Coder only creates plans - no files are modified.*\n");
+                response_text.push_str("**Plan ready for approval.**\n");
+                response_text.push_str("Type `approve` (or `yes`/`y`) to switch to BUILD mode and execute.\n");
+                response_text.push_str("Type `reject` (or `no`/`n`) to cancel.\n");
+                response_text.push_str("Or press `Ctrl+G` to manually switch to BUILD mode.\n");
                 let _ = event_tx.send(SessionEvent::TextChunk(response_text.clone()));
+
+                // Signal that plan is awaiting approval (this enables text-based approve/reject)
+                let _ = event_tx.send(SessionEvent::Plan(PlanEvent::AwaitingApproval {
+                    plan_id: task_plan_id.clone(),
+                }));
+
                 return Ok(response_text);
             }
 
