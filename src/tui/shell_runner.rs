@@ -558,8 +558,8 @@ impl ShellTuiRunner {
                                 child.exit_code = Some(if success { 0 } else { 1 });
                             }
                         }
-                        // If todo_write tool completed, sync todos to sidebar
-                        if tool_name == "todo_write" && success {
+                        // If todowrite tool completed, sync todos to sidebar
+                        if tool_name == "todowrite" && success {
                             self.app.sync_todos_to_sidebar();
                         }
                         self.app.mark_dirty();

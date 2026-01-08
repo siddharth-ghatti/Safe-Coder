@@ -15,24 +15,24 @@ use ratatui::{
 /// Enhanced UI with TailwindCSS-inspired styling
 pub fn draw_enhanced(f: &mut Frame, app: &mut App, theme: &Theme) {
     let size = f.area();
-    
+
     // Main layout: header, content, footer
     let main_layout = LayoutUtils::page_layout(size, 3, 3);
     let [header_area, content_area, footer_area] = main_layout;
 
     // Draw header
     draw_header(f, header_area, app, theme);
-    
+
     // Content layout: sidebar and main content
     let content_layout = LayoutUtils::sidebar_layout(content_area, 30);
     let [sidebar_area, main_area] = content_layout;
 
     // Draw sidebar
     draw_enhanced_sidebar(f, sidebar_area, app, theme);
-    
+
     // Draw main content
     draw_enhanced_main_content(f, main_area, app, theme);
-    
+
     // Draw footer
     draw_footer(f, footer_area, app, theme);
 
@@ -48,11 +48,8 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let title = Paragraph::new(Line::from(title_spans))
         .style(Style::default().bg(theme.colors.surface))
         .alignment(Alignment::Center)
-        .block(
-            StyledComponents::card("", theme)
-                .borders(Borders::BOTTOM)
-        );
-    
+        .block(StyledComponents::card("", theme).borders(Borders::BOTTOM));
+
     f.render_widget(title, area);
 }
 
@@ -60,10 +57,10 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let sidebar_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Mode indicator
-            Constraint::Length(8),  // Connection status
-            Constraint::Length(6),  // Token usage
-            Constraint::Min(0),     // Session info
+            Constraint::Length(5), // Mode indicator
+            Constraint::Length(8), // Connection status
+            Constraint::Length(6), // Token usage
+            Constraint::Min(0),    // Session info
         ])
         .split(area);
 
@@ -73,34 +70,27 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         crate::tools::AgentMode::Plan => theme.colors.info,
         crate::tools::AgentMode::Build => theme.colors.success,
     };
-    
+
     let mode_description = match mode {
         crate::tools::AgentMode::Plan => "Read-only exploration",
         crate::tools::AgentMode::Build => "Full tool access",
     };
-    
+
     let mode_text = vec![
-        Line::from(vec![
-            Span::styled(
-                format!("{}", mode.short_name()),
-                Style::default()
-                    .fg(mode_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                mode_description,
-                Style::default()
-                    .fg(theme.colors.secondary),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            format!("{}", mode.short_name()),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            mode_description,
+            Style::default().fg(theme.colors.secondary),
+        )]),
     ];
-    
+
     let mode_card = Paragraph::new(mode_text)
         .block(StyledComponents::card("Mode", theme))
         .alignment(Alignment::Center);
-    
+
     f.render_widget(mode_card, sidebar_layout[0]);
 
     // Connection Status Card
@@ -155,15 +145,13 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     };
 
     let token_block = StyledComponents::card("Token Usage", theme);
-    let token_text = vec![
-        Line::from(vec![
-            Span::raw(format!("{}/", token_usage.total_tokens)),
-            Span::styled(
-                format!("{}", token_usage.context_window),
-                Style::default().fg(theme.colors.secondary),
-            ),
-        ]),
-    ];
+    let token_text = vec![Line::from(vec![
+        Span::raw(format!("{}/", token_usage.total_tokens)),
+        Span::styled(
+            format!("{}", token_usage.context_window),
+            Style::default().fg(theme.colors.secondary),
+        ),
+    ])];
 
     let token_info = Paragraph::new(token_text).block(token_block);
     f.render_widget(token_info, sidebar_layout[2]);
@@ -182,27 +170,15 @@ fn draw_enhanced_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let session_id = app.current_session_id.as_deref().unwrap_or("None");
     let messages_count = app.messages.len();
     let tasks_count = app.background_tasks.len();
-    
+
     let session_text = format!("Session: {}", session_id);
     let messages_text = format!("Messages: {}", messages_count);
     let tasks_text = format!("{}", tasks_count);
-    
+
     let session_items: Vec<ListItem> = vec![
-        StyledComponents::list_item_with_status(
-            &session_text,
-            None,
-            theme,
-        ),
-        StyledComponents::list_item_with_status(
-            &messages_text,
-            None,
-            theme,
-        ),
-        StyledComponents::list_item_with_status(
-            "Background Tasks",
-            Some(&tasks_text),
-            theme,
-        ),
+        StyledComponents::list_item_with_status(&session_text, None, theme),
+        StyledComponents::list_item_with_status(&messages_text, None, theme),
+        StyledComponents::list_item_with_status("Background Tasks", Some(&tasks_text), theme),
     ];
 
     let session_list = List::new(session_items)
@@ -229,25 +205,22 @@ fn draw_enhanced_main_content(f: &mut Frame, area: Rect, app: &App, theme: &Them
     };
 
     let messages_area = LayoutUtils::card_with_padding(main_layout[0], 1);
-    
+
     // Enhanced message rendering with markdown support
     let mut message_lines = Vec::new();
-    
+
     for (i, message) in app.visible_messages().enumerate() {
         let style = match message.message_type {
             super::MessageType::User => Style::default()
                 .fg(theme.colors.primary)
                 .add_modifier(Modifier::BOLD),
-            super::MessageType::Assistant => Style::default()
-                .fg(theme.colors.on_surface),
+            super::MessageType::Assistant => Style::default().fg(theme.colors.on_surface),
             super::MessageType::System => Style::default()
                 .fg(theme.colors.secondary)
                 .add_modifier(Modifier::ITALIC),
             super::MessageType::Error => theme.styles.error,
-            super::MessageType::Tool => Style::default()
-                .fg(theme.colors.accent),
-            super::MessageType::Orchestration => Style::default()
-                .fg(theme.colors.info),
+            super::MessageType::Tool => Style::default().fg(theme.colors.accent),
+            super::MessageType::Orchestration => Style::default().fg(theme.colors.info),
         };
 
         let prefix = match message.message_type {
@@ -260,10 +233,12 @@ fn draw_enhanced_main_content(f: &mut Frame, area: Rect, app: &App, theme: &Them
         };
 
         // Check if this is an assistant message with markdown content
-        if matches!(message.message_type, super::MessageType::Assistant) && has_markdown(&message.content) {
+        if matches!(message.message_type, super::MessageType::Assistant)
+            && has_markdown(&message.content)
+        {
             // Render markdown content for assistant messages
             message_lines.push(Line::from(Span::styled(prefix, style)));
-            
+
             let md_lines = render_markdown_lines(&message.content);
             for md_line in md_lines {
                 // Add a small indent for markdown content
@@ -287,7 +262,12 @@ fn draw_enhanced_main_content(f: &mut Frame, area: Rect, app: &App, theme: &Them
 
     // Add thinking indicator
     if app.is_thinking {
-        let thinking_spans = StyledComponents::gradient_text("🤔 Thinking", 400, 600);
+        let thinking_word = app.spinner.current().to_string();
+        let thinking_text = format!("🤔 {}", thinking_word);
+        let thinking_spans = StyledComponents::gradient_text(&thinking_text, 400, 600)
+            .into_iter()
+            .map(|s| Span::styled(s.content.to_string(), s.style))
+            .collect::<Vec<_>>();
         message_lines.push(Line::from(""));
         message_lines.push(Line::from(thinking_spans));
     }
@@ -309,20 +289,21 @@ fn draw_enhanced_main_content(f: &mut Frame, area: Rect, app: &App, theme: &Them
     let input_content = if app.input.is_empty() {
         Span::styled(
             "Type your message...",
-            Style::default().fg(theme.colors.secondary).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.colors.secondary)
+                .add_modifier(Modifier::ITALIC),
         )
     } else {
         Span::styled(&app.input, Style::default().fg(theme.colors.on_surface))
     };
 
-    let input_paragraph = Paragraph::new(Line::from(input_content))
-        .block(input_block);
+    let input_paragraph = Paragraph::new(Line::from(input_content)).block(input_block);
 
     f.render_widget(input_paragraph, main_layout[1]);
 
     // Cursor position
     if app.is_focused_on_input() {
-        f.set_cursor_position(Position { 
+        f.set_cursor_position(Position {
             x: main_layout[1].x + app.input.len() as u16 + 1,
             y: main_layout[1].y + 1,
         });
@@ -333,8 +314,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let footer_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Min(0),      // Status
-            Constraint::Length(30),  // Shortcuts
+            Constraint::Min(0),     // Status
+            Constraint::Length(30), // Shortcuts
         ])
         .split(area);
 
@@ -353,10 +334,10 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
 fn draw_help_modal(f: &mut Frame, theme: &Theme) {
     let area = StyledComponents::centered_rect(60, 50, f.area());
-    
+
     // Clear the background
     f.render_widget(Clear, area);
-    
+
     let help_content = vec![
         Line::from("Keyboard Shortcuts:"),
         Line::from(""),

@@ -30,12 +30,12 @@ pub fn get_processing_frames() -> Vec<&'static str> {
     vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 }
 
-pub fn get_loading_text(frame: usize) -> String {
+pub fn get_loading_text(frame: usize, spinner: &crate::tui::spinner::Spinner) -> String {
     let dots = match frame % 4 {
         0 => "",
         1 => ".",
         2 => "..",
         _ => "...",
     };
-    format!("thinking{}", dots)
+    format!("{}{}", spinner.current(), dots)
 }

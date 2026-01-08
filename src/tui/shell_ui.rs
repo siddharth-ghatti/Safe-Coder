@@ -25,7 +25,7 @@ use super::markdown::{has_markdown, parse_inline_markdown, render_markdown_lines
 use super::shell_app::{
     BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
 };
-use super::sidebar::PlanStepDisplay;
+use super::sidebar::{PlanStepDisplay, ToolStepStatus};
 use crate::planning::PlanStepStatus;
 
 // ============================================================================
@@ -106,7 +106,7 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     if app.file_picker.visible {
         draw_file_picker_popup(f, app, size);
     }
-    
+
     // Command autocomplete popup (for slash commands)
     if app.command_autocomplete.visible && !app.command_autocomplete.suggestions.is_empty() {
         draw_command_autocomplete_popup(f, app, size);
@@ -1370,273 +1370,228 @@ fn draw_sidebar_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 }
 
 fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    // Check if we're in build mode to show tool steps instead of todo plan
+    // Check if we're in build mode
     let show_tool_steps = app.agent_mode == crate::tools::AgentMode::Build;
+    let is_thinking = app.ai_thinking;
 
+    // 1. ACTIVE PLAN (High Priority)
+    // If there is an active plan (agent executing), show it.
+    // In Build Mode, we prioritize this over the combined view if it exists.
+    if show_tool_steps && app.sidebar.active_plan.is_some() {
+        draw_active_plan(f, app, area);
+        return;
+    }
+
+    // 2. COMBINED VIEW (Build Mode)
+    // Show Todo List AND Tool Steps if both exist
+    if show_tool_steps {
+        let has_todos = app
+            .sidebar
+            .todo_plan
+            .as_ref()
+            .map(|p| !p.items.is_empty())
+            .unwrap_or(false);
+        let has_steps = !app.sidebar.tool_steps.is_empty();
+
+        if has_todos && has_steps {
+            // Split area: 50% for Todos (Top), 50% for Steps (Bottom)
+            let chunks = Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+
+            draw_todo_list_section(f, app, chunks[0], " TASKS");
+            draw_tool_steps_section(f, app, chunks[1], " STEPS");
+        } else if has_todos {
+            draw_todo_list_section(f, app, area, " TASKS");
+        } else if has_steps {
+            draw_tool_steps_section(f, app, area, " STEPS");
+        } else {
+            // Empty state
+            draw_empty_state(f, " TASKS & STEPS", area);
+        }
+        return;
+    }
+
+    // 3. PLAN MODE (Standard View)
+    // Show Todo List (Plan)
+    if let Some(ref _todo_plan) = app.sidebar.todo_plan {
+        draw_todo_list_section(f, app, area, " PLAN");
+    } else if is_thinking {
+        draw_thinking(f, app, area, " PLAN");
+    } else {
+        draw_empty_state(f, " PLAN", area);
+    }
+}
+
+fn draw_active_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let mut lines = vec![Line::from(Span::styled(
-        if show_tool_steps { " STEPS" } else { " PLAN" },
+        " PLAN",
         Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
     ))];
 
-    // In build mode, show active plan if available
-    if show_tool_steps && app.sidebar.active_plan.is_some() {
-        let active_plan = app.sidebar.active_plan.as_ref().unwrap();
+    let active_plan = app.sidebar.active_plan.as_ref().unwrap();
 
-        // Show progress bar
-        let percent = active_plan.progress_percent();
-        let bar_width = area.width.saturating_sub(4) as usize;
-        let filled = ((percent / 100.0) * bar_width as f32) as usize;
-        let empty = bar_width.saturating_sub(filled);
+    // Progress bar
+    let percent = active_plan.progress_percent();
+    let bar_width = area.width.saturating_sub(4) as usize;
+    let filled = ((percent / 100.0) * bar_width as f32) as usize;
+    let empty = bar_width.saturating_sub(filled);
 
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
-            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
-        ]));
+    lines.push(Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+        Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+    ]));
 
-        // Show step count
-        let progress = format!(
+    // Step count
+    lines.push(Line::from(Span::styled(
+        format!(
             " {}/{} steps",
             active_plan.completed_count(),
             active_plan.steps.len()
-        );
+        ),
+        Style::default().fg(TEXT_SECONDARY),
+    )));
+
+    if active_plan.awaiting_approval {
         lines.push(Line::from(Span::styled(
-            progress,
-            Style::default().fg(TEXT_SECONDARY),
+            " ⏸ Awaiting approval",
+            Style::default().fg(ACCENT_YELLOW),
         )));
-
-        // Show awaiting approval indicator if needed
-        if active_plan.awaiting_approval {
-            lines.push(Line::from(Span::styled(
-                " ⏸ Awaiting approval",
-                Style::default().fg(ACCENT_YELLOW),
-            )));
-        }
-
-        // Calculate visible steps
-        let max_items = area.height.saturating_sub(5) as usize;
-        let total_steps = active_plan.steps.len();
-
-        // Find the in-progress step index, or show from start
-        let in_progress_idx = active_plan.current_step_idx;
-
-        let scroll_start = if let Some(idx) = in_progress_idx {
-            if total_steps <= max_items {
-                0
-            } else if idx < max_items / 2 {
-                0
-            } else if idx > total_steps - max_items / 2 {
-                total_steps.saturating_sub(max_items)
-            } else {
-                idx.saturating_sub(max_items / 2)
-            }
-        } else {
-            0
-        };
-
-        let visible_steps: Vec<&PlanStepDisplay> = active_plan
-            .steps
-            .iter()
-            .skip(scroll_start)
-            .take(max_items)
-            .collect();
-
-        // Show scroll indicator at top if needed
-        if scroll_start > 0 {
-            lines.push(Line::from(Span::styled(
-                format!(" ↑ {} more above", scroll_start),
-                Style::default().fg(TEXT_MUTED),
-            )));
-        }
-
-        // Show each visible step with status icon
-        for step in visible_steps.iter() {
-            let (icon, icon_color) = match step.status {
-                PlanStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
-                PlanStepStatus::InProgress => {
-                    let spinner_chars = ["◐", "◓", "◑", "◒"];
-                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
-                    (spinner.to_string(), ACCENT_CYAN)
-                }
-                PlanStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
-                PlanStepStatus::Skipped => ("⊘".to_string(), TEXT_DIM),
-                PlanStepStatus::Pending => ("◯".to_string(), TEXT_DIM),
-            };
-
-            // Truncate step description
-            let max_len = area.width.saturating_sub(5) as usize;
-            let desc = if step.description.len() > max_len {
-                format!("{}...", &step.description[..max_len.saturating_sub(3)])
-            } else {
-                step.description.clone()
-            };
-
-            // Style based on status
-            let desc_style = match step.status {
-                PlanStepStatus::InProgress => Style::default().fg(TEXT_PRIMARY),
-                PlanStepStatus::Completed => Style::default().fg(TEXT_DIM),
-                PlanStepStatus::Failed => Style::default().fg(ACCENT_RED),
-                _ => Style::default().fg(TEXT_SECONDARY),
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
-                Span::styled(desc, desc_style),
-            ]));
-        }
-
-        // Show scroll indicator at bottom if needed
-        let items_below = total_steps.saturating_sub(scroll_start + visible_steps.len());
-        if items_below > 0 {
-            lines.push(Line::from(Span::styled(
-                format!(" ↓ {} more below", items_below),
-                Style::default().fg(TEXT_MUTED),
-            )));
-        }
     }
-    // Fall back to tool execution steps if no active plan
-    else if show_tool_steps && !app.sidebar.tool_steps.is_empty() {
-        let tool_steps = &app.sidebar.tool_steps;
 
-        // Show progress bar based on completed vs total tool steps
-        let completed_count = app.sidebar.completed_tool_steps();
-        let total_count = tool_steps.len();
-        let percent = if total_count > 0 {
-            (completed_count as f32 / total_count as f32) * 100.0
+    // Visible steps logic
+    let max_items = area.height.saturating_sub(5) as usize;
+    let total_steps = active_plan.steps.len();
+    let in_progress_idx = active_plan.current_step_idx;
+
+    let scroll_start = if let Some(idx) = in_progress_idx {
+        if total_steps <= max_items {
+            0
+        } else if idx < max_items / 2 {
+            0
+        } else if idx > total_steps - max_items / 2 {
+            total_steps.saturating_sub(max_items)
         } else {
-            0.0
+            idx.saturating_sub(max_items / 2)
+        }
+    } else {
+        0
+    };
+
+    let visible_steps: Vec<&PlanStepDisplay> = active_plan
+        .steps
+        .iter()
+        .skip(scroll_start)
+        .take(max_items)
+        .collect();
+
+    if scroll_start > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" ↑ {} more above", scroll_start),
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    for step in visible_steps.iter() {
+        let (icon, icon_color) = match step.status {
+            PlanStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+            PlanStepStatus::InProgress => {
+                let spinner_chars = ["◐", "◓", "◑", "◒"];
+                let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                (spinner.to_string(), ACCENT_CYAN)
+            }
+            PlanStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
+            PlanStepStatus::Skipped => ("⊘".to_string(), TEXT_DIM),
+            PlanStepStatus::Pending => ("◯".to_string(), TEXT_DIM),
         };
 
-        let bar_width = area.width.saturating_sub(4) as usize;
-        let filled = ((percent / 100.0) * bar_width as f32) as usize;
-        let empty = bar_width.saturating_sub(filled);
+        let max_len = area.width.saturating_sub(5) as usize;
+        let desc = if step.description.len() > max_len {
+            format!("{}...", &step.description[..max_len.saturating_sub(3)])
+        } else {
+            step.description.clone()
+        };
+
+        let desc_style = match step.status {
+            PlanStepStatus::InProgress => Style::default().fg(TEXT_PRIMARY),
+            PlanStepStatus::Completed => Style::default().fg(TEXT_DIM),
+            PlanStepStatus::Failed => Style::default().fg(ACCENT_RED),
+            _ => Style::default().fg(TEXT_SECONDARY),
+        };
 
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
-            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+            Span::styled(desc, desc_style),
         ]));
+    }
 
-        // Show step count
-        let progress = format!(" {}/{} tools", completed_count, total_count);
+    // Bottom scroll
+    let items_below = total_steps.saturating_sub(scroll_start + visible_steps.len());
+    if items_below > 0 {
         lines.push(Line::from(Span::styled(
-            progress,
-            Style::default().fg(TEXT_SECONDARY),
+            format!(" ↓ {} more below", items_below),
+            Style::default().fg(TEXT_MUTED),
         )));
+    }
 
-        // Show recent tool steps (max items based on available height)
-        let max_items = area.height.saturating_sub(4) as usize;
-        let scroll_offset = app.sidebar.tool_steps_scroll_offset;
-        let total_steps = tool_steps.len();
+    f.render_widget(Paragraph::new(lines), area);
+}
 
-        // Calculate visible range with scroll offset
-        let visible_steps: Vec<_> = tool_steps
-            .iter()
-            .rev() // Show most recent first (index 0 in reversed list is most recent)
-            .skip(scroll_offset)
-            .take(max_items)
-            .collect();
+fn draw_todo_list_section(f: &mut Frame, app: &ShellTuiApp, area: Rect, title: &str) {
+    if let Some(ref todo_plan) = app.sidebar.todo_plan {
+        let mut lines = Vec::new();
+        // Use compact mode if height is small (e.g. when split view is active)
+        let is_compact = area.height < 8;
 
-        // Show scroll indicator at top if scrolled down (showing older items)
-        if scroll_offset > 0 {
+        if is_compact {
             lines.push(Line::from(Span::styled(
                 format!(
-                    " ↑ {} newer steps (Alt+↑ to scroll)",
-                    scroll_offset.min(total_steps)
+                    "{} ({}/{})",
+                    title,
+                    todo_plan.completed_count(),
+                    todo_plan.items.len()
                 ),
-                Style::default().fg(TEXT_MUTED),
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
             )));
-        }
+        } else {
+            lines.push(Line::from(Span::styled(
+                title,
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+            )));
 
-        for step in visible_steps.iter() {
-            // Use animated spinner for running steps
-            let (icon, icon_color) = match step.status {
-                crate::tui::sidebar::ToolStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
-                crate::tui::sidebar::ToolStepStatus::Running => {
-                    let spinner_chars = ["◐", "◓", "◑", "◒"];
-                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
-                    (spinner.to_string(), ACCENT_CYAN)
-                }
-                crate::tui::sidebar::ToolStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
-            };
-
-            // Format tool name and description
-            let display_text = if step.description.is_empty() {
-                step.tool_name.clone()
-            } else {
-                format!("{}: {}", step.tool_name, step.description)
-            };
-
-            // Truncate if too long
-            let max_len = area.width.saturating_sub(5) as usize;
-            let desc = if display_text.len() > max_len {
-                format!("{}...", &display_text[..max_len.saturating_sub(3)])
-            } else {
-                display_text
-            };
-
-            // Style based on status
-            let desc_style = match step.status {
-                crate::tui::sidebar::ToolStepStatus::Running => Style::default().fg(TEXT_PRIMARY),
-                crate::tui::sidebar::ToolStepStatus::Completed => Style::default().fg(TEXT_DIM),
-                crate::tui::sidebar::ToolStepStatus::Failed => Style::default().fg(ACCENT_RED),
-            };
+            let percent = todo_plan.progress_percent();
+            let bar_width = area.width.saturating_sub(4) as usize;
+            let filled = ((percent / 100.0) * bar_width as f32) as usize;
+            let empty = bar_width.saturating_sub(filled);
 
             lines.push(Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
-                Span::styled(desc, desc_style),
+                Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+                Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
             ]));
-        }
 
-        // Show scroll indicator at bottom if there are more older steps
-        let items_below = total_steps.saturating_sub(scroll_offset + visible_steps.len());
-        if items_below > 0 {
             lines.push(Line::from(Span::styled(
-                format!(" ↓ {} older steps (Alt+↓ to scroll)", items_below),
-                Style::default().fg(TEXT_MUTED),
+                format!(
+                    " {}/{} tasks",
+                    todo_plan.completed_count(),
+                    todo_plan.items.len()
+                ),
+                Style::default().fg(TEXT_SECONDARY),
             )));
         }
-    }
-    // In plan mode or when no tool steps, show todo plan if available
-    else if let Some(ref todo_plan) = app.sidebar.todo_plan {
-        // Show progress bar
-        let percent = todo_plan.progress_percent();
-        let bar_width = area.width.saturating_sub(4) as usize;
-        let filled = ((percent / 100.0) * bar_width as f32) as usize;
-        let empty = bar_width.saturating_sub(filled);
 
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
-            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
-        ]));
-
-        // Show item count
-        let progress = format!(
-            " {}/{} tasks",
-            todo_plan.completed_count(),
-            todo_plan.items.len()
-        );
-        lines.push(Line::from(Span::styled(
-            progress,
-            Style::default().fg(TEXT_SECONDARY),
-        )));
-
-        // Calculate visible items - scroll to show in_progress item or most recent
-        let max_items = area.height.saturating_sub(4) as usize;
+        let header_height = if is_compact { 1 } else { 3 };
+        let max_items = area.height.saturating_sub(header_height + 1) as usize; // +1 for scroll indicator
         let total_items = todo_plan.items.len();
-
-        // Find the in_progress item index, or default to showing from the end
         let in_progress_idx = todo_plan
             .items
             .iter()
             .position(|i| i.status == "in_progress");
 
-        // Calculate scroll offset to keep in_progress item visible, or show latest items
         let scroll_start = if let Some(idx) = in_progress_idx {
-            // Center the in-progress item if possible
             if total_items <= max_items {
                 0
             } else if idx < max_items / 2 {
@@ -1647,7 +1602,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 idx.saturating_sub(max_items / 2)
             }
         } else {
-            // No in-progress item, show from start (completed items first)
             0
         };
 
@@ -1658,7 +1612,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             .take(max_items)
             .collect();
 
-        // Show scroll indicator at top if needed
         if scroll_start > 0 {
             lines.push(Line::from(Span::styled(
                 format!(" ↑ {} more above", scroll_start),
@@ -1666,9 +1619,7 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             )));
         }
 
-        // Show each visible todo item with status icon
         for item in visible_items.iter() {
-            // Use animated spinner for in-progress items
             let (icon, icon_color) = match item.status.as_str() {
                 "completed" => ("✓".to_string(), ACCENT_GREEN),
                 "in_progress" => {
@@ -1680,7 +1631,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 _ => ("?".to_string(), TEXT_MUTED),
             };
 
-            // Truncate item content
             let max_len = area.width.saturating_sub(5) as usize;
             let desc = if item.content.len() > max_len {
                 format!("{}...", &item.content[..max_len.saturating_sub(3)])
@@ -1688,7 +1638,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 item.content.clone()
             };
 
-            // Highlight in-progress item, dim completed items
             let desc_style = match item.status.as_str() {
                 "in_progress" => Style::default().fg(TEXT_PRIMARY),
                 "completed" => Style::default().fg(TEXT_DIM),
@@ -1702,7 +1651,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             ]));
         }
 
-        // Show scroll indicator at bottom if needed
         let items_below = total_items.saturating_sub(scroll_start + visible_items.len());
         if items_below > 0 {
             lines.push(Line::from(Span::styled(
@@ -1710,28 +1658,145 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 Style::default().fg(TEXT_MUTED),
             )));
         }
-    } else if app.ai_thinking {
-        // Show thinking spinner when AI is processing
-        let spinner_chars = ["◐", "◓", "◑", "◒"];
-        let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
-            Span::styled("Thinking...", Style::default().fg(TEXT_SECONDARY)),
-        ]));
+
+        f.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+fn draw_tool_steps_section(f: &mut Frame, app: &ShellTuiApp, area: Rect, title: &str) {
+    let tool_steps = &app.sidebar.tool_steps;
+    let completed_count = app.sidebar.completed_tool_steps();
+    let total_count = tool_steps.len();
+
+    let mut lines = Vec::new();
+    let is_compact = area.height < 8;
+
+    if is_compact {
+        lines.push(Line::from(Span::styled(
+            format!("{} ({}/{})", title, completed_count, total_count),
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )));
     } else {
         lines.push(Line::from(Span::styled(
-            if show_tool_steps {
-                " No steps"
-            } else {
-                " No tasks"
-            },
+            title,
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )));
+
+        let percent = if total_count > 0 {
+            (completed_count as f32 / total_count as f32) * 100.0
+        } else {
+            0.0
+        };
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+
+        lines.push(Line::from(Span::styled(
+            format!(" {}/{} tools", completed_count, total_count),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    }
+
+    let header_height = if is_compact { 1 } else { 3 };
+    let max_items = area.height.saturating_sub(header_height + 1) as usize;
+    let scroll_offset = app.sidebar.tool_steps_scroll_offset;
+
+    let visible_steps: Vec<_> = tool_steps
+        .iter()
+        .rev()
+        .skip(scroll_offset)
+        .take(max_items)
+        .collect();
+
+    if scroll_offset > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" ↑ {} newer steps", scroll_offset.min(total_count)),
             Style::default().fg(TEXT_MUTED),
         )));
     }
 
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
+    for step in visible_steps.iter() {
+        let (icon, icon_color) = match step.status {
+            ToolStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+            ToolStepStatus::Running => {
+                let spinner_chars = ["◐", "◓", "◑", "◒"];
+                let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                (spinner.to_string(), ACCENT_CYAN)
+            }
+            ToolStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
+        };
+
+        let display_text = if step.description.is_empty() {
+            step.tool_name.clone()
+        } else {
+            format!("{}: {}", step.tool_name, step.description)
+        };
+
+        let max_len = area.width.saturating_sub(5) as usize;
+        let desc = if display_text.len() > max_len {
+            format!("{}...", &display_text[..max_len.saturating_sub(3)])
+        } else {
+            display_text
+        };
+
+        let desc_style = match step.status {
+            ToolStepStatus::Running => Style::default().fg(TEXT_PRIMARY),
+            ToolStepStatus::Completed => Style::default().fg(TEXT_DIM),
+            ToolStepStatus::Failed => Style::default().fg(ACCENT_RED),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+            Span::styled(desc, desc_style),
+        ]));
+    }
+
+    let items_below = total_count.saturating_sub(scroll_offset + visible_steps.len());
+    if items_below > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" ↓ {} older steps", items_below),
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_thinking(f: &mut Frame, app: &ShellTuiApp, area: Rect, title: &str) {
+    let spinner_chars = ["◐", "◓", "◑", "◒"];
+    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+    let thinking_word = app.spinner.current();
+    let lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+            Span::styled(thinking_word, Style::default().fg(TEXT_SECONDARY)),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_empty_state(f: &mut Frame, title: &str, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(" No content", Style::default().fg(TEXT_MUTED))),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_sidebar_lsp(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
@@ -1940,7 +2005,7 @@ fn draw_command_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect)
 
     // Position above the input line
     let popup_area = Rect {
-        x: 2, // Align with input area
+        x: 2,                                            // Align with input area
         y: area.height.saturating_sub(popup_height + 4), // Above input area (4 = input height estimate)
         width: popup_width,
         height: popup_height,
@@ -1965,10 +2030,7 @@ fn draw_command_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect)
         .enumerate()
         .map(|(i, cmd)| {
             let is_selected = i == app.command_autocomplete.selected;
-            
-            // Format: "/command - description"
-            let content = format!("{} - {}", cmd.command, cmd.description);
-            
+
             let style = if is_selected {
                 Style::default()
                     .bg(ACCENT_BLUE)
@@ -1979,20 +2041,27 @@ fn draw_command_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect)
             };
 
             ListItem::new(Line::from(vec![
-                Span::styled(&cmd.command, 
+                Span::styled(
+                    &cmd.command,
                     if is_selected {
-                        Style::default().bg(ACCENT_BLUE).fg(BG_PRIMARY).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .bg(ACCENT_BLUE)
+                            .fg(BG_PRIMARY)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(ACCENT_GREEN).add_modifier(Modifier::BOLD)
-                    }
+                        Style::default()
+                            .fg(ACCENT_GREEN)
+                            .add_modifier(Modifier::BOLD)
+                    },
                 ),
                 Span::styled(" - ", style),
-                Span::styled(&cmd.description, 
+                Span::styled(
+                    &cmd.description,
                     if is_selected {
                         Style::default().bg(ACCENT_BLUE).fg(BG_PRIMARY)
                     } else {
                         Style::default().fg(TEXT_SECONDARY)
-                    }
+                    },
                 ),
             ]))
         })
@@ -2138,14 +2207,12 @@ fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     // Header
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Review the plan before execution",
-            Style::default()
-                .fg(TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    lines.push(Line::from(vec![Span::styled(
+        "Review the plan before execution",
+        Style::default()
+            .fg(TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD),
+    )]));
     lines.push(Line::from(""));
 
     // Plan info
