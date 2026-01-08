@@ -659,6 +659,72 @@ impl Session {
         Ok(())
     }
 
+    /// Coalesce multiple rapid requests into a single LLM call
+    /// This is useful when multiple related requests come in quick succession
+    pub async fn send_coalesced_messages(&mut self, messages: Vec<String>) -> Result<String> {
+        if messages.is_empty() {
+            return Ok(String::new());
+        }
+        
+        if messages.len() == 1 {
+            return self.send_message(messages.into_iter().next().unwrap()).await;
+        }
+        
+        // Combine multiple messages into a single optimized request
+        let combined = format!(
+            "Handle these {} related requests efficiently:\n\n{}",
+            messages.len(),
+            messages
+                .iter()
+                .enumerate()
+                .map(|(i, msg)| format!("{}. {}", i + 1, msg))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        );
+        
+        tracing::info!("Coalescing {} requests into single LLM call", messages.len());
+        self.send_message(combined).await
+    }
+
+    /// Determine if a message should use unified planning
+    fn should_use_planning(&self, message: &str) -> bool {
+        let msg_lower = message.to_lowercase();
+        let msg_len = message.len();
+        
+        // Skip planning for simple queries
+        if msg_lower.starts_with("what") || 
+           msg_lower.starts_with("how") || 
+           msg_lower.starts_with("explain") || 
+           msg_lower.starts_with("why") ||
+           msg_lower.starts_with("where") ||
+           msg_lower.starts_with("when") ||
+           msg_lower.starts_with("who") {
+            return false;
+        }
+        
+        // Skip for very short messages (likely simple commands)
+        if msg_len < 30 {
+            return false;
+        }
+        
+        // Use planning for task-oriented requests
+        let has_task_indicators = msg_lower.contains("implement") ||
+            msg_lower.contains("create") ||
+            msg_lower.contains("build") ||
+            msg_lower.contains("add") ||
+            msg_lower.contains("modify") ||
+            msg_lower.contains("update") ||
+            msg_lower.contains("fix") ||
+            msg_lower.contains("refactor") ||
+            msg_lower.contains("step") ||
+            msg_lower.contains("plan") ||
+            msg_lower.contains("task") ||
+            msg_lower.contains("feature");
+            
+        // Use planning for longer, complex requests
+        has_task_indicators || msg_len > 100
+    }
+
     pub async fn send_message(&mut self, user_message: String) -> Result<String> {
         // Create checkpoint before processing user task (git-agnostic safety)
         if self.dir_checkpoints.is_enabled() {
@@ -668,18 +734,27 @@ impl Session {
             }
         }
 
-        // Try unified planning path (creates internal event channel)
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-        let prev_tx = self.subagent_event_tx.clone();
-        self.subagent_event_tx = Some(event_tx);
-        let planning_result = self.send_message_with_planning(user_message.clone()).await;
-        self.subagent_event_tx = prev_tx;
+        // Smart fallback: Only try unified planning for appropriate requests
+        if self.should_use_planning(&user_message) {
+            tracing::debug!("Using unified planning for task-oriented request");
+            
+            // Try unified planning path (creates internal event channel)
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let prev_tx = self.subagent_event_tx.clone();
+            self.subagent_event_tx = Some(event_tx);
+            let planning_result = self.send_message_with_planning(user_message.clone()).await;
+            self.subagent_event_tx = prev_tx;
 
-        // Drain events (no UI to send them to in this method)
-        while event_rx.try_recv().is_ok() {}
+            // Drain events (no UI to send them to in this method)
+            while event_rx.try_recv().is_ok() {}
 
-        if let Ok(resp) = planning_result {
-            return Ok(resp);
+            if let Ok(resp) = planning_result {
+                return Ok(resp);
+            }
+            
+            tracing::debug!("Planning failed, falling back to direct execution");
+        } else {
+            tracing::debug!("Using direct execution for simple query");
         }
 
         // Track stats

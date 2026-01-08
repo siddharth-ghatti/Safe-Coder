@@ -17,16 +17,240 @@ use crate::unified_planning::{
 ///
 /// This executor is used for simple tasks that don't need parallelism
 /// or isolation. Steps are executed sequentially using the session's
-/// tool registry.
+/// tool registry, with smart batching to reduce API requests.
 pub struct DirectExecutor {
-    // In the future, this could hold a reference to the session's
-    // tool registry for actual execution
+    /// Maximum number of steps to batch in a single request
+    max_batch_size: usize,
+    /// Enable batching optimization
+    enable_batching: bool,
 }
 
 impl DirectExecutor {
-    /// Create a new direct executor
+    /// Create a new direct executor with default settings
     pub fn new() -> Self {
-        Self {}
+        Self {
+            max_batch_size: 3,
+            enable_batching: true,
+        }
+    }
+
+    /// Create with custom batching settings
+    pub fn with_batching(max_batch_size: usize, enable: bool) -> Self {
+        Self {
+            max_batch_size,
+            enable_batching: enable,
+        }
+    }
+
+    /// Check if steps can be batched together
+    fn can_batch_steps(&self, step1: &UnifiedStep, step2: &UnifiedStep) -> bool {
+        if !self.enable_batching {
+            return false;
+        }
+
+        // Don't batch steps that are likely to be very complex
+        let is_complex = |step: &UnifiedStep| {
+            step.instructions.len() > 500
+                || step.description.to_lowercase().contains("complex")
+                || step.description.to_lowercase().contains("refactor")
+                || step.description.to_lowercase().contains("rewrite")
+        };
+
+        if is_complex(step1) || is_complex(step2) {
+            return false;
+        }
+
+        // Prefer batching similar types of operations
+        let get_operation_type = |step: &UnifiedStep| {
+            let desc = step.description.to_lowercase();
+            if desc.contains("read") || desc.contains("analyze") {
+                "read"
+            } else if desc.contains("write") || desc.contains("create") {
+                "write"
+            } else if desc.contains("edit") || desc.contains("modify") {
+                "edit"
+            } else if desc.contains("test") || desc.contains("run") {
+                "test"
+            } else {
+                "other"
+            }
+        };
+
+        // Batch steps of similar types
+        get_operation_type(step1) == get_operation_type(step2)
+    }
+
+    /// Execute a batch of steps in a single LLM request
+    async fn execute_step_batch(
+        &self,
+        steps: &[UnifiedStep],
+        group_id: &str,
+        ctx: &ExecutorContext,
+    ) -> Result<Vec<StepResult>> {
+        let timer = StepTimer::start();
+
+        // Emit batch started event
+        for step in steps {
+            ctx.emit_step_started(group_id, step);
+        }
+
+        ctx.emit_step_progress(
+            &steps[0].id,
+            &format!("Executing batch of {} steps...", steps.len()),
+        );
+
+        // Build combined context message
+        let batch_instructions = steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                let relevant_files = if !step.relevant_files.is_empty() {
+                    format!(" (relevant files: {})", step.relevant_files.join(", "))
+                } else {
+                    String::new()
+                };
+
+                format!(
+                    "Step {}: {}\nInstructions: {}{}\n",
+                    i + 1,
+                    step.description,
+                    step.instructions,
+                    relevant_files
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let context_msg = format!(
+            "Execute these {} related steps in order. Complete each step fully before moving to the next:\n\n{}",
+            steps.len(),
+            batch_instructions
+        );
+
+        // Send to LLM with available tools
+        let messages = vec![Message::user(context_msg)];
+        let tool_schemas = ctx.tool_registry.get_tools_schema();
+
+        // Convert to ToolDefinition format
+        let tools: Vec<ToolDefinition> = tool_schemas
+            .iter()
+            .map(|schema| ToolDefinition {
+                name: schema["name"].as_str().unwrap_or_default().to_string(),
+                description: schema["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                input_schema: schema["input_schema"].clone(),
+            })
+            .collect();
+
+        let response = ctx
+            .llm_client
+            .send_message(&messages, &tools)
+            .await
+            .map_err(|e| anyhow::anyhow!("LLM batch request failed: {}", e))?;
+
+        let mut batch_output = String::new();
+        let mut all_files_modified = Vec::new();
+        let mut batch_had_error = false;
+        let mut batch_error_message = None;
+
+        // Extract text content and tool uses
+        let mut tool_uses = Vec::new();
+        for block in &response.message.content {
+            match block {
+                ContentBlock::Text { text } => {
+                    batch_output.push_str(text);
+                    batch_output.push('\n');
+                }
+                ContentBlock::ToolUse { id, name, input } => {
+                    tool_uses.push((id.clone(), name.clone(), input.clone()));
+                }
+                _ => {}
+            }
+        }
+
+        // Execute tool calls
+        if !tool_uses.is_empty() {
+            ctx.emit_step_progress(
+                &steps[0].id,
+                &format!("Executing {} tools for batch...", tool_uses.len()),
+            );
+
+            // Execute all tool calls for the batch
+            for (call_id, tool_name, tool_input) in tool_uses {
+                ctx.emit_step_progress(&steps[0].id, &format!("Using tool: {}", tool_name));
+
+                if let Some(tool) = ctx.tool_registry.get_tool(&tool_name) {
+                    // Create tool context
+                    let tool_config = Default::default(); // Use default config for now
+                    let tool_context = ToolContext::new(&ctx.project_path, &tool_config);
+
+                    match tool.execute(tool_input, &tool_context).await {
+                        Ok(result) => {
+                            batch_output.push_str(&format!("\n[{}]: {}\n", tool_name, result));
+                            // Note: We can't easily track files_modified from the string result
+                            // This is a limitation of the current tool interface
+                        }
+                        Err(e) => {
+                            let error_msg = format!("Tool {} failed: {}", tool_name, e);
+                            batch_output.push_str(&format!("\nError: {}\n", error_msg));
+                            batch_had_error = true;
+                            if batch_error_message.is_none() {
+                                batch_error_message = Some(error_msg);
+                            }
+                        }
+                    }
+                } else {
+                    let error_msg = format!("Tool {} not found", tool_name);
+                    batch_output.push_str(&format!("\nError: {}\n", error_msg));
+                    batch_had_error = true;
+                    if batch_error_message.is_none() {
+                        batch_error_message = Some(error_msg);
+                    }
+                }
+            }
+        }
+
+        let duration = timer.elapsed_ms();
+
+        // Create results for each step in the batch
+        let mut results = Vec::new();
+        for (i, step) in steps.iter().enumerate() {
+            let step_output = if i == 0 {
+                batch_output.clone() // Full output for first step
+            } else {
+                format!("Part of batch execution (see step {})", steps[0].id)
+            };
+
+            let result = StepResultBuilder::success()
+                .with_output(step_output.clone())
+                .with_files(if i == 0 {
+                    all_files_modified.clone()
+                } else {
+                    Vec::new()
+                })
+                .with_duration(duration);
+
+            let result = if batch_had_error && i == 0 {
+                if let Some(ref error_msg) = batch_error_message {
+                    StepResultBuilder::failure()
+                        .with_output(step_output)
+                        .with_error(error_msg)
+                        .with_duration(duration)
+                        .build()
+                } else {
+                    result.build()
+                }
+            } else {
+                result.build()
+            };
+
+            ctx.emit_step_completed(&step.id, &result);
+            results.push(result);
+        }
+
+        Ok(results)
     }
 }
 
@@ -46,8 +270,80 @@ impl PlanExecutor for DirectExecutor {
         false // Direct execution is always sequential
     }
 
+    fn supports_batching(&self) -> bool {
+        self.enable_batching
+    }
+
     fn max_concurrency(&self) -> usize {
         1
+    }
+
+    async fn execute_steps(
+        &self,
+        steps: &[UnifiedStep],
+        group_id: &str,
+        ctx: &ExecutorContext,
+    ) -> Vec<Result<StepResult>> {
+        if !self.enable_batching || steps.len() <= 1 {
+            // Fall back to sequential execution
+            let mut results = Vec::with_capacity(steps.len());
+            for step in steps {
+                results.push(self.execute_step(step, group_id, ctx).await);
+            }
+            return results;
+        }
+
+        // Group steps into batches
+        let mut results = Vec::with_capacity(steps.len());
+        let mut current_batch = Vec::new();
+
+        for step in steps {
+            // Check if this step can be batched with the current batch
+            let can_batch = if current_batch.is_empty() {
+                true
+            } else if current_batch.len() >= self.max_batch_size {
+                false
+            } else {
+                self.can_batch_steps(current_batch.last().unwrap(), step)
+            };
+
+            if can_batch {
+                current_batch.push(step.clone());
+            } else {
+                // Execute current batch
+                if !current_batch.is_empty() {
+                    match self.execute_step_batch(&current_batch, group_id, ctx).await {
+                        Ok(batch_results) => results.extend(batch_results.into_iter().map(Ok)),
+                        Err(e) => {
+                            // If batch fails, create error results for all steps
+                            let err_msg = e.to_string();
+                            for _step in &current_batch {
+                                results.push(Err(anyhow::anyhow!(err_msg.clone())));
+                            }
+                        }
+                    }
+                }
+
+                // Start new batch with current step
+                current_batch = vec![step.clone()];
+            }
+        }
+
+        // Execute remaining batch
+        if !current_batch.is_empty() {
+            match self.execute_step_batch(&current_batch, group_id, ctx).await {
+                Ok(batch_results) => results.extend(batch_results.into_iter().map(Ok)),
+                Err(e) => {
+                    // If batch fails, create error results for all steps
+                    let err_msg = e.to_string();
+                    for _step in &current_batch {
+                        results.push(Err(anyhow::anyhow!(err_msg.clone())));
+                    }
+                }
+            }
+        }
+
+        results
     }
 
     async fn execute_step(

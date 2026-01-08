@@ -121,10 +121,16 @@ pub trait PlanExecutor: Send + Sync {
         ctx: &ExecutorContext,
     ) -> Result<StepResult>;
 
-    /// Execute multiple steps
+    /// Check if this executor can batch multiple steps into a single request
+    fn supports_batching(&self) -> bool {
+        false
+    }
+
+    /// Execute multiple steps with optional batching
     ///
     /// Default implementation executes sequentially. Parallel-capable executors
-    /// should override this to use concurrent execution.
+    /// should override this to use concurrent execution. Batching-capable executors
+    /// should override this to group compatible steps.
     async fn execute_steps(
         &self,
         steps: &[UnifiedStep],

@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{LlmClient, LlmResponse, Message, TokenUsage, ToolDefinition};
+use super::{LlmClient, LlmResponse, Message, ToolDefinition};
 use crate::cache::{CacheKey, CacheStats, CacheStore, CachedResponse, MemoryCache};
 
 /// Configuration for the caching LLM client
