@@ -29,8 +29,10 @@ use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    /// AI is thinking/processing
+    /// AI is thinking/processing (status message)
     Thinking(String),
+    /// AI reasoning text before/between tool calls (the LLM's explanation of what it's doing)
+    Reasoning(String),
     /// Tool execution started
     ToolStart { name: String, description: String },
     /// Tool produced output
@@ -1287,11 +1289,18 @@ impl Session {
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
             // Extract text from response and send as chunks
+            // If there are tool calls, text is reasoning (explaining what it's about to do)
+            // If no tool calls, text is the final response
             for block in &assistant_message.content {
                 if let ContentBlock::Text { text } = block {
                     response_text.push_str(text);
                     response_text.push('\n');
-                    let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                    if has_tool_calls && !text.trim().is_empty() {
+                        // This is the LLM's reasoning before executing tools
+                        let _ = event_tx.send(SessionEvent::Reasoning(text.clone()));
+                    } else {
+                        let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                    }
                 }
             }
 

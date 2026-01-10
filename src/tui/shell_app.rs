@@ -94,6 +94,21 @@ impl fmt::Display for PermissionMode {
     }
 }
 
+/// Pending tool approval request
+#[derive(Debug, Clone)]
+pub struct PendingToolApproval {
+    /// Tool name (e.g., "bash", "edit_file")
+    pub tool_name: String,
+    /// Tool description/command to execute
+    pub description: String,
+    /// Arguments preview (truncated for display)
+    pub args_preview: String,
+    /// Channel to send approval response
+    pub response_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    /// Whether this is a high-risk operation
+    pub high_risk: bool,
+}
+
 /// Maximum number of commands to keep in history
 const MAX_HISTORY_SIZE: usize = 1000;
 
@@ -680,6 +695,8 @@ pub enum BlockType {
     AiToolExecution { tool_name: String },
     /// AI reasoning/explanation text (shown inline between tools)
     AiReasoning,
+    /// AI thinking/reasoning BEFORE tool calls (the LLM's explanation of what it will do)
+    AiThinking,
     /// System message (welcome, errors, notifications)
     SystemMessage,
     /// Orchestration task
@@ -1044,6 +1061,10 @@ pub struct ShellTuiApp {
     /// Whether plan execution is in progress
     pub plan_executing: bool,
 
+    // === Tool Approval State ===
+    /// Pending tool approval request
+    pub pending_tool_approval: Option<PendingToolApproval>,
+
     // === Render Cache ===
     /// Cached render width (invalidate cache if width changes)
     pub cached_render_width: usize,
@@ -1116,6 +1137,8 @@ impl ShellTuiApp {
             plan_approval_tx: None,
             current_plan_step: 0,
             plan_executing: false,
+
+            pending_tool_approval: None,
 
             cached_render_width: 0,
             cached_total_lines: 0,
@@ -1664,6 +1687,35 @@ impl ShellTuiApp {
     /// Check if plan approval popup is visible
     pub fn is_plan_approval_visible(&self) -> bool {
         self.plan_approval_visible
+    }
+
+    // === Tool Approval Methods ===
+
+    /// Set pending tool approval
+    pub fn set_pending_tool_approval(&mut self, approval: PendingToolApproval) {
+        self.pending_tool_approval = Some(approval);
+        self.needs_redraw = true;
+    }
+
+    /// Approve the pending tool
+    pub fn approve_pending_tool(&mut self) {
+        if let Some(approval) = self.pending_tool_approval.take() {
+            let _ = approval.response_tx.send(true);
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Deny the pending tool
+    pub fn deny_pending_tool(&mut self) {
+        if let Some(approval) = self.pending_tool_approval.take() {
+            let _ = approval.response_tx.send(false);
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Check if tool approval is pending
+    pub fn has_pending_tool_approval(&self) -> bool {
+        self.pending_tool_approval.is_some()
     }
 
     /// Update token usage in sidebar

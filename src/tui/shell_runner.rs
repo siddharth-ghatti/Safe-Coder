@@ -53,6 +53,8 @@ enum CommandUpdate {
 enum AiUpdate {
     /// AI is thinking/processing
     Thinking { block_id: String, message: String },
+    /// AI reasoning text (explanation before/between tool calls)
+    Reasoning { block_id: String, text: String },
     /// AI response text chunk
     TextChunk { block_id: String, text: String },
     /// AI final response
@@ -394,6 +396,46 @@ impl ShellTuiRunner {
                         }
                         self.app.mark_dirty();
                     }
+                    AiUpdate::Reasoning { block_id, text } => {
+                        // Skip empty reasoning
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+
+                        // Show reasoning inline as streaming output with a thinking prefix
+                        // This is more visible than child blocks
+                        if let Some(block) = self.app.get_block_mut(&block_id) {
+                            // Format reasoning with a thinking indicator
+                            let formatted_lines: Vec<String> = text
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .map(|l| format!("💭 {}", l))
+                                .collect();
+
+                            match &mut block.output {
+                                BlockOutput::Streaming { lines, .. } => {
+                                    // Add reasoning lines to streaming output
+                                    lines.extend(formatted_lines);
+                                }
+                                BlockOutput::Pending => {
+                                    block.output = BlockOutput::Streaming {
+                                        lines: formatted_lines,
+                                        complete: false,
+                                    };
+                                }
+                                _ => {
+                                    // If already has output, prepend reasoning
+                                    let existing = block.output.get_text();
+                                    let reasoning_text = formatted_lines.join("\n");
+                                    block.output = BlockOutput::Streaming {
+                                        lines: vec![reasoning_text, existing],
+                                        complete: false,
+                                    };
+                                }
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
                     AiUpdate::TextChunk { block_id, text } => {
                         // Skip empty text
                         if text.trim().is_empty() {
@@ -574,12 +616,15 @@ impl ShellTuiRunner {
                             }
                         }
 
-                        // Mark the tool block as complete
+                        // Mark the tool block as complete and calculate duration
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             if let Some(child) = parent.children.iter_mut().rev().find(|c| {
                                 matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
                             }) {
                                 child.exit_code = Some(if success { 0 } else { 1 });
+                                // Calculate duration from block timestamp
+                                let elapsed = chrono::Local::now() - child.timestamp;
+                                child.duration_ms = Some(elapsed.num_milliseconds().max(0) as u64);
                             }
                         }
                         // If todowrite tool completed, sync todos to sidebar
@@ -880,6 +925,47 @@ impl ShellTuiRunner {
                     self.app.hide_commands_modal();
                     return Ok(false);
                 }
+            }
+        }
+
+        // Handle tool approval modal (highest priority)
+        if self.app.has_pending_tool_approval() {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Approve this tool
+                    self.app.approve_pending_tool();
+                    return Ok(false);
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    // Approve all - switch to YOLO mode and approve
+                    self.app.set_permission_mode(super::shell_app::PermissionMode::Yolo);
+                    self.app.approve_pending_tool();
+
+                    // Show feedback
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "Switched to YOLO mode - all future actions auto-approved".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
+                    return Ok(false);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Deny the tool
+                    self.app.deny_pending_tool();
+
+                    // Show feedback
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "Tool execution denied".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
+                    return Ok(false);
+                }
+                _ => return Ok(false), // Ignore other keys
             }
         }
 
@@ -2590,6 +2676,10 @@ Keyboard:
                             SessionEvent::Thinking(msg) => AiUpdate::Thinking {
                                 block_id: block_id_inner.clone(),
                                 message: msg,
+                            },
+                            SessionEvent::Reasoning(text) => AiUpdate::Reasoning {
+                                block_id: block_id_inner.clone(),
+                                text,
                             },
                             SessionEvent::ToolStart { name, description } => AiUpdate::ToolStart {
                                 block_id: block_id_inner.clone(),

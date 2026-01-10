@@ -81,6 +81,32 @@ impl SidebarState {
         self.todo_plan = None;
     }
 
+    /// Get the current task text for shimmer display
+    /// Priority: in_progress todo active_form > todo content > current_task (user query)
+    pub fn current_task_active_form(&self) -> Option<String> {
+        // First try to get in_progress todo item's active form
+        if let Some(plan) = &self.todo_plan {
+            if let Some(item) = plan.items.iter().find(|item| item.status == "in_progress") {
+                if !item.active_form.is_empty() {
+                    return Some(item.active_form.clone());
+                } else if !item.content.is_empty() {
+                    return Some(format!("Working on: {}", item.content));
+                }
+            }
+        }
+
+        // Fall back to current_task (the user's original query)
+        // Truncate long queries and add "Working on:" prefix
+        self.current_task.as_ref().map(|task| {
+            let truncated = if task.len() > 40 {
+                format!("{}...", &task[..37])
+            } else {
+                task.clone()
+            };
+            format!("Working on: {}", truncated)
+        })
+    }
+
     /// Update from a plan event
     pub fn update_from_event(&mut self, event: &PlanEvent) {
         match event {

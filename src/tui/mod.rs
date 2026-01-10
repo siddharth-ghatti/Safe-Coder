@@ -38,6 +38,7 @@ pub use markdown::{
 mod shell_app;
 mod shell_runner;
 mod shell_ui;
+mod shimmer;
 
 pub use sidebar::{ConnectionStatus, PlanDisplay, SidebarState, TokenUsage};
 
