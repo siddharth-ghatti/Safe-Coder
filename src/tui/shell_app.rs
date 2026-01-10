@@ -1039,6 +1039,10 @@ pub struct ShellTuiApp {
     pub pending_approval_plan: Option<crate::planning::TaskPlan>,
     /// Sender to approve/reject the plan (using unbounded since sender needs Clone)
     pub plan_approval_tx: Option<tokio::sync::mpsc::UnboundedSender<bool>>,
+    /// Current plan step being executed (0-indexed)
+    pub current_plan_step: usize,
+    /// Whether plan execution is in progress
+    pub plan_executing: bool,
 
     // === Render Cache ===
     /// Cached render width (invalidate cache if width changes)
@@ -1110,6 +1114,8 @@ impl ShellTuiApp {
             plan_approval_visible: false,
             pending_approval_plan: None,
             plan_approval_tx: None,
+            current_plan_step: 0,
+            plan_executing: false,
 
             cached_render_width: 0,
             cached_total_lines: 0,
@@ -1591,7 +1597,48 @@ impl ShellTuiApp {
             let _ = tx.send(true);
         }
         self.plan_approval_visible = false;
+
+        // Update sidebar to show plan is approved (no longer awaiting)
+        if let Some(ref mut plan) = self.sidebar.active_plan {
+            plan.awaiting_approval = false;
+        }
+
+        // Start plan execution - mark first step as in progress
+        self.plan_executing = true;
+        self.current_plan_step = 0;
+        self.start_plan_step(0);
+
         self.needs_redraw = true;
+    }
+
+    /// Mark a plan step as in progress by index
+    pub fn start_plan_step(&mut self, step_index: usize) {
+        if let Some(ref mut plan) = self.sidebar.active_plan {
+            if step_index < plan.steps.len() {
+                plan.current_step_idx = Some(step_index);
+                plan.steps[step_index].status = crate::planning::PlanStepStatus::InProgress;
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Mark a plan step as completed by index
+    pub fn complete_plan_step(&mut self, step_index: usize, success: bool) {
+        if let Some(ref mut plan) = self.sidebar.active_plan {
+            if step_index < plan.steps.len() {
+                plan.steps[step_index].status = if success {
+                    crate::planning::PlanStepStatus::Completed
+                } else {
+                    crate::planning::PlanStepStatus::Failed
+                };
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Get the number of plan steps
+    pub fn plan_step_count(&self) -> usize {
+        self.sidebar.active_plan.as_ref().map(|p| p.steps.len()).unwrap_or(0)
     }
 
     /// Reject the pending plan

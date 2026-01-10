@@ -87,6 +87,18 @@ impl SidebarState {
             PlanEvent::PlanCreated { plan } => {
                 // Don't overwrite current_task - keep the user's original query
                 // The plan title is shown in the PLAN section instead
+
+                // IMPORTANT: Don't replace an approved plan that's executing
+                // When transitioning from PLAN to BUILD mode, the session sends a new
+                // PlanCreated with tool calls as steps - but we want to keep the original plan
+                if let Some(ref existing) = self.active_plan {
+                    // If we already have a plan that's approved (not awaiting) and not completed,
+                    // it means we're executing it - don't replace with tool-based plan
+                    if !existing.awaiting_approval && !existing.completed {
+                        // Plan is executing - don't replace it
+                        return;
+                    }
+                }
                 self.active_plan = Some(PlanDisplay::from_plan(plan));
             }
             PlanEvent::StepsAdded { steps, .. } => {

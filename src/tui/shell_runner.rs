@@ -548,6 +548,30 @@ impl ShellTuiRunner {
                         // Complete tool step in sidebar if in build mode
                         if self.app.agent_mode == crate::tools::AgentMode::Build {
                             self.app.sidebar.complete_tool_step(&tool_name, success);
+
+                            // Update plan step progress for file-modifying tools
+                            if self.app.plan_executing && success {
+                                let is_file_tool = tool_name == "edit_file"
+                                    || tool_name == "write_file"
+                                    || tool_name == "Edit"
+                                    || tool_name == "Write";
+
+                                if is_file_tool {
+                                    // Complete current step and move to next
+                                    let current = self.app.current_plan_step;
+                                    let total = self.app.plan_step_count();
+
+                                    self.app.complete_plan_step(current, true);
+
+                                    if current + 1 < total {
+                                        self.app.current_plan_step = current + 1;
+                                        self.app.start_plan_step(current + 1);
+                                    } else {
+                                        // Plan complete
+                                        self.app.plan_executing = false;
+                                    }
+                                }
+                            }
                         }
 
                         // Mark the tool block as complete
@@ -863,19 +887,11 @@ impl ShellTuiRunner {
         if self.app.is_plan_approval_visible() {
             match code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    // Show feedback message
-                    let prompt = self.app.current_prompt();
-                    let block = CommandBlock::system(
-                        "✅ Plan approved! Switching to BUILD mode and executing...".to_string(),
-                        prompt,
-                    );
-                    self.app.add_block(block);
-
                     // Switch to build mode and approve
                     self.app.set_agent_mode(crate::tools::AgentMode::Build);
                     self.app.approve_plan();
 
-                    // Sync with session
+                    // Sync with session and trigger execution
                     if let Some(session) = &self.app.session {
                         let session = session.clone();
                         tokio::spawn(async move {
@@ -883,6 +899,14 @@ impl ShellTuiRunner {
                             session.set_agent_mode(crate::tools::AgentMode::Build);
                         });
                     }
+
+                    // Trigger AI to execute the plan by sending a message
+                    self.execute_ai_query(
+                        "The plan has been approved. Execute it now step by step.",
+                        ai_tx.clone(),
+                    )
+                    .await?;
+
                     return Ok(false);
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -1210,13 +1234,6 @@ impl ShellTuiRunner {
         // Check for plan approval commands when a plan is pending
         if self.app.plan_approval_tx.is_some() || self.app.pending_approval_plan.is_some() {
             if input_lower == "approve" || input_lower == "yes" || input_lower == "y" {
-                let prompt = self.app.current_prompt();
-                let block = CommandBlock::system(
-                    "✅ Plan approved! Switching to BUILD mode and executing...".to_string(),
-                    prompt,
-                );
-                self.app.add_block(block);
-
                 // Switch to build mode and approve
                 self.app.set_agent_mode(crate::tools::AgentMode::Build);
                 self.app.approve_plan();
@@ -1229,6 +1246,14 @@ impl ShellTuiRunner {
                         session.set_agent_mode(crate::tools::AgentMode::Build);
                     });
                 }
+
+                // Trigger AI to execute the plan
+                self.execute_ai_query(
+                    "The plan has been approved. Execute it now step by step.",
+                    ai_tx.clone(),
+                )
+                .await?;
+
                 return Ok(());
             } else if input_lower == "reject" || input_lower == "no" || input_lower == "n" {
                 let prompt = self.app.current_prompt();
