@@ -258,6 +258,71 @@ impl CopilotClient {
 
         result
     }
+
+    /// Validate that all tool_calls have matching tool results and fix any issues
+    /// OpenAI API requires: assistant message with tool_calls must be immediately
+    /// followed by tool messages with matching tool_call_ids
+    fn validate_tool_pairs(&self, messages: Vec<CopilotMessage>) -> Vec<CopilotMessage> {
+        use std::collections::HashSet;
+
+        // First pass: collect all tool_call_ids and tool_call_id responses
+        let mut expected_tool_ids: HashSet<String> = HashSet::new();
+        let mut found_tool_ids: HashSet<String> = HashSet::new();
+
+        for msg in &messages {
+            if let Some(ref tool_calls) = msg.tool_calls {
+                for tc in tool_calls {
+                    expected_tool_ids.insert(tc.id.clone());
+                }
+            }
+            if msg.role == "tool" {
+                if let Some(ref id) = msg.tool_call_id {
+                    found_tool_ids.insert(id.clone());
+                }
+            }
+        }
+
+        // Find missing tool responses
+        let missing: HashSet<_> = expected_tool_ids.difference(&found_tool_ids).collect();
+
+        if missing.is_empty() {
+            return messages;
+        }
+
+        // Log the issue
+        tracing::warn!(
+            "Found {} tool_calls without responses, removing them: {:?}",
+            missing.len(),
+            missing
+        );
+
+        // Second pass: filter out messages with broken tool_calls
+        let mut result = Vec::new();
+        for msg in messages {
+            if let Some(ref tool_calls) = msg.tool_calls {
+                // Check if all tool_calls in this message have responses
+                let has_all_responses = tool_calls.iter().all(|tc| found_tool_ids.contains(&tc.id));
+
+                if !has_all_responses {
+                    // This message has tool_calls without responses
+                    // Convert it to a regular assistant message with just the text content
+                    if msg.content.is_some() {
+                        result.push(CopilotMessage {
+                            role: msg.role,
+                            content: msg.content,
+                            tool_calls: None,  // Remove the problematic tool_calls
+                            tool_call_id: None,
+                        });
+                    }
+                    // Skip this message entirely if it has no text content
+                    continue;
+                }
+            }
+            result.push(msg);
+        }
+
+        result
+    }
 }
 
 #[async_trait]
@@ -281,6 +346,9 @@ impl LlmClient for CopilotClient {
         }
 
         copilot_messages.extend(self.convert_messages(messages));
+
+        // Validate and fix tool call/result pairs
+        copilot_messages = self.validate_tool_pairs(copilot_messages);
 
         let copilot_tools: Vec<CopilotTool> = tools
             .iter()

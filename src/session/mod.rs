@@ -1534,7 +1534,7 @@ impl Session {
                         }
                     }
 
-                    // For edit_file, send diff if we have old content
+                    // For edit_file/write_file, send diff event for sidebar
                     // Note: edit_file uses "file_path", write_file uses "path"
                     if (name == "edit_file" || name == "write_file") && success {
                         let path_key = if name == "edit_file" {
@@ -1545,15 +1545,13 @@ impl Session {
                         if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
                             let full_path = self.project_path.join(path);
 
-                            // Send diff event if we have old content
-                            if let Some(old) = old_content {
-                                if let Ok(new_content) = std::fs::read_to_string(&full_path) {
-                                    let _ = event_tx.send(SessionEvent::FileDiff {
-                                        path: path.to_string(),
-                                        old_content: old,
-                                        new_content: new_content.clone(),
-                                    });
-                                }
+                            // Send diff event - use empty string for old_content if file is new
+                            if let Ok(new_content) = std::fs::read_to_string(&full_path) {
+                                let _ = event_tx.send(SessionEvent::FileDiff {
+                                    path: path.to_string(),
+                                    old_content: old_content.unwrap_or_default(),
+                                    new_content: new_content.clone(),
+                                });
                             }
 
                             // Notify LSP of file change for diagnostics

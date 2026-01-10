@@ -200,8 +200,9 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
     // Build rendered lines for visible portion
     let mut all_lines: Vec<MessageLine> = Vec::with_capacity(max_visible * 3);
 
+    let spinner_word = app.spinner.current();
     for block in app.blocks.iter().skip(start_block) {
-        render_block(&mut all_lines, block, content_width, app.animation_frame, &app.model_display);
+        render_block(&mut all_lines, block, content_width, app.animation_frame, &app.model_display, spinner_word);
         all_lines.push(MessageLine::Empty);
     }
 
@@ -454,7 +455,7 @@ impl MessageLine {
 // Block Rendering
 // ============================================================================
 
-fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize, model_display: &str) {
+fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize, model_display: &str, spinner_word: &str) {
     match &block.block_type {
         BlockType::SystemMessage => {
             for line in block.output.get_text().lines() {
@@ -493,10 +494,15 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                 });
             }
 
-            if block.is_running() && block.children.is_empty() && block.output.get_text().is_empty()
-            {
+            // Show status while running - use rotating cool words
+            let is_running = block.is_running();
+            let has_children = !block.children.is_empty();
+            let has_output = !block.output.get_text().is_empty();
+
+            if is_running && !has_children && !has_output {
+                // Initial thinking state - show the rotating word
                 lines.push(MessageLine::Running {
-                    text: "Thinking...".to_string(),
+                    text: format!("{}...", spinner_word),
                     spinner_frame: frame,
                 });
             }
@@ -507,6 +513,18 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
             for (i, child) in block.children.iter().enumerate() {
                 let show_spinner = last_running_idx == Some(i);
                 render_child_block(lines, child, width, frame, false, show_spinner);
+            }
+
+            // Show status after tools complete but still processing
+            // This keeps feedback visible between tool calls
+            if is_running && has_children && !has_output {
+                let all_children_done = block.children.iter().all(|c| !c.is_running());
+                if all_children_done {
+                    lines.push(MessageLine::Running {
+                        text: format!("{}...", spinner_word),
+                        spinner_frame: frame,
+                    });
+                }
             }
 
             // Final AI response - render with markdown if detected

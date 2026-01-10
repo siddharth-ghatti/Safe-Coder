@@ -1191,8 +1191,13 @@ impl ShellTuiApp {
         // This is fast enough for smooth spinners but reduces CPU load
         if self.animation_frame % 4 == 0 {
             if self.ai_thinking {
-                self.spinner.tick();
                 self.needs_redraw = true;
+            }
+
+            // Slow down the cool word rotation - only tick every 60 frames (~1 second)
+            // This makes the words more readable
+            if self.animation_frame % 60 == 0 {
+                self.spinner.tick();
             }
 
             // Cursor blink - only check when we might redraw anyway
