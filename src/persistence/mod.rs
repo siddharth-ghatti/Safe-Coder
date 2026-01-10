@@ -1,7 +1,9 @@
 mod db;
+pub mod event_log;
 pub mod models;
 
 pub use db::SessionDatabase;
+pub use event_log::{EventLogger, SessionInfo, SessionLogEvent};
 pub use models::{SavedSession, SessionStats, ToolUsage};
 
 use anyhow::Result;

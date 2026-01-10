@@ -25,6 +25,8 @@ pub struct Config {
     pub subagents: SubagentConfig,
     #[serde(default)]
     pub build: BuildConfig,
+    #[serde(default)]
+    pub context: ContextConfig,
 }
 
 /// Configuration for subagent models
@@ -672,6 +674,7 @@ impl Default for Config {
             checkpoint: CheckpointConfig::default(),
             subagents: SubagentConfig::default(),
             build: BuildConfig::default(),
+            context: ContextConfig::default(),
         }
     }
 }
@@ -746,6 +749,91 @@ impl Default for CheckpointConfig {
             max_checkpoints: default_max_checkpoints(),
             storage_path: None,
             ignore_patterns: default_ignore_patterns_checkpoint(),
+        }
+    }
+}
+
+/// Configuration for context management and compaction
+/// Based on Codex CLI's approach with token-based thresholds
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContextConfig {
+    /// Maximum context window size in tokens
+    #[serde(default = "default_context_max_tokens")]
+    pub max_tokens: usize,
+    /// Trigger compaction at this percentage of max_tokens (0-100)
+    #[serde(default = "default_compact_threshold_pct")]
+    pub compact_threshold_pct: usize,
+    /// Number of recent tokens to preserve during compaction (not messages)
+    /// This is similar to Codex's ~20k token preservation
+    #[serde(default = "default_preserve_recent_tokens")]
+    pub preserve_recent_tokens: usize,
+    /// Minimum number of recent messages to always preserve (safety floor)
+    #[serde(default = "default_min_preserve_messages")]
+    pub min_preserve_messages: usize,
+    /// Maximum size of tool results before truncation (chars)
+    #[serde(default = "default_max_tool_result_chars")]
+    pub max_tool_result_chars: usize,
+    /// Show warning after this many compactions in a session
+    #[serde(default = "default_compaction_warning_threshold")]
+    pub compaction_warning_threshold: usize,
+    /// Average characters per token for estimation
+    #[serde(default = "default_chars_per_token")]
+    pub chars_per_token: usize,
+}
+
+fn default_context_max_tokens() -> usize {
+    128_000 // Claude's context window
+}
+
+fn default_compact_threshold_pct() -> usize {
+    60 // Compact at 60% to leave room for responses
+}
+
+fn default_preserve_recent_tokens() -> usize {
+    20_000 // Similar to Codex's approach
+}
+
+fn default_min_preserve_messages() -> usize {
+    5 // Always keep at least 5 recent messages
+}
+
+fn default_max_tool_result_chars() -> usize {
+    2000
+}
+
+fn default_compaction_warning_threshold() -> usize {
+    3 // Warn after 3 compactions
+}
+
+fn default_chars_per_token() -> usize {
+    4 // Rough estimate
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self {
+            max_tokens: default_context_max_tokens(),
+            compact_threshold_pct: default_compact_threshold_pct(),
+            preserve_recent_tokens: default_preserve_recent_tokens(),
+            min_preserve_messages: default_min_preserve_messages(),
+            max_tool_result_chars: default_max_tool_result_chars(),
+            compaction_warning_threshold: default_compaction_warning_threshold(),
+            chars_per_token: default_chars_per_token(),
+        }
+    }
+}
+
+impl ContextConfig {
+    /// Convert to the context module's ContextConfig type
+    pub fn to_context_config(&self) -> crate::context::ContextConfig {
+        crate::context::ContextConfig {
+            max_tokens: self.max_tokens,
+            compact_threshold_pct: self.compact_threshold_pct,
+            preserve_recent_tokens: self.preserve_recent_tokens,
+            min_preserve_messages: self.min_preserve_messages,
+            max_tool_result_chars: self.max_tool_result_chars,
+            compaction_warning_threshold: self.compaction_warning_threshold,
+            chars_per_token: self.chars_per_token,
         }
     }
 }

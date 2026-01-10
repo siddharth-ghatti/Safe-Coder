@@ -2781,6 +2781,16 @@ Keyboard:
                                     tokens_compressed,
                                 }
                             }
+                            // Compaction warnings (handled by showing inline warning)
+                            SessionEvent::CompactionWarning { message, compaction_count } => {
+                                AiUpdate::Reasoning {
+                                    block_id: block_id_inner.clone(),
+                                    text: format!(
+                                        "\n⚠️  **Context Warning** (compaction #{}): {}\n",
+                                        compaction_count, message
+                                    ),
+                                }
+                            }
                         };
                         let _ = ai_tx_inner.send(update);
                     }

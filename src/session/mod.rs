@@ -85,6 +85,11 @@ pub enum SessionEvent {
     },
     /// Context was compressed - tokens_compressed is the estimated tokens that were compressed
     ContextCompressed { tokens_compressed: usize },
+    /// Warning about potential accuracy degradation after multiple compactions
+    CompactionWarning {
+        message: String,
+        compaction_count: usize,
+    },
 }
 
 pub struct Session {
@@ -281,6 +286,17 @@ impl Session {
     /// Get plan history
     pub fn get_plan_history(&self) -> &[crate::unified_planning::UnifiedPlan] {
         &self.plan_history
+    }
+
+    /// Restore messages from a previous session (for session resumption)
+    pub fn restore_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+        tracing::info!("Restored {} messages from previous session", self.messages.len());
+    }
+
+    /// Get current messages
+    pub fn get_messages(&self) -> &[Message] {
+        &self.messages
     }
 
     /// Set the current plan
@@ -769,12 +785,12 @@ impl Session {
 
         // Check if context compaction is needed
         if self.context_manager.needs_compaction(&self.messages) {
-            let (compacted, summary) = self
+            let (compacted, result) = self
                 .context_manager
                 .compact(std::mem::take(&mut self.messages));
             self.messages = compacted;
-            if !summary.is_empty() {
-                tracing::info!("Context compacted: {}", summary);
+            if result.did_compact() {
+                tracing::info!("Context compacted: {}", result.summary);
             }
         }
 
@@ -1068,25 +1084,21 @@ impl Session {
 
         // Check if context compaction is needed
         if self.context_manager.needs_compaction(&self.messages) {
-            // Get stats before compaction to calculate tokens compressed
-            let stats_before = self.context_manager.analyze(&self.messages);
-            let (compacted, summary) = self
+            let (compacted, result) = self
                 .context_manager
                 .compact(std::mem::take(&mut self.messages));
-            let stats_after = self.context_manager.analyze(&compacted);
-            let tokens_compressed = stats_before
-                .estimated_tokens
-                .saturating_sub(stats_after.estimated_tokens);
 
             self.messages = compacted;
-            if !summary.is_empty() {
-                tracing::info!("Context compacted: {}", summary);
+            if result.did_compact() {
+                tracing::info!("Context compacted: {}", result.summary);
                 let _ = event_tx.send(SessionEvent::TextChunk(format!(
                     "\n📦 Context compacted: {}\n",
-                    summary
+                    result.summary
                 )));
                 // Send compression event for sidebar token tracking
-                let _ = event_tx.send(SessionEvent::ContextCompressed { tokens_compressed });
+                let _ = event_tx.send(SessionEvent::ContextCompressed {
+                    tokens_compressed: result.tokens_saved(),
+                });
             }
         }
 
@@ -2356,32 +2368,29 @@ impl Session {
         let stats_before = self.context_manager.analyze(&self.messages);
 
         // Force compaction even if not at threshold
-        let (compacted, summary) = self
+        let (compacted, result) = self
             .context_manager
             .compact(std::mem::take(&mut self.messages));
 
-        let stats_after = self.context_manager.analyze(&compacted);
-        let tokens_saved = stats_before
-            .estimated_tokens
-            .saturating_sub(stats_after.estimated_tokens);
-
         self.messages = compacted;
+
+        let stats_after = self.context_manager.analyze(&self.messages);
 
         let mut output = String::new();
         output.push_str("📦 Context Compacted\n");
         output.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
         output.push_str(&format!(
             "Before: ~{} tokens ({} messages)\n",
-            stats_before.estimated_tokens, stats_before.message_count
+            result.tokens_before, stats_before.message_count
         ));
         output.push_str(&format!(
             "After:  ~{} tokens ({} messages)\n",
-            stats_after.estimated_tokens, stats_after.message_count
+            result.tokens_after, stats_after.message_count
         ));
-        output.push_str(&format!("Saved:  ~{} tokens\n", tokens_saved));
+        output.push_str(&format!("Saved:  ~{} tokens\n", result.tokens_saved()));
 
-        if !summary.is_empty() {
-            output.push_str(&format!("\nSummary: {}\n", summary));
+        if result.did_compact() {
+            output.push_str(&format!("\nSummary: {}\n", result.summary));
         }
 
         Ok(output)

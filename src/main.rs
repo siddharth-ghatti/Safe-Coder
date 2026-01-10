@@ -24,7 +24,7 @@ mod tools;
 mod tui;
 mod unified_planning;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use commands::{CommandParser, CommandResult};
 use config::Config;
-use orchestrator::{Orchestrator, OrchestratorConfig, WorkerKind};
+use orchestrator::{Orchestrator, WorkerKind};
 use session::Session;
 
 #[derive(Parser)]
@@ -53,6 +53,18 @@ struct Cli {
     /// Use legacy text-based shell instead of TUI (only for shell mode)
     #[arg(long, global = true)]
     no_tui: bool,
+
+    /// Resume a previous session (shows interactive picker if no ID provided)
+    #[arg(long, global = true)]
+    resume: bool,
+
+    /// Resume the most recent session
+    #[arg(long, global = true)]
+    resume_last: bool,
+
+    /// Resume a specific session by ID
+    #[arg(long, global = true, value_name = "SESSION_ID")]
+    resume_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -163,6 +175,14 @@ enum Commands {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Resume a previous session
+    Resume {
+        /// Session ID to resume (shows picker if not provided)
+        session_id: Option<String>,
+        /// Resume the most recent session instead of showing picker
+        #[arg(long)]
+        last: bool,
+    },
 }
 
 #[tokio::main]
@@ -249,6 +269,9 @@ async fn main() -> Result<()> {
         }
         Commands::Init { path } => {
             init_project(path)?;
+        }
+        Commands::Resume { session_id, last } => {
+            handle_resume(session_id, last).await?;
         }
     }
 
@@ -849,4 +872,104 @@ async fn run_shell_tui(project_path: PathBuf, connect_ai: bool) -> Result<()> {
 async fn run_shell_legacy(project_path: PathBuf, connect_ai: bool) -> Result<()> {
     let canonical_path = project_path.canonicalize()?;
     shell::run_shell(canonical_path, connect_ai).await
+}
+
+/// Handle session resumption
+async fn handle_resume(session_id: Option<String>, last: bool) -> Result<()> {
+    use persistence::event_log::EventLogger;
+
+    // Get the session to resume
+    let session_info = if last {
+        // Get the most recent session
+        match EventLogger::get_last_session()? {
+            Some(info) => info,
+            None => {
+                println!("No previous sessions found.");
+                println!("\nRun 'safe-coder' to start a new session.");
+                return Ok(());
+            }
+        }
+    } else if let Some(id) = session_id {
+        // Load specific session by ID
+        let sessions = EventLogger::list_recent_sessions(30)?;
+        match sessions.into_iter().find(|s| s.session_id == id) {
+            Some(info) => info,
+            None => {
+                println!("Session not found: {}", id);
+                println!("\nUse 'safe-coder resume' to see available sessions.");
+                return Ok(());
+            }
+        }
+    } else {
+        // Show interactive picker
+        let sessions = EventLogger::list_recent_sessions(14)?;
+
+        if sessions.is_empty() {
+            println!("No previous sessions found.");
+            println!("\nRun 'safe-coder' to start a new session.");
+            return Ok(());
+        }
+
+        println!("📋 Recent Sessions");
+        println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+        for (i, session) in sessions.iter().enumerate() {
+            println!(
+                "  [{:2}] {} | {} | {} events",
+                i + 1,
+                session.session_id,
+                session.created_at.format("%Y-%m-%d %H:%M"),
+                session.event_count
+            );
+            println!("       Project: {}", session.project_path);
+        }
+
+        println!("\nEnter session number to resume (or 'q' to quit): ");
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        if input == "q" || input.is_empty() {
+            return Ok(());
+        }
+
+        let idx: usize = input.parse().context("Invalid session number")?;
+        if idx == 0 || idx > sessions.len() {
+            anyhow::bail!("Invalid session number: {}", idx);
+        }
+
+        sessions.into_iter().nth(idx - 1).unwrap()
+    };
+
+    println!("\n🔄 Resuming session: {}", session_info.session_id);
+    println!("   Project: {}", session_info.project_path);
+    println!("   Created: {}", session_info.created_at.format("%Y-%m-%d %H:%M"));
+
+    // Load messages from the session
+    let messages = EventLogger::load_messages(&session_info.session_id)?;
+    println!("   Messages restored: {}\n", messages.len());
+
+    // Start TUI with the resumed session
+    let project_path = PathBuf::from(&session_info.project_path);
+    if project_path.exists() {
+        let canonical_path = project_path.canonicalize()?;
+
+        // Create session with restored messages
+        let config = Config::load()?;
+        let mut session = Session::new(config, canonical_path.clone()).await?;
+
+        // Restore messages
+        session.restore_messages(messages);
+
+        // Run TUI
+        let mut tui_runner = tui::TuiRunner::new(canonical_path.display().to_string());
+        tui_runner.initialize().await?;
+        tui_runner.run(session).await?;
+    } else {
+        println!("⚠️  Project path no longer exists: {}", session_info.project_path);
+        println!("   Session messages can still be viewed in: {:?}", session_info.log_path);
+    }
+
+    Ok(())
 }
