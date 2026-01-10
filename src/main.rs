@@ -151,6 +151,12 @@ enum Commands {
         /// Provider to login to (anthropic or github-copilot)
         provider: String,
     },
+    /// Logout and clear stored credentials
+    Logout {
+        /// Provider to logout from (anthropic, github-copilot, or all)
+        #[arg(default_value = "all")]
+        provider: String,
+    },
     /// Initialize a new project with safe-coder
     Init {
         /// Path to initialize (default: current directory)
@@ -237,6 +243,9 @@ async fn main() -> Result<()> {
         }
         Commands::Login { provider } => {
             handle_login(&provider).await?;
+        }
+        Commands::Logout { provider } => {
+            handle_logout(&provider)?;
         }
         Commands::Init { path } => {
             init_project(path)?;
@@ -668,6 +677,48 @@ async fn handle_login(provider: &str) -> Result<()> {
         "\nYou can now use safe-coder with your {} account!",
         provider
     );
+
+    Ok(())
+}
+
+fn handle_logout(provider: &str) -> Result<()> {
+    use config::{Config, LlmProvider};
+
+    let providers_to_clear: Vec<LlmProvider> = match provider.to_lowercase().as_str() {
+        "anthropic" | "claude" => vec![LlmProvider::Anthropic],
+        "github-copilot" | "copilot" => vec![LlmProvider::GitHubCopilot],
+        "all" => vec![LlmProvider::Anthropic, LlmProvider::GitHubCopilot],
+        _ => {
+            anyhow::bail!(
+                "Unknown provider '{}'. Supported: anthropic, github-copilot, all",
+                provider
+            );
+        }
+    };
+
+    let mut cleared_any = false;
+
+    for llm_provider in providers_to_clear {
+        if let Ok(token_path) = Config::token_path(&llm_provider) {
+            if token_path.exists() {
+                match std::fs::remove_file(&token_path) {
+                    Ok(_) => {
+                        println!("Cleared credentials for {:?}", llm_provider);
+                        cleared_any = true;
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to remove {:?}: {}", token_path, e);
+                    }
+                }
+            }
+        }
+    }
+
+    if cleared_any {
+        println!("\nCredentials cleared. Run 'safe-coder login <provider>' to re-authenticate.");
+    } else {
+        println!("No stored credentials found to clear.");
+    }
 
     Ok(())
 }

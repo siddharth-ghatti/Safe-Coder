@@ -201,7 +201,7 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
     let mut all_lines: Vec<MessageLine> = Vec::with_capacity(max_visible * 3);
 
     for block in app.blocks.iter().skip(start_block) {
-        render_block(&mut all_lines, block, content_width, app.animation_frame);
+        render_block(&mut all_lines, block, content_width, app.animation_frame, &app.model_display);
         all_lines.push(MessageLine::Empty);
     }
 
@@ -454,7 +454,7 @@ impl MessageLine {
 // Block Rendering
 // ============================================================================
 
-fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize) {
+fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize, model_display: &str) {
     match &block.block_type {
         BlockType::SystemMessage => {
             for line in block.output.get_text().lines() {
@@ -502,8 +502,11 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
             }
 
             // Render children (tools, reasoning)
-            for child in &block.children {
-                render_child_block(lines, child, width, frame, false);
+            // Find the last running child to only show spinner for that one
+            let last_running_idx = block.children.iter().rposition(|c| c.is_running());
+            for (i, child) in block.children.iter().enumerate() {
+                let show_spinner = last_running_idx == Some(i);
+                render_child_block(lines, child, width, frame, false, show_spinner);
             }
 
             // Final AI response - render with markdown if detected
@@ -525,7 +528,7 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                             spans.push(Span::styled(
                                 format!(
                                     "  {} ({})",
-                                    "claude-sonnet-4",
+                                    shorten_model_name(model_display),
                                     chrono::Local::now().format("%I:%M %p")
                                 ),
                                 Style::default().fg(TEXT_DIM),
@@ -548,7 +551,7 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                             lines.push(MessageLine::AiText {
                                 text: wrapped.to_string(),
                                 model: if is_last {
-                                    Some("claude-sonnet-4".to_string())
+                                    Some(shorten_model_name(model_display))
                                 } else {
                                     None
                                 },
@@ -572,14 +575,18 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
             // Use unthrottled output for orchestration - show all output continuously
             render_output_unthrottled(lines, &block.output, width);
 
-            for child in &block.children {
+            // Find the last running child to only show spinner for that one
+            let last_running_idx = block.children.iter().rposition(|c| c.is_running());
+            for (i, child) in block.children.iter().enumerate() {
+                let show_spinner = last_running_idx == Some(i);
                 // Pass unthrottled=true for orchestration child blocks
-                render_child_block(lines, child, width, frame, true);
+                render_child_block(lines, child, width, frame, true, show_spinner);
             }
         }
 
         BlockType::AiToolExecution { .. } => {
-            render_child_block(lines, block, width, frame, false);
+            // For standalone tool execution blocks, always show spinner if running
+            render_child_block(lines, block, width, frame, false, block.is_running());
         }
 
         BlockType::AiReasoning => {
@@ -613,8 +620,11 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
 
             render_output(lines, &block.output, width);
 
-            for child in &block.children {
-                render_child_block(lines, child, width, frame, false);
+            // Find the last running child to only show spinner for that one
+            let last_running_idx = block.children.iter().rposition(|c| c.is_running());
+            for (i, child) in block.children.iter().enumerate() {
+                let show_spinner = last_running_idx == Some(i);
+                render_child_block(lines, child, width, frame, false, show_spinner);
             }
         }
     }
@@ -626,6 +636,7 @@ fn render_child_block(
     width: usize,
     frame: usize,
     unthrottled: bool,
+    show_spinner: bool, // Only show spinner for the last running block
 ) {
     match &block.block_type {
         BlockType::AiToolExecution { tool_name } => {
@@ -656,7 +667,8 @@ fn render_child_block(
                 target,
             });
 
-            if block.is_running() {
+            // Only show spinner if this is the last running block
+            if block.is_running() && show_spinner {
                 lines.push(MessageLine::Running {
                     text: "Executing...".to_string(),
                     spinner_frame: frame,
@@ -904,6 +916,30 @@ fn render_diff_opencode(lines: &mut Vec<MessageLine>, diff: &FileDiff, _width: u
 // Input Hints (above input)
 // ============================================================================
 
+/// Shorten model name for display (e.g., "claude-sonnet-4-20250514" -> "claude-sonnet-4")
+fn shorten_model_name(model: &str) -> String {
+    // Handle common patterns
+    if model.contains("claude") {
+        // claude-sonnet-4-20250514 -> claude-sonnet-4
+        // claude-3-5-sonnet-20241022 -> claude-3.5-sonnet
+        if let Some(pos) = model.rfind("-20") {
+            return model[..pos].to_string();
+        }
+    }
+    if model.contains("/") {
+        // anthropic/claude-3.5-sonnet -> claude-3.5-sonnet
+        if let Some(pos) = model.rfind('/') {
+            return model[pos + 1..].to_string();
+        }
+    }
+    // Default: just return as-is, but limit length
+    if model.len() > 25 {
+        format!("{}...", &model[..22])
+    } else {
+        model.to_string()
+    }
+}
+
 fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Show key commands on the left, model on the right
     // Format: "/help  /undo  /redo  /compact  @file  !cmd                    model"
@@ -926,11 +962,12 @@ fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         }
     }
 
-    // Model name on the right
+    // Model name on the right - use actual configured model
     let model_name = if app.ai_connected {
-        "claude-sonnet-4"
+        // Shorten model name for display
+        shorten_model_name(&app.model_display)
     } else {
-        "disconnected"
+        "disconnected".to_string()
     };
 
     // Calculate left side length
@@ -941,7 +978,7 @@ fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         .saturating_sub(left_len as u16 + right_len as u16 + 2) as usize;
 
     spans.push(Span::styled(" ".repeat(padding.max(1)), Style::default()));
-    spans.push(Span::styled(model_name, Style::default().fg(TEXT_DIM)));
+    spans.push(Span::styled(&model_name, Style::default().fg(TEXT_DIM)));
     spans.push(Span::styled(" ", Style::default()));
 
     let line = Line::from(spans);
@@ -2179,9 +2216,16 @@ fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
 fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     use crate::planning::PlanStepStatus;
 
-    // Calculate modal size - centered, not too big
-    let modal_width = (area.width as f32 * 0.7).min(80.0) as u16;
-    let modal_height = (area.height as f32 * 0.7).min(30.0) as u16;
+    // Calculate modal size - centered, sized to fit content (larger modal)
+    let modal_width = (area.width as f32 * 0.85).min(100.0) as u16;
+
+    // Calculate height based on content (header + steps + footer)
+    let step_count = app.pending_approval_plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
+    // Header (2) + plan title (2) + "Steps:" (1) + steps + total (2) + footer (3) + padding (2)
+    let content_height = 2 + 2 + 1 + step_count + 2 + 3 + 2;
+    let modal_height = ((content_height as u16) + 2) // +2 for borders
+        .min((area.height as f32 * 0.9) as u16) // Use 90% of screen height
+        .max(18); // Minimum height
 
     let popup_area = Rect {
         x: (area.width.saturating_sub(modal_width)) / 2,
@@ -2202,6 +2246,12 @@ fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
+
+    // Calculate how many steps we can show (reserve space for header + footer)
+    let available_lines = inner.height as usize;
+    let header_lines = 5; // Header + plan title + empty + "Steps:" + empty
+    let footer_lines = 4; // Total + empty + key hints
+    let max_visible_steps = available_lines.saturating_sub(header_lines + footer_lines);
 
     // Build content
     let mut lines: Vec<Line> = Vec::new();
@@ -2237,7 +2287,8 @@ fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )));
 
-        for (i, step) in plan.steps.iter().enumerate() {
+        let steps_to_show = plan.steps.len().min(max_visible_steps);
+        for (i, step) in plan.steps.iter().take(steps_to_show).enumerate() {
             let status_icon = match step.status {
                 PlanStepStatus::Pending => "○",
                 PlanStepStatus::InProgress => "◐",
@@ -2263,6 +2314,15 @@ fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             ]));
         }
 
+        // Show "and X more..." if there are hidden steps
+        if plan.steps.len() > steps_to_show {
+            let remaining = plan.steps.len() - steps_to_show;
+            lines.push(Line::from(Span::styled(
+                format!("     ... and {} more steps", remaining),
+                Style::default().fg(TEXT_DIM),
+            )));
+        }
+
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("Total: {} steps", plan.steps.len()),
@@ -2275,8 +2335,7 @@ fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         )));
     }
 
-    // Footer with key hints
-    lines.push(Line::from(""));
+    // Footer with key hints - always visible
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("  ", Style::default()),
@@ -2287,7 +2346,7 @@ fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 .bg(ACCENT_GREEN)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" Approve and execute  ", Style::default().fg(TEXT_PRIMARY)),
+        Span::styled(" Approve  ", Style::default().fg(TEXT_PRIMARY)),
         Span::styled(
             " N ",
             Style::default()
@@ -2295,7 +2354,15 @@ fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 .bg(ACCENT_RED)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" Reject and cancel", Style::default().fg(TEXT_PRIMARY)),
+        Span::styled(" Reject  ", Style::default().fg(TEXT_PRIMARY)),
+        Span::styled(
+            " Esc ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(TEXT_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Cancel", Style::default().fg(TEXT_PRIMARY)),
     ]));
 
     // Render paragraph

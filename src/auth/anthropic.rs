@@ -83,7 +83,6 @@ impl AnthropicAuth {
 
         let mut url = url::Url::parse(mode.authorization_url()).unwrap();
         url.query_pairs_mut()
-            .append_pair("code", "true")
             .append_pair("client_id", ANTHROPIC_CLIENT_ID)
             .append_pair("response_type", "code")
             .append_pair("redirect_uri", ANTHROPIC_REDIRECT_URI)
@@ -224,11 +223,11 @@ impl AnthropicAuth {
 }
 
 /// Get the beta headers for OAuth-authenticated requests
-pub fn get_oauth_beta_headers() -> String {
-    [
-        "oauth-2025-04-20",
-        "claude-code-20250219",
-        "interleaved-thinking-2025-05-14",
-        "fine-grained-tool-streaming-2025-05-14",
-    ].join(",")
+pub fn get_oauth_beta_headers() -> &'static str {
+    "oauth-2025-04-20,interleaved-thinking-2025-05-14"
+}
+
+/// Get the user-agent header for OAuth-authenticated requests
+pub fn get_oauth_user_agent() -> &'static str {
+    "claude-cli/2.1.2 (external, cli)"
 }

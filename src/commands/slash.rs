@@ -13,6 +13,8 @@ pub enum SlashCommand {
     Chat(ChatSubcommand),
     Memory(MemorySubcommand),
     Model(Option<String>),
+    /// List available models for the current provider
+    Models,
     Restore(Option<String>),
     ApprovalMode(Option<String>),
     ExecutionMode(Option<String>),
@@ -112,6 +114,7 @@ impl SlashCommand {
             "chat" => Self::parse_chat_subcommand(args),
             "memory" => Self::parse_memory_subcommand(args),
             "model" => SlashCommand::Model(args.get(0).map(|s| s.to_string())),
+            "models" => SlashCommand::Models,
             "restore" => SlashCommand::Restore(args.get(0).map(|s| s.to_string())),
             "approval-mode" => SlashCommand::ApprovalMode(args.get(0).map(|s| s.to_string())),
             // /mode and /agent are aliases for execution mode
@@ -318,6 +321,10 @@ pub async fn execute_slash_command(
                 )))
             }
         },
+        SlashCommand::Models => {
+            let models = session.list_available_models().await?;
+            Ok(CommandResult::Message(models))
+        }
         SlashCommand::Restore(file) => {
             session.restore_file(file.as_deref()).await?;
             Ok(CommandResult::Message(
@@ -633,6 +640,7 @@ CONFIGURATION
   /mode [plan|act]    Set execution mode (plan/act)
   /agent [plan|act]   Alias for /mode
   /model [name]       Switch model or show current
+  /models             List available models for current provider
   /approval-mode [mode]  Set approval mode (plan/default/auto-edit/yolo)
   /settings           Show current settings
 
@@ -747,6 +755,8 @@ pub fn get_commands_text() -> String {
                         • act  - Auto-execution with brief summaries
   /agent [plan|act]     Alias for /mode
   /model [name]         Switch AI model or show current model
+  /models               List available models for current provider
+                        (fetches dynamically for GitHub Copilot)
   /approval-mode [mode] Set approval mode:
                         • plan    - Show execution plan before running
                         • default - Ask before each tool use

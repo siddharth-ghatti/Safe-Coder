@@ -717,6 +717,14 @@ pub enum PlanEvent {
         success: bool,
         duration_ms: u64,
     },
+    /// A file was modified
+    FileModified {
+        plan_id: String,
+        step_id: String,
+        path: String,
+        old_content: String,
+        new_content: String,
+    },
     /// A step group completed
     GroupCompleted {
         plan_id: String,

@@ -22,7 +22,9 @@ use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan}
 use crate::prompts;
 use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
-use crate::unified_planning::{ExecutionMode as UnifiedExecutionMode, UnifiedPlanner};
+// Unified planning imports (reserved for future use)
+// use crate::unified_planning::{ExecutionMode as UnifiedExecutionMode, UnifiedPlanner, PlanEvent as UnifiedPlanEvent};
+// use crate::unified_planning::integration::create_runner;
 
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
@@ -1088,141 +1090,154 @@ impl Session {
 
         let mut response_text = String::new();
 
-        // Use unified planning path for shell/TUI to stream plan events
-        let prev_tx = self.subagent_event_tx.clone();
-        self.subagent_event_tx = Some(event_tx.clone());
-        let planning_result = self.send_message_with_planning(user_message.clone()).await;
-        self.subagent_event_tx = prev_tx;
-
-        if let Ok(resp) = planning_result {
-            let _ = event_tx.send(SessionEvent::TextChunk(resp.clone()));
-            return Ok(resp);
-        }
-
-        tracing::warn!(
-            "Unified planning failed, falling back to legacy mode: {:?}",
-            planning_result.err()
-        );
-
         // Build hierarchical system prompt
         let project_context = self.memory.get_system_prompt().await.ok();
         let system_prompt =
             prompts::build_system_prompt(self.agent_mode, project_context.as_deref(), None);
 
-        // === UPFRONT PLANNING PHASE ===
-        // Always create a structured plan first, regardless of mode
-        // In Plan mode: show plan and stop
-        // In Build mode: show plan and execute
-        let _ = event_tx.send(SessionEvent::Thinking("Creating plan...".to_string()));
-
-        let execution_mode = match self.agent_mode {
-            AgentMode::Plan => UnifiedExecutionMode::Direct, // Plan mode uses simple direct planning
-            AgentMode::Build => UnifiedExecutionMode::Direct, // Build mode also uses direct for inline execution
-        };
-
-        let planner = UnifiedPlanner::new(execution_mode);
-        let unified_plan = planner
-            .create_plan(
-                self.llm_client.as_ref(),
-                &user_message,
-                project_context.as_deref(),
-            )
-            .await;
-
         // Create a persistent plan ID for this task
-        let task_plan_id = match &unified_plan {
-            Ok(plan) => plan.id.clone(),
-            Err(_) => format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string()),
-        };
+        let task_plan_id = format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
 
-        // Convert UnifiedPlan to TaskPlan for UI display
-        if let Ok(ref plan) = unified_plan {
-            let mut task_plan = TaskPlan::new(plan.id.clone(), user_message.clone());
-            task_plan.title = plan.title.clone();
-            task_plan.status = PlanStatus::Ready;
+        // === PLAN MODE: Create plan, get approval, then execute ===
+        if self.agent_mode == AgentMode::Plan || self.user_mode.requires_approval() {
+            let _ = event_tx.send(SessionEvent::Thinking("Creating plan...".to_string()));
 
-            // Add steps from unified plan
-            for group in &plan.groups {
-                for step in &group.steps {
-                    task_plan
-                        .steps
-                        .push(PlanStep::new(step.id.clone(), step.description.clone()));
+            // Ask LLM to create a plan (exploration + planning in one call)
+            let plan_prompt = format!(
+                "The user wants: {}\n\n\
+                First, briefly explore the relevant parts of the codebase using the available tools.\n\
+                Then create a concise plan showing what steps you would take to accomplish this task.\n\
+                Format your plan as:\n\
+                ## Plan: [Title]\n\
+                1. [Step description]\n\
+                2. [Step description]\n\
+                ...\n\n\
+                Do NOT execute any changes yet - just explore and plan.",
+                user_message
+            );
+
+            self.messages.push(Message::user(plan_prompt));
+
+            // Let LLM explore and create plan
+            let tools: Vec<ToolDefinition> = self
+                .tool_registry
+                .get_tools_schema_for_mode(AgentMode::Plan) // Read-only tools only
+                .into_iter()
+                .map(|schema| ToolDefinition {
+                    name: schema["name"].as_str().unwrap().to_string(),
+                    description: schema["description"].as_str().unwrap().to_string(),
+                    input_schema: schema["input_schema"].clone(),
+                })
+                .collect();
+
+            // Run exploration loop until LLM produces a plan
+            loop {
+                let llm_response = self
+                    .llm_client
+                    .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                    .await?;
+
+                let assistant_message = llm_response.message;
+
+                // Check for tool calls
+                let has_tool_calls = assistant_message
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
+
+                // Stream text to UI
+                for block in &assistant_message.content {
+                    if let ContentBlock::Text { text } = block {
+                        response_text.push_str(text);
+                        response_text.push('\n');
+                        let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                    }
                 }
+
+                self.messages.push(assistant_message.clone());
+
+                if !has_tool_calls {
+                    // No more tool calls - plan should be complete
+                    break;
+                }
+
+                // Execute read-only tool calls
+                let mut tool_results = Vec::new();
+                for block in &assistant_message.content {
+                    if let ContentBlock::ToolUse { id, name, input } = block {
+                        let description = self.describe_tool_action(name, input);
+
+                        // Send proper tool events for vertical rendering
+                        let _ = event_tx.send(SessionEvent::ToolStart {
+                            name: name.clone(),
+                            description: description.clone(),
+                        });
+
+                        let tool_context = ToolContext::new(&self.project_path, &self.config.tools);
+                        let (result, success) = if let Some(tool) = self.tool_registry.get_tool(name) {
+                            match tool.execute(input.clone(), &tool_context).await {
+                                Ok(r) => (r, true),
+                                Err(e) => (format!("Error: {}", e), false),
+                            }
+                        } else {
+                            (format!("Unknown tool: {}", name), false)
+                        };
+
+                        // Send tool completion event
+                        let _ = event_tx.send(SessionEvent::ToolComplete {
+                            name: name.clone(),
+                            success,
+                        });
+
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: result,
+                        });
+                    }
+                }
+
+                self.messages.push(Message {
+                    role: crate::llm::Role::User,
+                    content: tool_results,
+                });
             }
 
-            // Send plan to UI
+            // Plan created - parse the plan from response text
+            let (plan_title, plan_steps) = parse_plan_from_response(&response_text);
+
+            // Create the TaskPlan for the UI
+            let mut task_plan = TaskPlan::new(task_plan_id.clone(), user_message.clone());
+            task_plan.title = plan_title;
+            task_plan.steps = plan_steps;
+            task_plan.status = PlanStatus::AwaitingApproval;
+
+            // Send PlanCreated event FIRST so UI has the plan data
             let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCreated {
-                plan: task_plan.clone(),
+                plan: task_plan,
             }));
 
-            // In Plan mode (AgentMode::Plan OR UserMode::Plan), just show the plan and return without executing
-            // Plan mode is READ-ONLY - no file modifications allowed
-            if self.agent_mode == AgentMode::Plan || self.user_mode.requires_approval() {
-                response_text.push_str(&format!("## Plan: {}\n\n", plan.title));
-                response_text.push_str("**Plan Mode is READ-ONLY. This plan shows what will be done.**\n\n");
-                for (i, group) in plan.groups.iter().enumerate() {
-                    response_text.push_str(&format!("### Phase {}\n", i + 1));
-                    for step in &group.steps {
-                        response_text.push_str(&format!(
-                            "- **{}**: {}\n",
-                            step.description, step.instructions
-                        ));
-                        if !step.relevant_files.is_empty() {
-                            response_text.push_str(&format!(
-                                "  Files: {}\n",
-                                step.relevant_files.join(", ")
-                            ));
-                        }
-                    }
-                    response_text.push('\n');
-                }
-                response_text.push_str("\n---\n");
-                response_text.push_str("**Plan ready for approval.**\n");
-                response_text.push_str("Type `approve` (or `yes`/`y`) to switch to BUILD mode and execute.\n");
-                response_text.push_str("Type `reject` (or `no`/`n`) to cancel.\n");
-                response_text.push_str("Or press `Ctrl+G` to manually switch to BUILD mode.\n");
-                let _ = event_tx.send(SessionEvent::TextChunk(response_text.clone()));
+            // Show approval prompt
+            response_text.push_str("\n---\n");
+            response_text.push_str("**Plan ready for approval.**\n");
+            response_text.push_str("Type `approve` (or `yes`/`y`) to switch to BUILD mode and execute.\n");
+            response_text.push_str("Type `reject` (or `no`/`n`) to cancel.\n");
+            let _ = event_tx.send(SessionEvent::TextChunk(
+                "\n---\n**Plan ready for approval.**\nType `approve` to execute or `reject` to cancel.\n".to_string()
+            ));
 
-                // Signal that plan is awaiting approval (this enables text-based approve/reject)
-                let _ = event_tx.send(SessionEvent::Plan(PlanEvent::AwaitingApproval {
-                    plan_id: task_plan_id.clone(),
-                }));
-
-                return Ok(response_text);
-            }
-
-            // In Build mode, mark plan as approved to start execution
-            let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanApproved {
+            // Now send AwaitingApproval to trigger the approval dialog
+            let _ = event_tx.send(SessionEvent::Plan(PlanEvent::AwaitingApproval {
                 plan_id: task_plan_id.clone(),
             }));
-        } else if let Err(ref e) = unified_plan {
-            // Planning failed
-            tracing::warn!("Upfront planning failed: {}", e);
 
-            // In Plan mode, don't fall through to reactive execution - just report the error
-            if self.agent_mode == AgentMode::Plan || self.user_mode.requires_approval() {
-                let error_msg = format!(
-                    "**Plan Mode Error**: Unable to create plan.\n\n\
-                    Error: {}\n\n\
-                    Plan mode is READ-ONLY and cannot proceed without a plan.\n\
-                    Try rephrasing your request or switch to BUILD mode (Ctrl+G) for direct execution.",
-                    e
-                );
-                let _ = event_tx.send(SessionEvent::TextChunk(error_msg.clone()));
-                return Ok(error_msg);
-            }
-
-            // In Build mode, continue with reactive planning
-            let _ = event_tx.send(SessionEvent::TextChunk(format!(
-                "Note: Upfront planning unavailable, using reactive execution.\n"
-            )));
+            return Ok(response_text);
         }
 
-        let mut plan_created = unified_plan.is_ok();
-        let mut total_step_count = unified_plan
-            .as_ref()
-            .map(|p| p.groups.iter().map(|g| g.steps.len()).sum())
-            .unwrap_or(0);
+        // === BUILD MODE: Direct reactive execution (like Claude Code) ===
+        let _ = event_tx.send(SessionEvent::Thinking("Working on it...".to_string()));
+
+        let mut plan_created = false;
+        let mut total_step_count = 0usize;
 
         loop {
             // Notify UI that we're thinking
@@ -1799,54 +1814,102 @@ impl Session {
         }
     }
 
-    /// Generate a human-readable description of a tool action
+    /// Generate a human-readable description of a tool action with parameters
     fn describe_tool_action(&self, name: &str, params: &serde_json::Value) -> String {
         match name {
             "read_file" => {
-                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                    format!("Read file: {}", path)
-                } else {
-                    "Read a file".to_string()
-                }
+                let path = params.get("file_path")
+                    .or_else(|| params.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                format!("📖 Read `{}`", path)
             }
             "write_file" => {
-                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                    let content_preview = params
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .map(|c| {
-                            if c.len() > 50 {
-                                format!("{}...", &c[..50])
-                            } else {
-                                c.to_string()
-                            }
-                        })
-                        .unwrap_or_default();
-                    format!("Write to {}: {}", path, content_preview)
-                } else {
-                    "Write a file".to_string()
-                }
+                let path = params.get("file_path")
+                    .or_else(|| params.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let lines = params.get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|c| c.lines().count())
+                    .unwrap_or(0);
+                format!("📝 Write `{}` ({} lines)", path, lines)
             }
             "edit_file" => {
-                if let Some(path) = params.get("file_path").and_then(|v| v.as_str()) {
-                    format!("Edit file: {}", path)
+                let path = params.get("file_path")
+                    .or_else(|| params.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let old = params.get("old_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                let new = params.get("new_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                format!("✏️ Edit `{}` ({} → {} chars)", path, old, new)
+            }
+            "glob" => {
+                let pattern = params.get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let path = params.get("path")
+                    .and_then(|v| v.as_str());
+                if let Some(p) = path {
+                    format!("🔍 Glob `{}` in `{}`", pattern, p)
                 } else {
-                    "Edit a file".to_string()
+                    format!("🔍 Glob `{}`", pattern)
                 }
+            }
+            "grep" => {
+                let pattern = params.get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let path = params.get("path")
+                    .and_then(|v| v.as_str());
+                if let Some(p) = path {
+                    format!("🔎 Grep `{}` in `{}`", pattern, p)
+                } else {
+                    format!("🔎 Grep `{}`", pattern)
+                }
+            }
+            "list" => {
+                let path = params.get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(".");
+                format!("📁 List `{}`", path)
             }
             "bash" => {
-                if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                    let cmd_preview = if cmd.len() > 60 {
-                        format!("{}...", &cmd[..60])
-                    } else {
-                        cmd.to_string()
-                    };
-                    format!("Run command: {}", cmd_preview)
+                let cmd = params.get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let cmd_preview = if cmd.len() > 50 {
+                    format!("{}...", &cmd[..50])
                 } else {
-                    "Execute bash command".to_string()
-                }
+                    cmd.to_string()
+                };
+                format!("💻 Run `{}`", cmd_preview)
             }
-            _ => format!("Execute {}", name),
+            "webfetch" => {
+                let url = params.get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let url_short = if url.len() > 40 {
+                    format!("{}...", &url[..40])
+                } else {
+                    url.to_string()
+                };
+                format!("🌐 Fetch `{}`", url_short)
+            }
+            "todowrite" => {
+                let count = params.get("todos")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                format!("📋 Update todos ({} items)", count)
+            }
+            _ => format!("🔧 {}", name),
         }
     }
 
@@ -2006,6 +2069,77 @@ impl Session {
     /// Get current model name
     pub fn get_current_model(&self) -> String {
         self.config.llm.model.clone()
+    }
+
+    /// List available models for the current provider
+    pub async fn list_available_models(&self) -> Result<String> {
+        use crate::config::LlmProvider;
+
+        match &self.config.llm.provider {
+            LlmProvider::GitHubCopilot => {
+                // Get the stored GitHub token
+                let token_path = Config::token_path(&LlmProvider::GitHubCopilot)?;
+                if !token_path.exists() {
+                    return Ok("Not logged in to GitHub Copilot. Run /login to authenticate.".to_string());
+                }
+
+                let stored_token = crate::auth::StoredToken::load(&token_path)?;
+                let github_token = stored_token.get_access_token();
+
+                // Get Copilot token from GitHub token
+                let copilot_token = crate::llm::copilot::get_copilot_token(github_token).await?;
+
+                // Fetch available models
+                let models = crate::llm::copilot::get_copilot_models(&copilot_token).await?;
+
+                let mut output = String::from("📋 Available GitHub Copilot Models:\n\n");
+                let current_model = &self.config.llm.model;
+
+                for model in models {
+                    let marker = if model.id == *current_model { " ← current" } else { "" };
+                    let preview = if model.preview.unwrap_or(false) { " (preview)" } else { "" };
+                    output.push_str(&format!("  • {}{}{}\n", model.id, preview, marker));
+                }
+
+                output.push_str("\nUse /model <name> to switch models.");
+                Ok(output)
+            }
+            LlmProvider::Anthropic => {
+                let mut output = String::from("📋 Available Anthropic Models:\n\n");
+                let current_model = &self.config.llm.model;
+                let models = [
+                    "claude-opus-4-20250514",
+                    "claude-sonnet-4-20250514",
+                    "claude-3-5-sonnet-20241022",
+                    "claude-3-5-haiku-20241022",
+                    "claude-3-opus-20240229",
+                    "claude-3-haiku-20240307",
+                ];
+                for model in models {
+                    let marker = if model == current_model { " ← current" } else { "" };
+                    output.push_str(&format!("  • {}{}\n", model, marker));
+                }
+                output.push_str("\nUse /model <name> to switch models.");
+                Ok(output)
+            }
+            LlmProvider::OpenAI => {
+                let mut output = String::from("📋 Available OpenAI Models:\n\n");
+                let current_model = &self.config.llm.model;
+                let models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"];
+                for model in models {
+                    let marker = if model == current_model { " ← current" } else { "" };
+                    output.push_str(&format!("  • {}{}\n", model, marker));
+                }
+                output.push_str("\nUse /model <name> to switch models.");
+                Ok(output)
+            }
+            LlmProvider::OpenRouter => {
+                Ok("📋 OpenRouter Models:\n\nOpenRouter supports many models. Visit https://openrouter.ai/models for the full list.\n\nUse /model <provider/model-name> to switch models.".to_string())
+            }
+            LlmProvider::Ollama => {
+                Ok("📋 Ollama Models:\n\nRun `ollama list` to see installed models.\n\nUse /model <name> to switch models.".to_string())
+            }
+        }
     }
 
     /// Set approval mode
@@ -2245,4 +2379,60 @@ impl Session {
 
         Ok(output)
     }
+}
+
+/// Parse a plan from LLM response text
+///
+/// Expected format:
+/// ```
+/// ## Plan: [Title]
+/// 1. [Step description]
+/// 2. [Step description]
+/// ...
+/// ```
+fn parse_plan_from_response(response: &str) -> (String, Vec<PlanStep>) {
+    let mut title = "Untitled Plan".to_string();
+    let mut steps = Vec::new();
+
+    // Try to find "## Plan: [title]" or just "## [title]"
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## Plan:") {
+            title = trimmed.trim_start_matches("## Plan:").trim().to_string();
+        } else if trimmed.starts_with("## ") && title == "Untitled Plan" {
+            // Fallback: use any ## header as title
+            title = trimmed.trim_start_matches("## ").trim().to_string();
+        }
+    }
+
+    // Parse numbered steps (e.g., "1. Do something", "2. Do another thing")
+    let step_regex = regex::Regex::new(r"^\s*(\d+)\.\s+(.+)$").unwrap();
+    for line in response.lines() {
+        if let Some(caps) = step_regex.captures(line) {
+            if let Some(description) = caps.get(2) {
+                let desc_text = description.as_str().trim().to_string();
+                let step_id = format!("step-{}", steps.len() + 1);
+                steps.push(PlanStep::new(step_id, desc_text));
+            }
+        }
+    }
+
+    // If no numbered steps found, try to extract bullet points
+    if steps.is_empty() {
+        for line in response.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+                let desc_text = trimmed[2..].trim().to_string();
+                let step_id = format!("step-{}", steps.len() + 1);
+                steps.push(PlanStep::new(step_id, desc_text));
+            }
+        }
+    }
+
+    // If still no steps found, create a generic step
+    if steps.is_empty() {
+        steps.push(PlanStep::new("step-1".to_string(), "Execute the plan".to_string()));
+    }
+
+    (title, steps)
 }

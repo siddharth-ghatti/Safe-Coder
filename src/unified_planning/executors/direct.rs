@@ -353,32 +353,30 @@ impl PlanExecutor for DirectExecutor {
         ctx: &ExecutorContext,
     ) -> Result<StepResult> {
         let timer = StepTimer::start();
+        const MAX_ITERATIONS: usize = 20; // Prevent infinite loops
 
         // Emit step started event
         ctx.emit_step_started(group_id, step);
 
-        ctx.emit_step_progress(&step.id, "Sending instructions to LLM...");
+        ctx.emit_step_progress(&step.id, "Starting step execution...");
 
-        // Build context message with step instructions
+        // Build initial context message with step instructions
         let context_msg = if !step.relevant_files.is_empty() {
             format!(
-                "Execute this step:\n\n{}\n\nInstructions:\n{}\n\nRelevant files: {}",
+                "Execute this task:\n\n**Task:** {}\n\n**Instructions:**\n{}\n\n**Relevant files:** {}",
                 step.description,
                 step.instructions,
                 step.relevant_files.join(", ")
             )
         } else {
             format!(
-                "Execute this step:\n\n{}\n\nInstructions:\n{}",
+                "Execute this task:\n\n**Task:** {}\n\n**Instructions:**\n{}",
                 step.description, step.instructions
             )
         };
 
-        // Send to LLM with available tools
-        let messages = vec![Message::user(context_msg)];
+        // Get tool definitions
         let tool_schemas = ctx.tool_registry.get_tools_schema();
-
-        // Convert to ToolDefinition format
         let tools: Vec<ToolDefinition> = tool_schemas
             .iter()
             .map(|schema| ToolDefinition {
@@ -391,97 +389,245 @@ impl PlanExecutor for DirectExecutor {
             })
             .collect();
 
-        let response = ctx
-            .llm_client
-            .send_message(&messages, &tools)
-            .await
-            .map_err(|e| anyhow::anyhow!("LLM request failed: {}", e))?;
+        // System prompt to guide the LLM
+        let system_prompt = r#"You are a coding assistant that executes tasks using tools.
 
+WORKFLOW:
+1. EXPLORE: Use `glob`, `grep`, `read_file`, `list` to understand the codebase
+2. PLAN: Think about what changes are needed
+3. EXECUTE: Use `edit_file` (modify existing), `write_file` (create new), `bash` (run commands)
+4. VERIFY: Run tests or builds if appropriate
+
+IMPORTANT:
+- Always read files before modifying them
+- Use tools to complete the task - don't just describe what to do
+- When the task is complete, say "Task completed" in your response"#;
+
+        // Initialize conversation with user message
+        let mut messages = vec![Message::user(context_msg)];
         let mut output = String::new();
         let mut files_modified = Vec::new();
         let mut had_error = false;
         let mut error_message = None;
 
-        // Extract text content and tool uses
-        let mut tool_uses = Vec::new();
-        for block in &response.message.content {
-            match block {
-                ContentBlock::Text { text } => {
-                    output.push_str(text);
-                    output.push('\n');
-                }
-                ContentBlock::ToolUse { id, name, input } => {
-                    tool_uses.push((id.clone(), name.clone(), input.clone()));
-                }
-                _ => {}
-            }
-        }
+        // Create tool context for execution
+        let event_tx = ctx.event_tx.clone();
+        let plan_id = ctx.plan_id.clone();
+        let step_id_for_callback = step.id.clone();
 
-        // Execute tool calls
-        if !tool_uses.is_empty() {
-            ctx.emit_step_progress(&step.id, &format!("Executing {} tools...", tool_uses.len()));
-
-            // Create callback for streaming output
-            let event_tx = ctx.event_tx.clone();
-            let plan_id = ctx.plan_id.clone();
-            let step_id = step.id.clone();
-
-            let callback: crate::tools::OutputCallback = std::sync::Arc::new(move |line| {
-                let _ = event_tx.send(crate::unified_planning::PlanEvent::StepProgress {
-                    plan_id: plan_id.clone(),
-                    step_id: step_id.clone(),
-                    message: line,
-                });
+        let callback: crate::tools::OutputCallback = std::sync::Arc::new(move |line| {
+            let _ = event_tx.send(crate::unified_planning::PlanEvent::StepProgress {
+                plan_id: plan_id.clone(),
+                step_id: step_id_for_callback.clone(),
+                message: line,
             });
+        });
 
-            // Create tool context with callback
-            let tool_context =
-                ToolContext::with_output_callback(&ctx.project_path, &ctx.config.tools, callback);
+        let tool_context =
+            ToolContext::with_output_callback(&ctx.project_path, &ctx.config.tools, callback);
 
-            for (idx, (id, name, input)) in tool_uses.iter().enumerate() {
-                ctx.emit_step_progress(
-                    &step.id,
-                    &format!(
-                        "Executing tool {} of {}: {}",
-                        idx + 1,
-                        tool_uses.len(),
-                        name
-                    ),
-                );
+        // Multi-turn conversation loop
+        for iteration in 0..MAX_ITERATIONS {
+            ctx.emit_step_progress(&step.id, &format!("Iteration {}: Sending to LLM...", iteration + 1));
 
-                // Get the tool
-                if let Some(tool) = ctx.tool_registry.get_tool(name) {
+            // Send to LLM
+            let response = match ctx.llm_client.send_message_with_system(&messages, &tools, Some(system_prompt)).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("LLM request failed for step '{}': {}", step.description, e);
+                    had_error = true;
+                    error_message = Some(format!("LLM request failed: {}", e));
+                    break;
+                }
+            };
+
+            // Extract text content and tool uses from response
+            let mut tool_uses = Vec::new();
+            let mut response_text = String::new();
+
+            for block in &response.message.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        response_text.push_str(text);
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        tool_uses.push((id.clone(), name.clone(), input.clone()));
+                    }
+                    _ => {}
+                }
+            }
+
+            // Log iteration details
+            tracing::info!(
+                "Step '{}' iteration {}: {} tool calls, text length: {}",
+                step.description,
+                iteration + 1,
+                tool_uses.len(),
+                response_text.len()
+            );
+
+            // Add any text output
+            if !response_text.trim().is_empty() {
+                output.push_str(&response_text);
+                output.push('\n');
+            }
+
+            // If no tool calls, we're done
+            if tool_uses.is_empty() {
+                tracing::info!("Step '{}': No more tool calls, finishing", step.description);
+                break;
+            }
+
+            // Add assistant message to conversation history
+            messages.push(response.message.clone());
+
+            // Execute each tool call and collect results
+            let mut tool_results = Vec::new();
+
+            for (_idx, (id, name, input)) in tool_uses.iter().enumerate() {
+                // Format tool call description for chat display
+                let tool_desc = match name.as_str() {
+                    "read_file" => {
+                        let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
+                        format!("📖 Reading `{}`", path)
+                    }
+                    "write_file" => {
+                        let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
+                        format!("📝 Writing `{}`", path)
+                    }
+                    "edit_file" => {
+                        let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
+                        format!("✏️ Editing `{}`", path)
+                    }
+                    "glob" => {
+                        let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+                        format!("🔍 Searching for `{}`", pattern)
+                    }
+                    "grep" => {
+                        let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+                        format!("🔎 Grepping for `{}`", pattern)
+                    }
+                    "bash" => {
+                        let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("?");
+                        let short_cmd = if cmd.len() > 50 { &cmd[..50] } else { cmd };
+                        format!("💻 Running `{}`", short_cmd)
+                    }
+                    "list" => {
+                        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+                        format!("📁 Listing `{}`", path)
+                    }
+                    _ => format!("🔧 {}", name)
+                };
+
+                ctx.emit_step_progress(&step.id, &tool_desc);
+
+                tracing::info!("Executing tool '{}' with input: {}", name,
+                    serde_json::to_string(input).unwrap_or_else(|_| "invalid".to_string()));
+
+                let tool_result = if let Some(tool) = ctx.tool_registry.get_tool(name) {
+                    // Capture old content before file modification
+                    let file_path = input.get("file_path").or_else(|| input.get("path"))
+                        .and_then(|v| v.as_str())
+                        .map(|p| {
+                            if std::path::Path::new(p).is_absolute() {
+                                std::path::PathBuf::from(p)
+                            } else {
+                                ctx.project_path.join(p)
+                            }
+                        });
+                    let old_content = if matches!(name.as_str(), "write_file" | "edit_file") {
+                        file_path.as_ref().and_then(|p| std::fs::read_to_string(p).ok())
+                    } else {
+                        None
+                    };
+
                     match tool.execute(input.clone(), &tool_context).await {
                         Ok(result) => {
-                            output.push_str(&format!("\n[{}] {}\n", name, result));
+                            tracing::info!("Tool '{}' succeeded, result length: {}", name, result.len());
 
-                            // Track modified files
-                            if matches!(name.as_str(), "write_file" | "edit_file" | "bash") {
-                                if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
-                                    files_modified.push(path.to_string());
-                                } else if let Some(path) =
-                                    input.get("file_path").and_then(|v| v.as_str())
-                                {
-                                    files_modified.push(path.to_string());
+                            // Emit success message with brief result summary
+                            let summary = match name.as_str() {
+                                "glob" => {
+                                    let lines: Vec<&str> = result.lines().collect();
+                                    if lines.is_empty() {
+                                        "No files found".to_string()
+                                    } else {
+                                        format!("Found {} files", lines.len())
+                                    }
+                                }
+                                "grep" => {
+                                    let lines: Vec<&str> = result.lines().collect();
+                                    format!("{} matches", lines.len())
+                                }
+                                "read_file" => {
+                                    let lines = result.lines().count();
+                                    format!("Read {} lines", lines)
+                                }
+                                "bash" => {
+                                    if result.trim().is_empty() {
+                                        "Completed".to_string()
+                                    } else {
+                                        let lines = result.lines().count();
+                                        format!("{} lines of output", lines)
+                                    }
+                                }
+                                _ => "Success".to_string()
+                            };
+                            ctx.emit_step_progress(&step.id, &format!("  ✓ {}", summary));
+                            output.push_str(&format!("\n[{}] {}\n", name, summary));
+
+                            // Track modified files and emit file modification events
+                            if matches!(name.as_str(), "write_file" | "edit_file") {
+                                if let Some(ref path) = file_path {
+                                    let path_str = path.to_string_lossy().to_string();
+                                    if !files_modified.contains(&path_str) {
+                                        files_modified.push(path_str.clone());
+                                    }
+
+                                    // Emit file modification event
+                                    if let Ok(new_content) = std::fs::read_to_string(path) {
+                                        ctx.emit_file_modified(
+                                            &step.id,
+                                            &path_str,
+                                            old_content.as_deref().unwrap_or(""),
+                                            &new_content,
+                                        );
+                                    }
                                 }
                             }
+
+                            result
                         }
                         Err(e) => {
-                            let err_msg = format!("Tool {} failed: {}", name, e);
-                            output.push_str(&format!("\n❌ {}\n", err_msg));
-                            had_error = true;
-                            error_message = Some(err_msg);
+                            let err_msg = format!("Error: {}", e);
+                            tracing::error!("Tool '{}' failed: {}", name, e);
+                            ctx.emit_step_progress(&step.id, &format!("  ✗ Failed: {}", e));
+                            output.push_str(&format!("\n[{}] Failed: {}\n", name, e));
+                            err_msg
                         }
                     }
                 } else {
                     let err_msg = format!("Unknown tool: {}", name);
+                    tracing::error!("{}", err_msg);
+                    ctx.emit_step_progress(&step.id, &format!("  ✗ {}", err_msg));
                     output.push_str(&format!("\n❌ {}\n", err_msg));
-                    had_error = true;
-                    error_message = Some(err_msg);
-                }
+                    err_msg
+                };
+
+                tool_results.push(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: tool_result,
+                });
             }
+
+            // Add tool results to conversation for next iteration
+            messages.push(Message {
+                role: crate::llm::Role::User,
+                content: tool_results,
+            });
         }
 
+        // Build final result
         let result = if had_error {
             StepResultBuilder::failure()
                 .with_output(output)
@@ -539,7 +685,7 @@ mod tests {
         let executor = DirectExecutor::new();
         let (tx, mut rx) = mpsc::unbounded_channel::<PlanEvent>();
         let config = Arc::new(Config::default());
-        let llm_client = Arc::new(create_client(&config).unwrap());
+        let llm_client: Arc<dyn crate::llm::LlmClient> = Arc::from(create_client(&config).await.unwrap());
         let tool_registry = Arc::new(ToolRegistry::new());
 
         let ctx = ExecutorContext::new(

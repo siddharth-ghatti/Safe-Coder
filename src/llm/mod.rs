@@ -242,13 +242,58 @@ async fn create_provider_client(config: &crate::config::Config) -> Result<Box<dy
         }
         LlmProvider::GitHubCopilot => {
             // For GitHub Copilot, we need to exchange the GitHub token for a Copilot token
-            let github_token = config.get_auth_token()
-                .context("GitHub Copilot token not set. Use 'safe-coder login github-copilot' or set GITHUB_COPILOT_TOKEN")?;
+            tracing::info!("Creating GitHub Copilot client");
+
+            // Debug: Check if we have a stored token
+            let stored_token_info = if let Some(token) = config.get_stored_token() {
+                format!("found ({}...)", token.get_access_token().chars().take(15).collect::<String>())
+            } else {
+                "not found".to_string()
+            };
+
+            let github_token = match config.get_auth_token() {
+                Ok(token) => {
+                    tracing::info!("Found GitHub token ({}...)", &token[..token.len().min(10)]);
+                    token
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get GitHub token: {}", e);
+                    return Err(anyhow::anyhow!(
+                        "GitHub token not available. Stored token: {}. Error: {}",
+                        stored_token_info,
+                        e
+                    ));
+                }
+            };
+
+            // Check if token looks valid (ghu_ prefix for user tokens, gho_ for OAuth)
+            let token_type = if github_token.starts_with("ghu_") {
+                "user token"
+            } else if github_token.starts_with("gho_") {
+                "OAuth token"
+            } else if github_token.starts_with("ghp_") {
+                "personal access token"
+            } else {
+                "unknown type"
+            };
+            tracing::info!("Using GitHub {} for Copilot auth", token_type);
 
             // Get the Copilot-specific token
-            let copilot_token = copilot::get_copilot_token(&github_token).await
-                .context("Failed to get GitHub Copilot token. Make sure you have an active Copilot subscription")?;
+            tracing::info!("Exchanging GitHub token for Copilot token...");
+            let copilot_token = match copilot::get_copilot_token(&github_token).await {
+                Ok(token) => token,
+                Err(e) => {
+                    tracing::error!("Failed to exchange token: {:?}", e);
+                    return Err(anyhow::anyhow!(
+                        "Failed to exchange {} ({}) for Copilot token: {}",
+                        token_type,
+                        &github_token[..github_token.len().min(15)],
+                        e
+                    ));
+                }
+            };
 
+            tracing::info!("Successfully obtained Copilot token");
             Ok(Box::new(copilot::CopilotClient::new(
                 copilot_token,
                 config.llm.model.clone(),

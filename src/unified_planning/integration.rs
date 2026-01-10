@@ -207,6 +207,8 @@ fn convert_to_legacy_event(event: &PlanEvent) -> Option<crate::planning::PlanEve
             success: *success,
             summary: summary.clone(),
         }),
+        // FileModified doesn't have a legacy equivalent - it's forwarded separately
+        PlanEvent::FileModified { .. } => None,
         // Events that don't have legacy equivalents
         PlanEvent::PlanStarted { .. }
         | PlanEvent::GroupStarted { .. }

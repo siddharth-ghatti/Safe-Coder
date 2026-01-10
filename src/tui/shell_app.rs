@@ -227,6 +227,21 @@ impl CommandAutocomplete {
                 usage: Some("/model [name] - Switch model or show current".to_string()),
             },
             CommandSuggestion {
+                command: "/models".to_string(),
+                description: "List available models".to_string(),
+                usage: Some("Show models available for current provider".to_string()),
+            },
+            CommandSuggestion {
+                command: "/provider".to_string(),
+                description: "Switch AI provider".to_string(),
+                usage: Some("/provider [anthropic|copilot|openai|openrouter|ollama]".to_string()),
+            },
+            CommandSuggestion {
+                command: "/login".to_string(),
+                description: "Login to provider".to_string(),
+                usage: Some("/login [copilot|anthropic] - Authenticate with provider".to_string()),
+            },
+            CommandSuggestion {
                 command: "/approval-mode".to_string(),
                 description: "Set approval mode".to_string(),
                 usage: Some("/approval-mode [plan|default|auto-edit|yolo]".to_string()),
@@ -346,11 +361,11 @@ impl CommandAutocomplete {
         let parts: Vec<&str> = input.splitn(2, ' ').collect();
         let command_part = parts[0];
         let args_part = parts.get(1).map_or("", |s| *s);
-        
-        if parts.len() == 1 || (parts.len() == 2 && !input.ends_with(' ')) {
-            // Still completing the main command
+
+        if parts.len() == 1 {
+            // Still completing the main command (no space typed yet)
             let query = command_part[1..].to_lowercase(); // Remove the leading /
-            
+
             // Filter commands that start with the query
             for cmd in Self::get_all_commands() {
                 if cmd.command[1..].to_lowercase().starts_with(&query) {
@@ -358,7 +373,8 @@ impl CommandAutocomplete {
                 }
             }
         } else {
-            // Completing arguments/subcommands
+            // User has typed a space - completing arguments/subcommands
+            // Only show suggestions for commands that have subcommands
             self.complete_arguments(command_part, args_part);
         }
 
@@ -538,6 +554,51 @@ impl CommandAutocomplete {
                 ];
                 self.filter_subcommands(modes, args);
             }
+            "/provider" => {
+                let providers = vec![
+                    CommandSuggestion {
+                        command: "anthropic".to_string(),
+                        description: "Anthropic (Claude)".to_string(),
+                        usage: Some("anthropic - Use Claude models".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "copilot".to_string(),
+                        description: "GitHub Copilot".to_string(),
+                        usage: Some("copilot - Use GitHub Copilot".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "openai".to_string(),
+                        description: "OpenAI (GPT)".to_string(),
+                        usage: Some("openai - Use GPT models".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "openrouter".to_string(),
+                        description: "OpenRouter".to_string(),
+                        usage: Some("openrouter - Use OpenRouter".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "ollama".to_string(),
+                        description: "Ollama (local)".to_string(),
+                        usage: Some("ollama - Use local Ollama models".to_string()),
+                    },
+                ];
+                self.filter_subcommands(providers, args);
+            }
+            "/login" => {
+                let providers = vec![
+                    CommandSuggestion {
+                        command: "copilot".to_string(),
+                        description: "GitHub Copilot (device flow)".to_string(),
+                        usage: Some("copilot - Login via GitHub device flow".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "anthropic".to_string(),
+                        description: "Anthropic (API key)".to_string(),
+                        usage: Some("anthropic - Set up API key".to_string()),
+                    },
+                ];
+                self.filter_subcommands(providers, args);
+            }
             _ => {
                 // No subcommand completion for this command
             }
@@ -584,9 +645,23 @@ impl CommandAutocomplete {
         self.selected = 0;
     }
 
-    /// Apply current suggestion (replace input)
+    /// Apply current suggestion
+    /// Returns the full command string to replace input with
     pub fn apply_current(&self) -> Option<String> {
-        self.current().map(|cmd| cmd.command.clone())
+        let suggestion = self.current()?;
+
+        // Check if we're completing arguments (prefix contains a space)
+        if self.prefix.contains(' ') {
+            // Extract the command part (everything before the last space where args start)
+            let parts: Vec<&str> = self.prefix.splitn(2, ' ').collect();
+            if parts.len() >= 1 {
+                // Return command + space + suggestion
+                return Some(format!("{} {}", parts[0], suggestion.command));
+            }
+        }
+
+        // Completing the main command - just return the suggestion
+        Some(suggestion.command.clone())
     }
 }
 
@@ -970,16 +1045,23 @@ pub struct ShellTuiApp {
     pub cached_render_width: usize,
     /// Total cached line count (for fast scrollbar calculation)
     pub cached_total_lines: usize,
+
+    // === Provider/Model Display ===
+    /// Display name for current model (e.g., "claude-sonnet-4", "gpt-4o")
+    pub model_display: String,
 }
 
 impl ShellTuiApp {
     /// Create a new shell TUI application
     pub fn new(project_path: PathBuf, config: Config) -> Self {
         let cwd = project_path.clone();
-        let cwd_short = cwd
+        let _cwd_short = cwd
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "~".to_string());
+
+        // Get model display name before moving config
+        let model_display = config.llm.model.clone();
 
         let mut app = Self {
             cwd: cwd.clone(),
@@ -1031,6 +1113,8 @@ impl ShellTuiApp {
 
             cached_render_width: 0,
             cached_total_lines: 0,
+
+            model_display,
         };
 
         // Add welcome message
@@ -1786,6 +1870,11 @@ impl ShellTuiApp {
 
     /// Check if input looks like a shell command (starts with common commands or contains shell operators)
     pub fn looks_like_shell_command(input: &str) -> bool {
+        // Never treat slash commands as shell commands
+        if input.trim().starts_with('/') {
+            return false;
+        }
+
         let first_word = input.split_whitespace().next().unwrap_or("");
 
         // Common shell commands
@@ -1847,6 +1936,10 @@ impl ShellTuiApp {
             "mode" => Some(SlashCommand::Mode),
             "agent" => Some(SlashCommand::Agent),
             "commands" => Some(SlashCommand::Commands),
+            "models" => Some(SlashCommand::Models),
+            "provider" => Some(SlashCommand::Provider(args)),
+            "model" => Some(SlashCommand::Model(args)),
+            "login" => Some(SlashCommand::Login(args)),
             _ => None,
         }
     }
@@ -1889,4 +1982,12 @@ pub enum SlashCommand {
     Agent,
     /// Show commands reference
     Commands,
+    /// List available models for current provider
+    Models,
+    /// Switch or show current provider
+    Provider(Option<String>),
+    /// Switch or show current model
+    Model(Option<String>),
+    /// Login to a provider
+    Login(Option<String>),
 }

@@ -91,6 +91,17 @@ impl ExecutorContext {
             duration_ms: result.duration_ms,
         });
     }
+
+    /// Emit a file modification event
+    pub fn emit_file_modified(&self, step_id: &str, path: &str, old_content: &str, new_content: &str) {
+        self.emit(PlanEvent::FileModified {
+            plan_id: self.plan_id.clone(),
+            step_id: step_id.to_string(),
+            path: path.to_string(),
+            old_content: old_content.to_string(),
+            new_content: new_content.to_string(),
+        });
+    }
 }
 
 /// The unified executor interface - ALL executors implement this
@@ -348,7 +359,7 @@ mod tests {
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let config = Arc::new(Config::default());
-        let llm_client = Arc::new(create_client(&config).unwrap());
+        let llm_client: Arc<dyn crate::llm::LlmClient> = Arc::from(create_client(&config).await.unwrap());
         let tool_registry = Arc::new(ToolRegistry::new());
 
         let ctx = ExecutorContext::new(

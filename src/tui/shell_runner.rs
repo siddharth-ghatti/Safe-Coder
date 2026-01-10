@@ -863,10 +863,37 @@ impl ShellTuiRunner {
         if self.app.is_plan_approval_visible() {
             match code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Show feedback message
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "✅ Plan approved! Switching to BUILD mode and executing...".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
+                    // Switch to build mode and approve
+                    self.app.set_agent_mode(crate::tools::AgentMode::Build);
                     self.app.approve_plan();
+
+                    // Sync with session
+                    if let Some(session) = &self.app.session {
+                        let session = session.clone();
+                        tokio::spawn(async move {
+                            let mut session = session.lock().await;
+                            session.set_agent_mode(crate::tools::AgentMode::Build);
+                        });
+                    }
                     return Ok(false);
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Show feedback message
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "❌ Plan rejected. You can modify your request and try again.".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
                     self.app.reject_plan();
                     return Ok(false);
                 }
@@ -1581,7 +1608,263 @@ Keyboard:
                     }
                 });
             }
+
+            SlashCommand::Models => {
+                let prompt = self.app.current_prompt();
+
+                // Get models based on current provider
+                let provider = &self.config.llm.provider;
+                let output = match provider {
+                    crate::config::LlmProvider::GitHubCopilot => {
+                        // Try to get models from GitHub Copilot
+                        match self.get_copilot_models().await {
+                            Ok(models) => {
+                                let mut output = String::from("📋 Available GitHub Copilot Models:\n\n");
+                                let current_model = &self.config.llm.model;
+                                for model in models {
+                                    let marker = if model.id == *current_model { " ← current" } else { "" };
+                                    let preview = if model.preview.unwrap_or(false) { " (preview)" } else { "" };
+                                    output.push_str(&format!("  • {}{}{}\n", model.id, preview, marker));
+                                }
+                                output.push_str("\nUse /model <name> to switch models.");
+                                output
+                            }
+                            Err(e) => format!("Failed to fetch models: {}\n\nMake sure you're logged in with /login copilot", e),
+                        }
+                    }
+                    crate::config::LlmProvider::Anthropic => {
+                        let mut output = String::from("📋 Available Anthropic Models:\n\n");
+                        let current_model = &self.config.llm.model;
+                        let models = [
+                            "claude-opus-4-20250514",
+                            "claude-sonnet-4-20250514",
+                            "claude-3-5-sonnet-20241022",
+                            "claude-3-5-haiku-20241022",
+                        ];
+                        for model in models {
+                            let marker = if model == current_model { " ← current" } else { "" };
+                            output.push_str(&format!("  • {}{}\n", model, marker));
+                        }
+                        output.push_str("\nUse /model <name> to switch models.");
+                        output
+                    }
+                    crate::config::LlmProvider::OpenAI => {
+                        let mut output = String::from("📋 Available OpenAI Models:\n\n");
+                        let current_model = &self.config.llm.model;
+                        let models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"];
+                        for model in models {
+                            let marker = if model == current_model { " ← current" } else { "" };
+                            output.push_str(&format!("  • {}{}\n", model, marker));
+                        }
+                        output.push_str("\nUse /model <name> to switch models.");
+                        output
+                    }
+                    crate::config::LlmProvider::OpenRouter => {
+                        "📋 OpenRouter Models:\n\nVisit https://openrouter.ai/models for the full list.\nUse /model <provider/model-name> to switch.".to_string()
+                    }
+                    crate::config::LlmProvider::Ollama => {
+                        "📋 Ollama Models:\n\nRun `ollama list` to see installed models.\nUse /model <name> to switch.".to_string()
+                    }
+                };
+
+                let block = CommandBlock::system(output, prompt);
+                self.app.add_block(block);
+            }
+
+            SlashCommand::Provider(provider_opt) => {
+                let prompt = self.app.current_prompt();
+
+                match provider_opt {
+                    Some(provider_str) => {
+                        // Switch provider
+                        let new_provider = match provider_str.to_lowercase().as_str() {
+                            "anthropic" | "claude" => Some((crate::config::LlmProvider::Anthropic, "claude-sonnet-4-20250514")),
+                            "openai" | "gpt" => Some((crate::config::LlmProvider::OpenAI, "gpt-4o")),
+                            "copilot" | "github-copilot" | "github" => Some((crate::config::LlmProvider::GitHubCopilot, "gpt-4o")),
+                            "openrouter" => Some((crate::config::LlmProvider::OpenRouter, "anthropic/claude-3.5-sonnet")),
+                            "ollama" => Some((crate::config::LlmProvider::Ollama, "llama3")),
+                            _ => None,
+                        };
+
+                        if let Some((provider, default_model)) = new_provider {
+                            self.config.llm.provider = provider.clone();
+                            self.config.llm.model = default_model.to_string();
+
+                            // Update display model name in app
+                            self.app.model_display = default_model.to_string();
+
+                            // Save config
+                            if let Err(e) = self.config.save() {
+                                let block = CommandBlock::system(
+                                    format!("Warning: Failed to save config: {}", e),
+                                    prompt.clone(),
+                                );
+                                self.app.add_block(block);
+                            }
+
+                            let provider_name = match provider {
+                                crate::config::LlmProvider::Anthropic => "Anthropic",
+                                crate::config::LlmProvider::OpenAI => "OpenAI",
+                                crate::config::LlmProvider::GitHubCopilot => "GitHub Copilot",
+                                crate::config::LlmProvider::OpenRouter => "OpenRouter",
+                                crate::config::LlmProvider::Ollama => "Ollama",
+                            };
+
+                            let block = CommandBlock::system(
+                                format!("✓ Switched to {} (model: {})\n\nUse /connect to reconnect with new provider.", provider_name, default_model),
+                                prompt,
+                            );
+                            self.app.add_block(block);
+
+                            // Disconnect current AI connection so reconnect uses new provider
+                            self.disconnect_ai();
+                        } else {
+                            let block = CommandBlock::system(
+                                format!("Unknown provider: {}\n\nAvailable providers:\n  • anthropic (Claude)\n  • openai (GPT)\n  • copilot (GitHub Copilot)\n  • openrouter\n  • ollama", provider_str),
+                                prompt,
+                            );
+                            self.app.add_block(block);
+                        }
+                    }
+                    None => {
+                        // Show current provider
+                        let current = match &self.config.llm.provider {
+                            crate::config::LlmProvider::Anthropic => "anthropic",
+                            crate::config::LlmProvider::OpenAI => "openai",
+                            crate::config::LlmProvider::GitHubCopilot => "github-copilot",
+                            crate::config::LlmProvider::OpenRouter => "openrouter",
+                            crate::config::LlmProvider::Ollama => "ollama",
+                        };
+                        let block = CommandBlock::system(
+                            format!("Current provider: {}\nCurrent model: {}\n\nUse /provider <name> to switch.\nAvailable: anthropic, openai, copilot, openrouter, ollama", current, self.config.llm.model),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                }
+            }
+
+            SlashCommand::Model(model_opt) => {
+                let prompt = self.app.current_prompt();
+
+                match model_opt {
+                    Some(model_str) => {
+                        self.config.llm.model = model_str.clone();
+
+                        // Save config
+                        if let Err(e) = self.config.save() {
+                            let block = CommandBlock::system(
+                                format!("Warning: Failed to save config: {}", e),
+                                prompt.clone(),
+                            );
+                            self.app.add_block(block);
+                        }
+
+                        let block = CommandBlock::system(
+                            format!("✓ Switched to model: {}\n\nUse /connect to reconnect with new model.", model_str),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+
+                        // Disconnect so reconnect uses new model
+                        self.disconnect_ai();
+                    }
+                    None => {
+                        let block = CommandBlock::system(
+                            format!("Current model: {}\n\nUse /model <name> to switch.\nUse /models to see available models.", self.config.llm.model),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                }
+            }
+
+            SlashCommand::Login(provider_opt) => {
+                let prompt = self.app.current_prompt();
+                let provider_str = provider_opt.as_deref().unwrap_or("copilot");
+
+                match provider_str.to_lowercase().as_str() {
+                    "copilot" | "github-copilot" | "github" => {
+                        let block = CommandBlock::system(
+                            "Starting GitHub Copilot login...\n\nPlease follow the device flow in your browser.".to_string(),
+                            prompt.clone(),
+                        );
+                        self.app.add_block(block);
+
+                        // Run login flow
+                        match self.login_github_copilot().await {
+                            Ok(()) => {
+                                // Switch provider to copilot
+                                self.config.llm.provider = crate::config::LlmProvider::GitHubCopilot;
+                                self.config.llm.model = "gpt-4o".to_string();
+                                let _ = self.config.save();
+
+                                let block = CommandBlock::system(
+                                    "✓ Successfully logged in to GitHub Copilot!\n\nProvider switched to GitHub Copilot.\nUse /models to see available models.\nUse /connect to connect.".to_string(),
+                                    prompt,
+                                );
+                                self.app.add_block(block);
+                            }
+                            Err(e) => {
+                                let block = CommandBlock::system(
+                                    format!("✗ Login failed: {}", e),
+                                    prompt,
+                                );
+                                self.app.add_block(block);
+                            }
+                        }
+                    }
+                    "anthropic" | "claude" => {
+                        let block = CommandBlock::system(
+                            "Anthropic login:\n\nSet your API key in config or environment:\n  export ANTHROPIC_API_KEY=your-key-here\n\nOr edit ~/.config/safe-coder/config.toml".to_string(),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                    _ => {
+                        let block = CommandBlock::system(
+                            format!("Unknown provider: {}\n\nAvailable for login:\n  • copilot (GitHub Copilot device flow)\n  • anthropic (API key)", provider_str),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                }
+            }
         }
+
+        Ok(())
+    }
+
+    /// Get available models from GitHub Copilot
+    async fn get_copilot_models(&self) -> Result<Vec<crate::llm::copilot::CopilotModel>> {
+        use crate::config::LlmProvider;
+
+        let token_path = crate::config::Config::token_path(&LlmProvider::GitHubCopilot)?;
+        if !token_path.exists() {
+            anyhow::bail!("Not logged in to GitHub Copilot");
+        }
+
+        let stored_token = crate::auth::StoredToken::load(&token_path)?;
+        let github_token = stored_token.get_access_token();
+
+        let copilot_token = crate::llm::copilot::get_copilot_token(github_token).await?;
+        let models = crate::llm::copilot::get_copilot_models(&copilot_token).await?;
+
+        Ok(models)
+    }
+
+    /// Login to GitHub Copilot using device flow
+    async fn login_github_copilot(&mut self) -> Result<()> {
+        use crate::auth::github_copilot::GitHubCopilotAuth;
+        use crate::auth::{run_device_flow, StoredToken};
+        use crate::config::LlmProvider;
+
+        let auth = GitHubCopilotAuth::new();
+        let token = run_device_flow(&auth, "GitHub Copilot").await?;
+
+        // Save the token
+        let token_path = crate::config::Config::token_path(&LlmProvider::GitHubCopilot)?;
+        token.save(&token_path)?;
 
         Ok(())
     }
@@ -2435,6 +2718,13 @@ Keyboard:
         let mut config = self.config.clone();
         config.git.auto_commit = false;
 
+        // Debug: log the provider and model being used
+        tracing::info!(
+            "connect_ai: Using provider {:?}, model {}",
+            config.llm.provider,
+            config.llm.model
+        );
+
         match Session::new(config, self.app.cwd.clone()).await {
             Ok(session) => {
                 self.app.session = Some(Arc::new(Mutex::new(session)));
@@ -2445,8 +2735,16 @@ Keyboard:
                 );
             }
             Err(e) => {
+                tracing::error!("connect_ai failed: {:?}", e);
+                // Show full error chain for debugging
+                let mut error_details = format!("Failed to connect: {}", e);
+                let mut source = e.source();
+                while let Some(s) = source {
+                    error_details.push_str(&format!("\n  Caused by: {}", s));
+                    source = s.source();
+                }
                 block.fail(
-                    format!("Failed to connect: {}", e),
+                    error_details,
                     "Make sure you have configured an API key or run 'safe-coder login'"
                         .to_string(),
                     1,

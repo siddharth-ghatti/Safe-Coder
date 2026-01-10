@@ -561,12 +561,26 @@ impl Config {
 
     /// Get the stored token for the current provider (if any)
     pub fn get_stored_token(&self) -> Option<crate::auth::StoredToken> {
-        if let Ok(token_path) = Self::token_path(&self.llm.provider) {
-            if token_path.exists() {
-                use crate::auth::StoredToken;
-                if let Ok(stored_token) = StoredToken::load(&token_path) {
-                    return Some(stored_token);
+        match Self::token_path(&self.llm.provider) {
+            Ok(token_path) => {
+                tracing::debug!("Looking for token at: {:?}", token_path);
+                if token_path.exists() {
+                    use crate::auth::StoredToken;
+                    match StoredToken::load(&token_path) {
+                        Ok(stored_token) => {
+                            tracing::debug!("Successfully loaded token from {:?}", token_path);
+                            return Some(stored_token);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load token from {:?}: {}", token_path, e);
+                        }
+                    }
+                } else {
+                    tracing::debug!("Token file does not exist: {:?}", token_path);
                 }
+            }
+            Err(e) => {
+                tracing::debug!("Could not get token path for provider: {}", e);
             }
         }
         None
@@ -575,14 +589,22 @@ impl Config {
     /// Get the effective API key/token for the current provider
     /// Checks for stored tokens first, then falls back to configured API key
     pub fn get_auth_token(&self) -> Result<String> {
+        tracing::debug!("get_auth_token called for provider: {:?}", self.llm.provider);
+
         // First check if there's a stored token for this provider
         if let Some(stored_token) = self.get_stored_token() {
             if !stored_token.is_expired() {
+                tracing::debug!("Using stored token (not expired)");
                 return Ok(stored_token.get_access_token().to_string());
+            } else {
+                tracing::debug!("Stored token is expired");
             }
+        } else {
+            tracing::debug!("No stored token found for provider");
         }
 
         // Fall back to configured API key
+        tracing::debug!("Falling back to configured API key");
         self.llm
             .api_key
             .clone()
