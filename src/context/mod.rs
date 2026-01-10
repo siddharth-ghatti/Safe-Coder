@@ -130,10 +130,16 @@ impl ContextManager {
         let mut compacted = Vec::new();
         let mut summary_parts = Vec::new();
 
-        // Split messages: old (to summarize) and recent (to preserve)
-        let split_point = messages
+        // Find a safe split point that doesn't break tool call/result pairs
+        // We need to ensure that any assistant message with tool_calls has its
+        // corresponding tool results in the same section
+        let initial_split = messages
             .len()
             .saturating_sub(self.config.preserve_recent_messages);
+
+        // Adjust split point to not break tool call/result pairs
+        let split_point = self.find_safe_split_point(&messages, initial_split);
+
         let (old_messages, recent_messages) = messages.split_at(split_point);
 
         // Generate summary of old messages
@@ -307,6 +313,87 @@ impl ContextManager {
 
         summary.push_str("\n=== End Summary ===\n");
         summary
+    }
+
+    /// Find a safe split point that doesn't break tool call/result pairs
+    /// OpenAI API requires that assistant messages with tool_calls are immediately
+    /// followed by tool messages with matching tool_call_ids
+    fn find_safe_split_point(&self, messages: &[Message], initial_split: usize) -> usize {
+        use std::collections::HashSet;
+
+        // Start from initial_split and look for a safe boundary
+        let mut split_point = initial_split;
+
+        // First, collect all tool_call_ids from messages before the split point
+        let mut pending_tool_calls: HashSet<String> = HashSet::new();
+
+        for (i, msg) in messages.iter().enumerate() {
+            if i >= split_point {
+                break;
+            }
+
+            for block in &msg.content {
+                match block {
+                    ContentBlock::ToolUse { id, .. } => {
+                        pending_tool_calls.insert(id.clone());
+                    }
+                    ContentBlock::ToolResult { tool_use_id, .. } => {
+                        pending_tool_calls.remove(tool_use_id);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // If there are pending tool calls before the split, we need to move the split
+        // point earlier to include these tool calls with their results
+        if !pending_tool_calls.is_empty() {
+            // Move split point back to include tool results
+            // Look for messages after split_point that have matching tool results
+            let mut found_all_results = false;
+            for i in split_point..messages.len() {
+                for block in &messages[i].content {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        pending_tool_calls.remove(tool_use_id);
+                    }
+                }
+                if pending_tool_calls.is_empty() {
+                    // Found all results, split after this message
+                    split_point = i + 1;
+                    found_all_results = true;
+                    break;
+                }
+            }
+
+            // If we couldn't find all results, be conservative and keep more messages
+            if !found_all_results {
+                // Move split to include all tool calls that have results
+                split_point = initial_split.saturating_sub(2);
+            }
+        }
+
+        // Also check if we're splitting in the middle of a tool call sequence
+        // by looking at messages right at the split boundary
+        if split_point > 0 && split_point < messages.len() {
+            // Check if the message right before split has tool_calls
+            let prev_msg = &messages[split_point - 1];
+            let has_pending_calls = prev_msg.content.iter().any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+
+            if has_pending_calls {
+                // Need to include at least the next message (should have tool results)
+                // But verify it actually has the results
+                if split_point < messages.len() {
+                    let next_msg = &messages[split_point];
+                    let has_results = next_msg.content.iter().any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+                    if has_results {
+                        split_point += 1;
+                    }
+                }
+            }
+        }
+
+        // Ensure we don't return a split point larger than the array
+        split_point.min(messages.len())
     }
 
     /// Prune a single message to reduce size

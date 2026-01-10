@@ -3,6 +3,7 @@ use super::messages::{BackgroundTask, BackgroundTaskStatus, ChatMessage, ToolExe
 use super::sidebar::SidebarState;
 use super::spinner::Spinner;
 use super::theme_manager::ThemeManager;
+use crate::tools::AgentMode;
 use chrono::Local;
 use std::path::PathBuf;
 
@@ -39,6 +40,8 @@ pub struct App {
     pub current_session_id: Option<String>,
     pub show_help: bool,
     pub theme_manager: ThemeManager,
+    /// Agent mode for tool availability (PLAN/BUILD)
+    pub agent_mode: AgentMode,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +89,7 @@ impl App {
             current_session_id: None,
             show_help: false,
             theme_manager,
+            agent_mode: AgentMode::default(),
         };
 
         // Add the banner as a welcome message
@@ -421,5 +425,15 @@ impl App {
         self.theme_manager.cycle_theme_sync();
         let theme_name = self.theme_manager.current_theme_name();
         self.set_status(&format!("Switched to {} theme", theme_name));
+    }
+
+    pub fn cycle_agent_mode(&mut self) {
+        self.agent_mode = self.agent_mode.next();
+        self.set_status(&format!("Agent mode: {} - {}", self.agent_mode.short_name(), self.agent_mode.description()));
+    }
+
+    pub fn set_agent_mode(&mut self, mode: AgentMode) {
+        self.agent_mode = mode;
+        self.mark_dirty();
     }
 }

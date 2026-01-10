@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
-use crate::auth::anthropic::get_oauth_beta_headers;
+use crate::auth::anthropic::{get_oauth_beta_headers, get_oauth_user_agent};
 use crate::auth::{StoredToken, TokenManager};
 
 /// Authentication type for the Anthropic client
@@ -341,12 +341,13 @@ impl LlmClient for AnthropicClient {
                 .await
                 .context("Failed to get access token")?;
 
-            // OAuth uses Bearer token and special beta headers
+            // OAuth uses Bearer token, special beta headers, and user-agent
             // Combine OAuth beta headers with prompt caching beta
             let beta_headers = format!("{},prompt-caching-2024-07-31", get_oauth_beta_headers());
             req_builder = req_builder
                 .header("Authorization", format!("Bearer {}", access_token))
-                .header("anthropic-beta", beta_headers);
+                .header("anthropic-beta", beta_headers)
+                .header("user-agent", get_oauth_user_agent());
         } else {
             // API key auth - just add prompt caching beta
             let api_key = self.get_access_token().await?;

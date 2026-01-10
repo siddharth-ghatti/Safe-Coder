@@ -100,7 +100,576 @@ const MAX_HISTORY_SIZE: usize = 1000;
 /// Default number of recent commands to include in AI context
 const DEFAULT_AI_CONTEXT_COMMANDS: usize = 10;
 
-/// Type of command block
+/// Command suggestion for autocomplete
+#[derive(Debug, Clone)]
+pub struct CommandSuggestion {
+    /// The command itself (e.g., "/help", "/connect")
+    pub command: String,
+    /// Short description of what the command does
+    pub description: String,
+    /// Optional longer help text
+    pub usage: Option<String>,
+}
+
+/// Command autocomplete state
+#[derive(Debug, Clone)]
+pub struct CommandAutocomplete {
+    /// Current suggestions based on input
+    pub suggestions: Vec<CommandSuggestion>,
+    /// Selected suggestion index  
+    pub selected: usize,
+    /// Whether the autocomplete is visible
+    pub visible: bool,
+    /// The current input prefix being completed
+    pub prefix: String,
+}
+
+impl CommandAutocomplete {
+    pub fn new() -> Self {
+        Self {
+            suggestions: Vec::new(),
+            selected: 0,
+            visible: false,
+            prefix: String::new(),
+        }
+    }
+
+    /// Get all available commands with descriptions
+    fn get_all_commands() -> Vec<CommandSuggestion> {
+        vec![
+            // System commands
+            CommandSuggestion {
+                command: "/help".to_string(),
+                description: "Show help information".to_string(),
+                usage: Some("Show available commands and their descriptions".to_string()),
+            },
+            CommandSuggestion {
+                command: "/commands".to_string(),
+                description: "Show detailed commands reference".to_string(),
+                usage: Some("Open full commands modal with comprehensive help".to_string()),
+            },
+            CommandSuggestion {
+                command: "/quit".to_string(),
+                description: "Exit the application".to_string(),
+                usage: Some("Exit safe-coder session".to_string()),
+            },
+            CommandSuggestion {
+                command: "/exit".to_string(),
+                description: "Exit the application".to_string(),
+                usage: Some("Exit safe-coder session".to_string()),
+            },
+            CommandSuggestion {
+                command: "/clear".to_string(),
+                description: "Clear the screen".to_string(),
+                usage: Some("Clear the terminal display".to_string()),
+            },
+            CommandSuggestion {
+                command: "/stats".to_string(),
+                description: "Show session statistics".to_string(),
+                usage: Some("Display token usage, time, and other statistics".to_string()),
+            },
+            CommandSuggestion {
+                command: "/about".to_string(),
+                description: "About Safe Coder".to_string(),
+                usage: Some("Show version and application information".to_string()),
+            },
+            
+            // Chat and session management
+            CommandSuggestion {
+                command: "/chat".to_string(),
+                description: "Chat session management".to_string(),
+                usage: Some("/chat save [name] | resume <id> | list | delete <id> | share <id>".to_string()),
+            },
+            CommandSuggestion {
+                command: "/sessions".to_string(),
+                description: "List all saved sessions".to_string(),
+                usage: Some("Alias for /chat list".to_string()),
+            },
+            
+            // Undo/Redo
+            CommandSuggestion {
+                command: "/undo".to_string(),
+                description: "Undo the last change".to_string(),
+                usage: Some("Revert to previous git commit".to_string()),
+            },
+            CommandSuggestion {
+                command: "/redo".to_string(),
+                description: "Redo a previously undone change".to_string(),
+                usage: Some("Re-apply previously undone changes".to_string()),
+            },
+            
+            // Memory and context
+            CommandSuggestion {
+                command: "/memory".to_string(),
+                description: "Memory management".to_string(),
+                usage: Some("/memory add <text> | show | refresh".to_string()),
+            },
+            CommandSuggestion {
+                command: "/compact".to_string(),
+                description: "Compact context to save tokens".to_string(),
+                usage: Some("Manually compress conversation history".to_string()),
+            },
+            
+            // Configuration
+            CommandSuggestion {
+                command: "/mode".to_string(),
+                description: "Set execution mode".to_string(),
+                usage: Some("/mode [plan|act] - Toggle between planning and execution modes".to_string()),
+            },
+            CommandSuggestion {
+                command: "/agent".to_string(),
+                description: "Change agent mode".to_string(),
+                usage: Some("Alias for /mode".to_string()),
+            },
+            CommandSuggestion {
+                command: "/model".to_string(),
+                description: "Switch AI model".to_string(),
+                usage: Some("/model [name] - Switch model or show current".to_string()),
+            },
+            CommandSuggestion {
+                command: "/models".to_string(),
+                description: "List available models".to_string(),
+                usage: Some("Show models available for current provider".to_string()),
+            },
+            CommandSuggestion {
+                command: "/provider".to_string(),
+                description: "Switch AI provider".to_string(),
+                usage: Some("/provider [anthropic|copilot|openai|openrouter|ollama]".to_string()),
+            },
+            CommandSuggestion {
+                command: "/login".to_string(),
+                description: "Login to provider".to_string(),
+                usage: Some("/login [copilot|anthropic] - Authenticate with provider".to_string()),
+            },
+            CommandSuggestion {
+                command: "/approval-mode".to_string(),
+                description: "Set approval mode".to_string(),
+                usage: Some("/approval-mode [plan|default|auto-edit|yolo]".to_string()),
+            },
+            CommandSuggestion {
+                command: "/settings".to_string(),
+                description: "Show current settings".to_string(),
+                usage: Some("Display all configuration settings".to_string()),
+            },
+            
+            // Project tools
+            CommandSuggestion {
+                command: "/summary".to_string(),
+                description: "Generate project summary".to_string(),
+                usage: Some("Create a summary of the current project".to_string()),
+            },
+            CommandSuggestion {
+                command: "/compress".to_string(),
+                description: "Compress conversation".to_string(),
+                usage: Some("Compress conversation to save tokens".to_string()),
+            },
+            CommandSuggestion {
+                command: "/restore".to_string(),
+                description: "Restore file(s) from git".to_string(),
+                usage: Some("/restore [file] - Restore from git checkpoint".to_string()),
+            },
+            CommandSuggestion {
+                command: "/tools".to_string(),
+                description: "List available tools".to_string(),
+                usage: Some("Show all development tools available to AI".to_string()),
+            },
+            CommandSuggestion {
+                command: "/directory".to_string(),
+                description: "Workspace directory management".to_string(),
+                usage: Some("/directory add <path> | show".to_string()),
+            },
+            CommandSuggestion {
+                command: "/dir".to_string(),
+                description: "Workspace directory management".to_string(),
+                usage: Some("Alias for /directory".to_string()),
+            },
+            CommandSuggestion {
+                command: "/init".to_string(),
+                description: "Initialize project context".to_string(),
+                usage: Some("Create SAFE_CODER.md project context file".to_string()),
+            },
+            
+            // Checkpoints
+            CommandSuggestion {
+                command: "/checkpoint".to_string(),
+                description: "Git-agnostic snapshots".to_string(),
+                usage: Some("/checkpoint list | restore <id> | restore latest | delete <id>".to_string()),
+            },
+            CommandSuggestion {
+                command: "/cp".to_string(),
+                description: "Git-agnostic snapshots".to_string(),
+                usage: Some("Alias for /checkpoint".to_string()),
+            },
+            
+            // Skills
+            CommandSuggestion {
+                command: "/skill".to_string(),
+                description: "Skill management".to_string(),
+                usage: Some("/skill list | activate <name> | deactivate <name> | info <name>".to_string()),
+            },
+            CommandSuggestion {
+                command: "/skills".to_string(),
+                description: "Skill management".to_string(),
+                usage: Some("Alias for /skill".to_string()),
+            },
+            
+            // Unified planning
+            CommandSuggestion {
+                command: "/plan".to_string(),
+                description: "Show planning status".to_string(),
+                usage: Some("/plan show | groups | history".to_string()),
+            },
+            
+            // Other utilities
+            CommandSuggestion {
+                command: "/copy".to_string(),
+                description: "Copy last output to clipboard".to_string(),
+                usage: Some("Copy the last AI response to clipboard".to_string()),
+            },
+            
+            // AI connection commands (specific to shell mode)
+            CommandSuggestion {
+                command: "/connect".to_string(),
+                description: "Connect to AI service".to_string(),
+                usage: Some("Establish connection to the AI assistant".to_string()),
+            },
+            CommandSuggestion {
+                command: "/disconnect".to_string(),
+                description: "Disconnect from AI service".to_string(),
+                usage: Some("Close connection to the AI assistant".to_string()),
+            },
+            CommandSuggestion {
+                command: "/orchestrate".to_string(),
+                description: "Run complex tasks with orchestration".to_string(),
+                usage: Some("/orchestrate <task description> - Execute multi-step tasks with parallel workers".to_string()),
+            },
+        ]
+    }
+
+    /// Update suggestions based on current input
+    pub fn update(&mut self, input: &str) {
+        if !input.starts_with('/') {
+            self.visible = false;
+            return;
+        }
+
+        self.prefix = input.to_string();
+        self.suggestions.clear();
+        self.selected = 0;
+
+        // Split input into command and args
+        let parts: Vec<&str> = input.splitn(2, ' ').collect();
+        let command_part = parts[0];
+        let args_part = parts.get(1).map_or("", |s| *s);
+
+        if parts.len() == 1 {
+            // Still completing the main command (no space typed yet)
+            let query = command_part[1..].to_lowercase(); // Remove the leading /
+
+            // Filter commands that start with the query
+            for cmd in Self::get_all_commands() {
+                if cmd.command[1..].to_lowercase().starts_with(&query) {
+                    self.suggestions.push(cmd);
+                }
+            }
+        } else {
+            // User has typed a space - completing arguments/subcommands
+            // Only show suggestions for commands that have subcommands
+            self.complete_arguments(command_part, args_part);
+        }
+
+        self.visible = !self.suggestions.is_empty();
+    }
+    
+    /// Complete arguments for specific commands
+    fn complete_arguments(&mut self, command: &str, args: &str) {
+        match command {
+            "/chat" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "save".to_string(),
+                        description: "Save current conversation".to_string(),
+                        usage: Some("save [name] - Save with optional name".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "resume".to_string(),
+                        description: "Resume a saved conversation".to_string(),
+                        usage: Some("resume <id> - Resume by ID".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "list".to_string(),
+                        description: "List all saved conversations".to_string(),
+                        usage: Some("list - Show all saved chats".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "delete".to_string(),
+                        description: "Delete a saved conversation".to_string(),
+                        usage: Some("delete <id> - Delete by ID".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "share".to_string(),
+                        description: "Generate shareable link".to_string(),
+                        usage: Some("share <id> - Create share link".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/memory" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "add".to_string(),
+                        description: "Add to memory".to_string(),
+                        usage: Some("add <text> - Add custom instruction".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "show".to_string(),
+                        description: "Show current memory".to_string(),
+                        usage: Some("show - Display all memory".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "refresh".to_string(),
+                        description: "Reload from SAFE_CODER.md".to_string(),
+                        usage: Some("refresh - Reload instructions".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/directory" | "/dir" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "add".to_string(),
+                        description: "Add directory to workspace".to_string(),
+                        usage: Some("add <path> - Add directory".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "show".to_string(),
+                        description: "Show workspace directories".to_string(),
+                        usage: Some("show - List directories".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/checkpoint" | "/cp" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "list".to_string(),
+                        description: "List all checkpoints".to_string(),
+                        usage: Some("list - Show all saved checkpoints".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "restore".to_string(),
+                        description: "Restore a checkpoint".to_string(),
+                        usage: Some("restore <id|latest> - Restore checkpoint".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "delete".to_string(),
+                        description: "Delete a checkpoint".to_string(),
+                        usage: Some("delete <id> - Remove checkpoint".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/skill" | "/skills" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "list".to_string(),
+                        description: "List all skills".to_string(),
+                        usage: Some("list - Show available skills".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "activate".to_string(),
+                        description: "Activate a skill".to_string(),
+                        usage: Some("activate <name> - Enable skill".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "deactivate".to_string(),
+                        description: "Deactivate a skill".to_string(),
+                        usage: Some("deactivate <name> - Disable skill".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "info".to_string(),
+                        description: "Show skill details".to_string(),
+                        usage: Some("info <name> - Get skill information".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/plan" => {
+                let subcommands = vec![
+                    CommandSuggestion {
+                        command: "show".to_string(),
+                        description: "Show current plan status".to_string(),
+                        usage: Some("show - Display plan status".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "groups".to_string(),
+                        description: "Show step groups".to_string(),
+                        usage: Some("groups - Show parallelism info".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "history".to_string(),
+                        description: "Show plan history".to_string(),
+                        usage: Some("history - Show execution history".to_string()),
+                    },
+                ];
+                self.filter_subcommands(subcommands, args);
+            }
+            "/mode" | "/agent" => {
+                let modes = vec![
+                    CommandSuggestion {
+                        command: "plan".to_string(),
+                        description: "Deep planning mode".to_string(),
+                        usage: Some("plan - Deep planning with approval".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "act".to_string(),
+                        description: "Auto-execution mode".to_string(),
+                        usage: Some("act - Lightweight auto-execution".to_string()),
+                    },
+                ];
+                self.filter_subcommands(modes, args);
+            }
+            "/approval-mode" => {
+                let modes = vec![
+                    CommandSuggestion {
+                        command: "plan".to_string(),
+                        description: "Show execution plan before running".to_string(),
+                        usage: Some("plan - Show plans before execution".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "default".to_string(),
+                        description: "Ask before each tool use".to_string(),
+                        usage: Some("default - Ask for each action".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "auto-edit".to_string(),
+                        description: "Auto-approve edits only".to_string(),
+                        usage: Some("auto-edit - Auto-approve file edits".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "yolo".to_string(),
+                        description: "Auto-approve everything".to_string(),
+                        usage: Some("yolo - Auto-approve all actions".to_string()),
+                    },
+                ];
+                self.filter_subcommands(modes, args);
+            }
+            "/provider" => {
+                let providers = vec![
+                    CommandSuggestion {
+                        command: "anthropic".to_string(),
+                        description: "Anthropic (Claude)".to_string(),
+                        usage: Some("anthropic - Use Claude models".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "copilot".to_string(),
+                        description: "GitHub Copilot".to_string(),
+                        usage: Some("copilot - Use GitHub Copilot".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "openai".to_string(),
+                        description: "OpenAI (GPT)".to_string(),
+                        usage: Some("openai - Use GPT models".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "openrouter".to_string(),
+                        description: "OpenRouter".to_string(),
+                        usage: Some("openrouter - Use OpenRouter".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "ollama".to_string(),
+                        description: "Ollama (local)".to_string(),
+                        usage: Some("ollama - Use local Ollama models".to_string()),
+                    },
+                ];
+                self.filter_subcommands(providers, args);
+            }
+            "/login" => {
+                let providers = vec![
+                    CommandSuggestion {
+                        command: "copilot".to_string(),
+                        description: "GitHub Copilot (device flow)".to_string(),
+                        usage: Some("copilot - Login via GitHub device flow".to_string()),
+                    },
+                    CommandSuggestion {
+                        command: "anthropic".to_string(),
+                        description: "Anthropic (API key)".to_string(),
+                        usage: Some("anthropic - Set up API key".to_string()),
+                    },
+                ];
+                self.filter_subcommands(providers, args);
+            }
+            _ => {
+                // No subcommand completion for this command
+            }
+        }
+    }
+    
+    /// Filter and add subcommands that match the current input
+    fn filter_subcommands(&mut self, subcommands: Vec<CommandSuggestion>, args: &str) {
+        let query = args.to_lowercase();
+        for subcmd in subcommands {
+            if subcmd.command.to_lowercase().starts_with(&query) {
+                self.suggestions.push(subcmd);
+            }
+        }
+    }
+
+    /// Select next suggestion
+    pub fn next(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected = (self.selected + 1) % self.suggestions.len();
+        }
+    }
+
+    /// Select previous suggestion
+    pub fn prev(&mut self) {
+        if !self.suggestions.is_empty() {
+            if self.selected == 0 {
+                self.selected = self.suggestions.len() - 1;
+            } else {
+                self.selected -= 1;
+            }
+        }
+    }
+
+    /// Get current selected suggestion
+    pub fn current(&self) -> Option<&CommandSuggestion> {
+        self.suggestions.get(self.selected)
+    }
+
+    /// Hide the autocomplete
+    pub fn hide(&mut self) {
+        self.visible = false;
+        self.suggestions.clear();
+        self.selected = 0;
+    }
+
+    /// Apply current suggestion
+    /// Returns the full command string to replace input with
+    pub fn apply_current(&self) -> Option<String> {
+        let suggestion = self.current()?;
+
+        // Check if we're completing arguments (prefix contains a space)
+        if self.prefix.contains(' ') {
+            // Extract the command part (everything before the last space where args start)
+            let parts: Vec<&str> = self.prefix.splitn(2, ' ').collect();
+            if parts.len() >= 1 {
+                // Return command + space + suggestion
+                return Some(format!("{} {}", parts[0], suggestion.command));
+            }
+        }
+
+        // Completing the main command - just return the suggestion
+        Some(suggestion.command.clone())
+    }
+}
+
+impl Default for CommandAutocomplete {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub enum BlockType {
     /// Regular shell command (ls, git, cargo, etc.)
@@ -234,6 +803,8 @@ pub struct CommandBlock {
     pub children: Vec<CommandBlock>,
     /// File diff for edit operations (tool blocks only)
     pub diff: Option<FileDiff>,
+    /// Version counter for render cache invalidation (increments on content change)
+    pub render_version: u32,
 }
 
 impl CommandBlock {
@@ -251,6 +822,7 @@ impl CommandBlock {
             collapsed: false,
             children: Vec::new(),
             diff: None,
+            render_version: 0,
         }
     }
 
@@ -258,7 +830,14 @@ impl CommandBlock {
     pub fn system(message: String, prompt: ShellPrompt) -> Self {
         let mut block = Self::new(String::new(), BlockType::SystemMessage, prompt);
         block.output = BlockOutput::Success(message);
+        block.render_version = 1;
         block
+    }
+
+    /// Bump render version (call after any content change)
+    #[inline]
+    fn bump_version(&mut self) {
+        self.render_version = self.render_version.wrapping_add(1);
     }
 
     /// Mark the block as completed with success
@@ -269,6 +848,7 @@ impl CommandBlock {
         self.output = BlockOutput::Success(output);
         self.exit_code = Some(exit_code);
         self.duration_ms = Some(elapsed);
+        self.bump_version();
     }
 
     /// Mark the block as failed
@@ -279,6 +859,7 @@ impl CommandBlock {
         self.output = BlockOutput::Error { message, stderr };
         self.exit_code = Some(exit_code);
         self.duration_ms = Some(elapsed);
+        self.bump_version();
     }
 
     /// Append streaming output
@@ -295,6 +876,7 @@ impl CommandBlock {
             }
             _ => {}
         }
+        self.bump_version();
     }
 
     /// Mark streaming as complete
@@ -307,11 +889,13 @@ impl CommandBlock {
                 .num_milliseconds() as u64;
             self.duration_ms = Some(elapsed);
         }
+        self.bump_version();
     }
 
     /// Add a child block (for AI tool executions)
     pub fn add_child(&mut self, child: CommandBlock) {
         self.children.push(child);
+        self.bump_version();
     }
 
     /// Check if this block is still running
@@ -341,6 +925,8 @@ pub enum InputMode {
     Normal,
     /// AI mode (after typing @)
     AiPrefix,
+    /// Slash command mode (after typing /)
+    SlashCommand,
     /// History search mode (Ctrl+R)
     Search,
     /// Block selection mode
@@ -403,6 +989,8 @@ pub struct ShellTuiApp {
     pub input_mode: InputMode,
     /// Scroll offset for block list (0 = bottom/most recent)
     pub scroll_offset: usize,
+    /// Whether user is "pinned" to bottom (auto-scroll on new content)
+    pub auto_scroll: bool,
     /// Currently selected block index (for block selection mode)
     pub selected_block: Option<usize>,
     /// Current focus area
@@ -417,6 +1005,8 @@ pub struct ShellTuiApp {
     pub autocomplete: Autocomplete,
     /// File picker for @mentions
     pub file_picker: FilePicker,
+    /// Command autocomplete for slash commands
+    pub command_autocomplete: CommandAutocomplete,
     /// Commands modal visibility
     pub commands_modal_visible: bool,
 
@@ -441,16 +1031,41 @@ pub struct ShellTuiApp {
     // === Sidebar State ===
     /// Sidebar with plan progress, token usage, and connections
     pub sidebar: SidebarState,
+
+    // === Plan Approval State ===
+    /// Whether plan approval popup is visible
+    pub plan_approval_visible: bool,
+    /// The plan awaiting approval (contains summary and steps)
+    pub pending_approval_plan: Option<crate::planning::TaskPlan>,
+    /// Sender to approve/reject the plan (using unbounded since sender needs Clone)
+    pub plan_approval_tx: Option<tokio::sync::mpsc::UnboundedSender<bool>>,
+    /// Current plan step being executed (0-indexed)
+    pub current_plan_step: usize,
+    /// Whether plan execution is in progress
+    pub plan_executing: bool,
+
+    // === Render Cache ===
+    /// Cached render width (invalidate cache if width changes)
+    pub cached_render_width: usize,
+    /// Total cached line count (for fast scrollbar calculation)
+    pub cached_total_lines: usize,
+
+    // === Provider/Model Display ===
+    /// Display name for current model (e.g., "claude-sonnet-4", "gpt-4o")
+    pub model_display: String,
 }
 
 impl ShellTuiApp {
     /// Create a new shell TUI application
     pub fn new(project_path: PathBuf, config: Config) -> Self {
         let cwd = project_path.clone();
-        let cwd_short = cwd
+        let _cwd_short = cwd
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "~".to_string());
+
+        // Get model display name before moving config
+        let model_display = config.llm.model.clone();
 
         let mut app = Self {
             cwd: cwd.clone(),
@@ -474,6 +1089,7 @@ impl ShellTuiApp {
             cursor_pos: 0,
             input_mode: InputMode::Normal,
             scroll_offset: 0,
+            auto_scroll: true, // Start pinned to bottom
             selected_block: None,
             focus: FocusArea::Input,
             search_query: String::new(),
@@ -481,6 +1097,7 @@ impl ShellTuiApp {
             search_result_pos: 0,
             autocomplete: Autocomplete::new(),
             file_picker: FilePicker::new(),
+            command_autocomplete: CommandAutocomplete::new(),
             commands_modal_visible: false,
 
             needs_redraw: true,
@@ -493,6 +1110,17 @@ impl ShellTuiApp {
             lsp_initializing: true,
 
             sidebar: SidebarState::new(),
+
+            plan_approval_visible: false,
+            pending_approval_plan: None,
+            plan_approval_tx: None,
+            current_plan_step: 0,
+            plan_executing: false,
+
+            cached_render_width: 0,
+            cached_total_lines: 0,
+
+            model_display,
         };
 
         // Add welcome message
@@ -555,25 +1183,39 @@ impl ShellTuiApp {
         self.needs_redraw = false;
     }
 
-    /// Tick animation state
+    /// Tick animation state - optimized to minimize redraws
     pub fn tick(&mut self) {
-        self.animation_frame = (self.animation_frame + 1) % 100;
+        self.animation_frame = self.animation_frame.wrapping_add(1);
 
-        if self.ai_thinking {
-            self.spinner.tick();
-            self.needs_redraw = true;
+        // Only redraw for spinner animation every 4 ticks (~64ms at 60fps)
+        // This is fast enough for smooth spinners but reduces CPU load
+        if self.animation_frame % 4 == 0 {
+            if self.ai_thinking {
+                self.needs_redraw = true;
+            }
+
+            // Slow down the cool word rotation - only tick every 60 frames (~1 second)
+            // This makes the words more readable
+            if self.animation_frame % 60 == 0 {
+                self.spinner.tick();
+            }
+
+            // Cursor blink - only check when we might redraw anyway
+            // Blink every ~20 ticks = ~320ms
+            let cursor_phase = (self.animation_frame / 4) % 20;
+            if cursor_phase == 0 || cursor_phase == 10 {
+                self.needs_redraw = true;
+            }
         }
 
-        // Cursor blink
-        let old_cursor = (self.animation_frame.wrapping_sub(1) % 20) < 10;
-        let new_cursor = (self.animation_frame % 20) < 10;
-        if old_cursor != new_cursor {
-            self.needs_redraw = true;
-        }
-
-        // Check for any running blocks
-        if self.blocks.iter().any(|b| b.is_running()) {
-            self.needs_redraw = true;
+        // Running block check - only every 8 ticks (~128ms) to reduce overhead
+        // This is still responsive enough for spinner updates
+        if self.animation_frame % 8 == 0 {
+            // Only check last few blocks (most likely to be running)
+            let has_running = self.blocks.iter().rev().take(5).any(|b| b.is_running());
+            if has_running {
+                self.needs_redraw = true;
+            }
         }
     }
 
@@ -683,49 +1325,84 @@ impl ShellTuiApp {
             return;
         }
 
-        self.autocomplete.complete(&self.input, &self.cwd);
-
-        // If there's exactly one match, apply it immediately
-        if self.autocomplete.single_match() {
-            self.apply_autocomplete();
+        // If in slash command mode, update command suggestions
+        if self.input.starts_with('/') {
+            self.command_autocomplete.update(&self.input);
+            // If there's exactly one match, apply it immediately
+            if self.command_autocomplete.suggestions.len() == 1 {
+                self.apply_autocomplete();
+            }
+        } else {
+            // Regular autocomplete for paths/commands
+            self.autocomplete.complete(&self.input, &self.cwd);
+            // If there's exactly one match, apply it immediately
+            if self.autocomplete.single_match() {
+                self.apply_autocomplete();
+            }
         }
 
         self.needs_redraw = true;
     }
 
-    /// Apply the currently selected autocomplete suggestion
+    /// Check if autocomplete is currently visible (either command or file)
+    pub fn autocomplete_visible(&self) -> bool {
+        self.autocomplete.visible || self.command_autocomplete.visible
+    }
+
+    /// Apply autocomplete suggestion (either command or file)
     pub fn apply_autocomplete(&mut self) {
-        if let Some(new_input) = self.autocomplete.apply(&self.input) {
-            self.input = new_input;
-            self.cursor_pos = self.input.len();
-            self.autocomplete.hide();
+        if self.command_autocomplete.visible {
+            if let Some(command) = self.command_autocomplete.apply_current() {
+                self.input = command + " "; // Add space after command
+                self.cursor_pos = self.input.len();
+                self.command_autocomplete.hide();
+                self.update_input_mode();
+                self.needs_redraw = true;
+            }
+        } else if self.autocomplete.visible {
+            if let Some(completion) = self.autocomplete.apply(&self.input) {
+                self.input = completion;
+                self.cursor_pos = self.input.len();
+                self.autocomplete.hide();
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    /// Navigate autocomplete suggestions
+    pub fn autocomplete_next(&mut self) {
+        if self.command_autocomplete.visible {
+            self.command_autocomplete.next();
+            self.needs_redraw = true;
+        } else if self.autocomplete.visible {
+            self.autocomplete.next();
             self.needs_redraw = true;
         }
     }
 
-    /// Move to next autocomplete suggestion
-    pub fn autocomplete_next(&mut self) {
-        self.autocomplete.next();
-        self.needs_redraw = true;
-    }
-
-    /// Move to previous autocomplete suggestion
+    /// Navigate autocomplete suggestions backwards
     pub fn autocomplete_prev(&mut self) {
-        self.autocomplete.prev();
-        self.needs_redraw = true;
-    }
-
-    /// Check if autocomplete is currently visible
-    pub fn autocomplete_visible(&self) -> bool {
-        self.autocomplete.visible
+        if self.command_autocomplete.visible {
+            self.command_autocomplete.prev();
+            self.needs_redraw = true;
+        } else if self.autocomplete.visible {
+            self.autocomplete.prev();
+            self.needs_redraw = true;
+        }
     }
 
     /// Update input mode based on current input
     fn update_input_mode(&mut self) {
         if self.input.starts_with('@') {
             self.input_mode = InputMode::AiPrefix;
+            self.command_autocomplete.hide(); // Hide command autocomplete when in @mode
+        } else if self.input.starts_with('/') {
+            self.input_mode = InputMode::SlashCommand;
+            // Update command autocomplete suggestions
+            self.command_autocomplete.update(&self.input);
         } else {
             self.input_mode = InputMode::Normal;
+            self.command_autocomplete.hide(); // Hide when not in slash mode
         }
     }
 
@@ -765,7 +1442,7 @@ impl ShellTuiApp {
     /// Add a new command block
     pub fn add_block(&mut self, block: CommandBlock) {
         self.blocks.push(block);
-        self.scroll_to_bottom();
+        self.auto_scroll_to_bottom(); // Only scroll if user is at bottom
         self.needs_redraw = true;
     }
 
@@ -801,6 +1478,7 @@ impl ShellTuiApp {
     pub fn append_to_block(&mut self, id: &str, line: String) {
         if let Some(block) = self.get_block_mut(id) {
             block.append_output(line);
+            self.auto_scroll_to_bottom(); // Keep scrolling if user is at bottom
             self.needs_redraw = true;
         }
     }
@@ -808,28 +1486,47 @@ impl ShellTuiApp {
     // === Scrolling ===
 
     pub fn scroll_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
+        self.scroll_offset = self.scroll_offset.saturating_add(3); // Scroll 3 lines for smoother feel
+        self.auto_scroll = false; // User scrolled up, disable auto-scroll
         self.needs_redraw = true;
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.scroll_offset = self.scroll_offset.saturating_sub(3); // Scroll 3 lines for smoother feel
+                                                                   // Re-enable auto-scroll if user scrolls back to bottom
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+        }
         self.needs_redraw = true;
     }
 
     pub fn scroll_page_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(10);
+        self.scroll_offset = self.scroll_offset.saturating_add(20);
+        self.auto_scroll = false; // User scrolled up, disable auto-scroll
         self.needs_redraw = true;
     }
 
     pub fn scroll_page_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(10);
+        self.scroll_offset = self.scroll_offset.saturating_sub(20);
+        // Re-enable auto-scroll if user scrolls back to bottom
+        if self.scroll_offset == 0 {
+            self.auto_scroll = true;
+        }
         self.needs_redraw = true;
     }
 
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
+        self.auto_scroll = true; // Re-enable auto-scroll
         self.needs_redraw = true;
+    }
+
+    /// Auto-scroll to bottom only if user hasn't manually scrolled up
+    pub fn auto_scroll_to_bottom(&mut self) {
+        if self.auto_scroll {
+            self.scroll_offset = 0;
+            self.needs_redraw = true;
+        }
     }
 
     // === AI State ===
@@ -879,7 +1576,94 @@ impl ShellTuiApp {
     /// Update sidebar from a plan event
     pub fn update_plan(&mut self, event: &PlanEvent) {
         self.sidebar.update_from_event(event);
+
+        // Show approval popup when plan is awaiting approval
+        match event {
+            PlanEvent::PlanCreated { plan } => {
+                // Store the plan for potential approval display
+                self.pending_approval_plan = Some(plan.clone());
+            }
+            PlanEvent::AwaitingApproval { .. } => {
+                self.plan_approval_visible = true;
+            }
+            PlanEvent::PlanApproved { .. } | PlanEvent::PlanRejected { .. } => {
+                self.plan_approval_visible = false;
+                self.pending_approval_plan = None;
+            }
+            _ => {}
+        }
+
         self.needs_redraw = true;
+    }
+
+    /// Approve the pending plan
+    pub fn approve_plan(&mut self) {
+        if let Some(tx) = self.plan_approval_tx.take() {
+            let _ = tx.send(true);
+        }
+        self.plan_approval_visible = false;
+
+        // Update sidebar to show plan is approved (no longer awaiting)
+        if let Some(ref mut plan) = self.sidebar.active_plan {
+            plan.awaiting_approval = false;
+        }
+
+        // Start plan execution - mark first step as in progress
+        self.plan_executing = true;
+        self.current_plan_step = 0;
+        self.start_plan_step(0);
+
+        self.needs_redraw = true;
+    }
+
+    /// Mark a plan step as in progress by index
+    pub fn start_plan_step(&mut self, step_index: usize) {
+        if let Some(ref mut plan) = self.sidebar.active_plan {
+            if step_index < plan.steps.len() {
+                plan.current_step_idx = Some(step_index);
+                plan.steps[step_index].status = crate::planning::PlanStepStatus::InProgress;
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Mark a plan step as completed by index
+    pub fn complete_plan_step(&mut self, step_index: usize, success: bool) {
+        if let Some(ref mut plan) = self.sidebar.active_plan {
+            if step_index < plan.steps.len() {
+                plan.steps[step_index].status = if success {
+                    crate::planning::PlanStepStatus::Completed
+                } else {
+                    crate::planning::PlanStepStatus::Failed
+                };
+            }
+        }
+        self.needs_redraw = true;
+    }
+
+    /// Get the number of plan steps
+    pub fn plan_step_count(&self) -> usize {
+        self.sidebar.active_plan.as_ref().map(|p| p.steps.len()).unwrap_or(0)
+    }
+
+    /// Reject the pending plan
+    pub fn reject_plan(&mut self) {
+        if let Some(tx) = self.plan_approval_tx.take() {
+            let _ = tx.send(false);
+        }
+        self.plan_approval_visible = false;
+        self.pending_approval_plan = None;
+        self.needs_redraw = true;
+    }
+
+    /// Set the approval sender (called when session starts plan approval)
+    pub fn set_plan_approval_tx(&mut self, tx: tokio::sync::mpsc::UnboundedSender<bool>) {
+        self.plan_approval_tx = Some(tx);
+    }
+
+    /// Check if plan approval popup is visible
+    pub fn is_plan_approval_visible(&self) -> bool {
+        self.plan_approval_visible
     }
 
     /// Update token usage in sidebar
@@ -1138,6 +1922,11 @@ impl ShellTuiApp {
 
     /// Check if input looks like a shell command (starts with common commands or contains shell operators)
     pub fn looks_like_shell_command(input: &str) -> bool {
+        // Never treat slash commands as shell commands
+        if input.trim().starts_with('/') {
+            return false;
+        }
+
         let first_word = input.split_whitespace().next().unwrap_or("");
 
         // Common shell commands
@@ -1197,7 +1986,12 @@ impl ShellTuiApp {
             "help" => Some(SlashCommand::Help),
             "tools" => Some(SlashCommand::Tools),
             "mode" => Some(SlashCommand::Mode),
+            "agent" => Some(SlashCommand::Agent),
             "commands" => Some(SlashCommand::Commands),
+            "models" => Some(SlashCommand::Models),
+            "provider" => Some(SlashCommand::Provider(args)),
+            "model" => Some(SlashCommand::Model(args)),
+            "login" => Some(SlashCommand::Login(args)),
             _ => None,
         }
     }
@@ -1236,6 +2030,16 @@ pub enum SlashCommand {
     Tools,
     /// Show/toggle permission mode
     Mode,
+    /// Show/toggle agent mode (PLAN/BUILD)
+    Agent,
     /// Show commands reference
     Commands,
+    /// List available models for current provider
+    Models,
+    /// Switch or show current provider
+    Provider(Option<String>),
+    /// Switch or show current model
+    Model(Option<String>),
+    /// Login to a provider
+    Login(Option<String>),
 }

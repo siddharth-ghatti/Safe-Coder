@@ -146,7 +146,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     if app.is_thinking {
         let dots = ".".repeat((app.animation_frame / 10) % 4);
         let thinking_text = if app.processing_message.is_empty() {
-            format!("thinking{}", dots)
+            format!("{}{}", app.spinner.current(), dots)
         } else {
             format!("{}{}", app.processing_message.to_lowercase(), dots)
         };

@@ -66,7 +66,7 @@ impl DeviceFlowAuth for GitHubCopilotAuth {
     async fn start_device_flow(&self) -> Result<DeviceCodeResponse> {
         let request = DeviceCodeRequest {
             client_id: GITHUB_CLIENT_ID.to_string(),
-            scope: "read:user".to_string(),
+            scope: "read:user copilot".to_string(),
         };
 
         let response = self

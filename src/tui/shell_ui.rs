@@ -21,10 +21,11 @@ use similar::{ChangeTag, TextDiff};
 use textwrap::wrap;
 
 use super::file_picker::FilePicker;
+use super::markdown::{has_markdown, parse_inline_markdown, render_markdown_lines};
 use super::shell_app::{
     BlockOutput, BlockType, CommandBlock, FileDiff, PermissionMode, ShellTuiApp,
 };
-use super::sidebar::PlanStepDisplay;
+use super::sidebar::{PlanStepDisplay, ToolStepStatus};
 use crate::planning::PlanStepStatus;
 
 // ============================================================================
@@ -106,12 +107,22 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
         draw_file_picker_popup(f, app, size);
     }
 
+    // Command autocomplete popup (for slash commands)
+    if app.command_autocomplete.visible && !app.command_autocomplete.suggestions.is_empty() {
+        draw_command_autocomplete_popup(f, app, size);
+    }
+
     if app.autocomplete.visible && !app.autocomplete.suggestions.is_empty() {
         draw_autocomplete_popup(f, app, size);
     }
 
     if app.commands_modal_visible {
         draw_commands_modal(f, app, size);
+    }
+
+    // Plan approval popup (highest priority)
+    if app.plan_approval_visible {
+        draw_plan_approval_popup(f, app, size);
     }
 }
 
@@ -163,27 +174,52 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
     }
 
     let content_width = area.width.saturating_sub(4) as usize;
+    let max_visible = area.height as usize;
 
-    // Build all rendered lines
-    let mut all_lines: Vec<MessageLine> = Vec::new();
+    // Performance optimization: Only process recent blocks when at bottom (common case)
+    // When scrolled up, we need to process more blocks
+    let blocks_to_process = if app.scroll_offset == 0 {
+        // At bottom: only process last ~10 blocks (usually enough for viewport)
+        app.blocks.len().min(15)
+    } else {
+        // Scrolled up: process more blocks based on scroll offset
+        let estimated_blocks_needed = (app.scroll_offset / 10) + 15;
+        app.blocks.len().min(estimated_blocks_needed)
+    };
 
-    for block in &app.blocks {
-        render_block(&mut all_lines, block, content_width, app.animation_frame);
-        all_lines.push(MessageLine::Empty); // Gap between blocks
+    let start_block = app.blocks.len().saturating_sub(blocks_to_process);
+
+    // Estimate lines for blocks we're skipping (for scrollbar accuracy)
+    let skipped_lines: usize = app
+        .blocks
+        .iter()
+        .take(start_block)
+        .map(|b| estimate_block_line_count(b))
+        .sum();
+
+    // Build rendered lines for visible portion
+    let mut all_lines: Vec<MessageLine> = Vec::with_capacity(max_visible * 3);
+
+    let spinner_word = app.spinner.current();
+    for block in app.blocks.iter().skip(start_block) {
+        render_block(&mut all_lines, block, content_width, app.animation_frame, &app.model_display, spinner_word);
+        all_lines.push(MessageLine::Empty);
     }
 
-    // Calculate visible portion (auto-scroll to bottom)
-    let max_visible = area.height as usize;
-    let total_lines = all_lines.len();
+    // Total includes skipped + rendered
+    let total_lines = skipped_lines + all_lines.len();
 
-    let visible_start = if total_lines > max_visible {
-        total_lines
+    // Calculate visible window
+    let effective_scroll = app.scroll_offset.saturating_sub(skipped_lines);
+    let visible_start = if all_lines.len() > max_visible {
+        all_lines
+            .len()
             .saturating_sub(max_visible)
-            .saturating_sub(app.scroll_offset)
+            .saturating_sub(effective_scroll)
     } else {
         0
     };
-    let visible_end = (visible_start + max_visible).min(total_lines);
+    let visible_end = (visible_start + max_visible).min(all_lines.len());
 
     // Render visible lines
     let items: Vec<ListItem> = all_lines
@@ -222,6 +258,19 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
 
         f.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
     }
+}
+
+/// Fast line count estimate for a block (avoids full rendering)
+#[inline]
+fn estimate_block_line_count(block: &CommandBlock) -> usize {
+    let base = match &block.output {
+        BlockOutput::Streaming { lines, .. } => lines.len().min(25),
+        BlockOutput::Success(text) => text.lines().count().min(25),
+        BlockOutput::Error { .. } => 3,
+        BlockOutput::Pending => 1,
+    };
+    let children: usize = block.children.iter().map(estimate_block_line_count).sum();
+    base + children + 3 // +3 for headers/gaps
 }
 
 // ============================================================================
@@ -278,6 +327,10 @@ enum MessageLine {
     Running {
         text: String,
         spinner_frame: usize,
+    },
+    // Markdown-rendered line with border
+    AiMarkdownLine {
+        spans: Vec<Span<'static>>,
     },
 }
 
@@ -388,6 +441,12 @@ impl MessageLine {
                     Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
                 ])
             }
+
+            MessageLine::AiMarkdownLine { spans } => {
+                let mut line_spans = vec![Span::styled("│ ", Style::default().fg(BORDER_ACCENT))];
+                line_spans.extend(spans.clone());
+                Line::from(line_spans)
+            }
         }
     }
 }
@@ -396,7 +455,7 @@ impl MessageLine {
 // Block Rendering
 // ============================================================================
 
-fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize) {
+fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize, model_display: &str, spinner_word: &str) {
     match &block.block_type {
         BlockType::SystemMessage => {
             for line in block.output.get_text().lines() {
@@ -435,44 +494,92 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                 });
             }
 
-            if block.is_running() && block.children.is_empty() && block.output.get_text().is_empty()
-            {
+            // Show status while running - use rotating cool words
+            let is_running = block.is_running();
+            let has_children = !block.children.is_empty();
+            let has_output = !block.output.get_text().is_empty();
+
+            if is_running && !has_children && !has_output {
+                // Initial thinking state - show the rotating word
                 lines.push(MessageLine::Running {
-                    text: "Thinking...".to_string(),
+                    text: format!("{}...", spinner_word),
                     spinner_frame: frame,
                 });
             }
 
             // Render children (tools, reasoning)
-            for child in &block.children {
-                render_child_block(lines, child, width, frame);
+            // Find the last running child to only show spinner for that one
+            let last_running_idx = block.children.iter().rposition(|c| c.is_running());
+            for (i, child) in block.children.iter().enumerate() {
+                let show_spinner = last_running_idx == Some(i);
+                render_child_block(lines, child, width, frame, false, show_spinner);
             }
 
-            // Final AI response
+            // Show status after tools complete but still processing
+            // This keeps feedback visible between tool calls
+            if is_running && has_children && !has_output {
+                let all_children_done = block.children.iter().all(|c| !c.is_running());
+                if all_children_done {
+                    lines.push(MessageLine::Running {
+                        text: format!("{}...", spinner_word),
+                        spinner_frame: frame,
+                    });
+                }
+            }
+
+            // Final AI response - render with markdown if detected
             let text = block.output.get_text();
             if !text.is_empty() {
                 lines.push(MessageLine::Empty);
                 lines.push(MessageLine::BlockStart);
 
-                let output_lines: Vec<&str> = text.lines().collect();
-                let total = output_lines.len();
+                if has_markdown(&text) {
+                    // Use full markdown rendering for complex content
+                    let md_lines = render_markdown_lines(&text);
+                    let total = md_lines.len();
 
-                for (i, line) in output_lines.iter().enumerate() {
-                    for wrapped in wrap(line, width.saturating_sub(4)) {
+                    for (i, md_line) in md_lines.into_iter().enumerate() {
                         let is_last = i == total - 1;
-                        lines.push(MessageLine::AiText {
-                            text: wrapped.to_string(),
-                            model: if is_last {
-                                Some("claude-sonnet-4".to_string())
-                            } else {
-                                None
-                            },
-                            timestamp: if is_last {
-                                Some(chrono::Local::now().format("%I:%M %p").to_string())
-                            } else {
-                                None
-                            },
-                        });
+                        if is_last {
+                            // Add model/timestamp info on last line
+                            let mut spans: Vec<Span<'static>> = md_line.spans;
+                            spans.push(Span::styled(
+                                format!(
+                                    "  {} ({})",
+                                    shorten_model_name(model_display),
+                                    chrono::Local::now().format("%I:%M %p")
+                                ),
+                                Style::default().fg(TEXT_DIM),
+                            ));
+                            lines.push(MessageLine::AiMarkdownLine { spans });
+                        } else {
+                            lines.push(MessageLine::AiMarkdownLine {
+                                spans: md_line.spans,
+                            });
+                        }
+                    }
+                } else {
+                    // Plain text fallback for simple content
+                    let output_lines: Vec<&str> = text.lines().collect();
+                    let total = output_lines.len();
+
+                    for (i, line) in output_lines.iter().enumerate() {
+                        for wrapped in wrap(line, width.saturating_sub(4)) {
+                            let is_last = i == total - 1;
+                            lines.push(MessageLine::AiText {
+                                text: wrapped.to_string(),
+                                model: if is_last {
+                                    Some(shorten_model_name(model_display))
+                                } else {
+                                    None
+                                },
+                                timestamp: if is_last {
+                                    Some(chrono::Local::now().format("%I:%M %p").to_string())
+                                } else {
+                                    None
+                                },
+                            });
+                        }
                     }
                 }
             }
@@ -483,26 +590,42 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
                 text: format!("orchestrate: {}", block.input),
             });
 
-            render_output(lines, &block.output, width);
+            // Use unthrottled output for orchestration - show all output continuously
+            render_output_unthrottled(lines, &block.output, width);
 
-            for child in &block.children {
-                render_child_block(lines, child, width, frame);
+            // Find the last running child to only show spinner for that one
+            let last_running_idx = block.children.iter().rposition(|c| c.is_running());
+            for (i, child) in block.children.iter().enumerate() {
+                let show_spinner = last_running_idx == Some(i);
+                // Pass unthrottled=true for orchestration child blocks
+                render_child_block(lines, child, width, frame, true, show_spinner);
             }
         }
 
         BlockType::AiToolExecution { .. } => {
-            render_child_block(lines, block, width, frame);
+            // For standalone tool execution blocks, always show spinner if running
+            render_child_block(lines, block, width, frame, false, block.is_running());
         }
 
         BlockType::AiReasoning => {
             let text = block.output.get_text();
-            for line in text.lines() {
-                for wrapped in wrap(line, width.saturating_sub(4)) {
-                    lines.push(MessageLine::AiText {
-                        text: wrapped.to_string(),
-                        model: None,
-                        timestamp: None,
+            if has_markdown(&text) {
+                // Render with markdown formatting
+                for md_line in render_markdown_lines(&text) {
+                    lines.push(MessageLine::AiMarkdownLine {
+                        spans: md_line.spans,
                     });
+                }
+            } else {
+                // Plain text fallback
+                for line in text.lines() {
+                    for wrapped in wrap(line, width.saturating_sub(4)) {
+                        lines.push(MessageLine::AiText {
+                            text: wrapped.to_string(),
+                            model: None,
+                            timestamp: None,
+                        });
+                    }
                 }
             }
         }
@@ -515,8 +638,11 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
 
             render_output(lines, &block.output, width);
 
-            for child in &block.children {
-                render_child_block(lines, child, width, frame);
+            // Find the last running child to only show spinner for that one
+            let last_running_idx = block.children.iter().rposition(|c| c.is_running());
+            for (i, child) in block.children.iter().enumerate() {
+                let show_spinner = last_running_idx == Some(i);
+                render_child_block(lines, child, width, frame, false, show_spinner);
             }
         }
     }
@@ -527,6 +653,8 @@ fn render_child_block(
     block: &CommandBlock,
     width: usize,
     frame: usize,
+    unthrottled: bool,
+    show_spinner: bool, // Only show spinner for the last running block
 ) {
     match &block.block_type {
         BlockType::AiToolExecution { tool_name } => {
@@ -557,7 +685,8 @@ fn render_child_block(
                 target,
             });
 
-            if block.is_running() {
+            // Only show spinner if this is the last running block
+            if block.is_running() && show_spinner {
                 lines.push(MessageLine::Running {
                     text: "Executing...".to_string(),
                     spinner_frame: frame,
@@ -571,7 +700,7 @@ fn render_child_block(
                 || tool_name.starts_with("task-")
                 || tool_name.starts_with("subagent:")
             {
-                render_tool_output(lines, &block.output, width);
+                render_tool_output(lines, &block.output, width, unthrottled);
             }
         }
 
@@ -579,13 +708,23 @@ fn render_child_block(
             let text = block.output.get_text();
             if !text.is_empty() {
                 lines.push(MessageLine::Empty);
-                for line in text.lines() {
-                    for wrapped in wrap(line, width.saturating_sub(4)) {
-                        lines.push(MessageLine::AiText {
-                            text: wrapped.to_string(),
-                            model: None,
-                            timestamp: None,
+                if has_markdown(&text) {
+                    // Render with markdown formatting
+                    for md_line in render_markdown_lines(&text) {
+                        lines.push(MessageLine::AiMarkdownLine {
+                            spans: md_line.spans,
                         });
+                    }
+                } else {
+                    // Plain text fallback
+                    for line in text.lines() {
+                        for wrapped in wrap(line, width.saturating_sub(4)) {
+                            lines.push(MessageLine::AiText {
+                                text: wrapped.to_string(),
+                                model: None,
+                                timestamp: None,
+                            });
+                        }
                     }
                 }
             }
@@ -596,36 +735,53 @@ fn render_child_block(
 }
 
 fn render_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+    render_output_with_limit(lines, output, width, Some(20))
+}
+
+/// Render output without any line limit (for orchestration, continuous streaming)
+fn render_output_unthrottled(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+    render_output_with_limit(lines, output, width, None)
+}
+
+/// Render output with configurable line limit (None = unlimited)
+fn render_output_with_limit(
+    lines: &mut Vec<MessageLine>,
+    output: &BlockOutput,
+    width: usize,
+    max_lines: Option<usize>,
+) {
     match output {
         BlockOutput::Streaming {
             lines: output_lines,
             ..
         } => {
-            for line in output_lines.iter().take(20) {
+            // For unlimited (None), show all lines; for limited, show last N lines
+            let skip_count = match max_lines {
+                Some(limit) if output_lines.len() > limit => output_lines.len() - limit,
+                _ => 0,
+            };
+
+            for line in output_lines.iter().skip(skip_count) {
                 for wrapped in wrap(line, width.saturating_sub(4)) {
                     lines.push(MessageLine::ShellOutput {
                         text: wrapped.to_string(),
                     });
                 }
-            }
-            if output_lines.len() > 20 {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("... {} more lines", output_lines.len() - 20),
-                });
             }
         }
         BlockOutput::Success(text) if !text.is_empty() => {
-            for line in text.lines().take(20) {
+            let text_lines: Vec<&str> = text.lines().collect();
+            let skip_count = match max_lines {
+                Some(limit) if text_lines.len() > limit => text_lines.len() - limit,
+                _ => 0,
+            };
+
+            for line in text_lines.iter().skip(skip_count) {
                 for wrapped in wrap(line, width.saturating_sub(4)) {
                     lines.push(MessageLine::ShellOutput {
                         text: wrapped.to_string(),
                     });
                 }
-            }
-            if text.lines().count() > 20 {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("... {} more lines", text.lines().count() - 20),
-                });
             }
         }
         BlockOutput::Error { message, .. } => {
@@ -637,41 +793,69 @@ fn render_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usiz
     }
 }
 
-fn render_tool_output(lines: &mut Vec<MessageLine>, output: &BlockOutput, width: usize) {
+fn render_tool_output(
+    lines: &mut Vec<MessageLine>,
+    output: &BlockOutput,
+    width: usize,
+    unthrottled: bool,
+) {
     match output {
         BlockOutput::Streaming {
             lines: output_lines,
             ..
         } => {
-            // Show more lines for subagent streaming output
-            let max_lines = 50;
-            for line in output_lines.iter().take(max_lines) {
-                for wrapped in wrap(line, width.saturating_sub(14)) {
-                    lines.push(MessageLine::ShellOutput {
-                        text: format!("  {}", wrapped),
-                    });
+            if unthrottled {
+                // Show all lines for orchestration mode
+                for line in output_lines.iter() {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
                 }
-            }
-            if output_lines.len() > max_lines {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("  ... {} more lines", output_lines.len() - max_lines),
-                });
+            } else {
+                // Throttled mode - show last N lines
+                let max_lines = 50;
+                let skip_count = if output_lines.len() > max_lines {
+                    output_lines.len() - max_lines
+                } else {
+                    0
+                };
+                for line in output_lines.iter().skip(skip_count) {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
+                }
             }
         }
         BlockOutput::Success(text) if !text.is_empty() => {
-            let max_lines = 30;
             let text_lines: Vec<&str> = text.lines().collect();
-            for line in text_lines.iter().take(max_lines) {
-                for wrapped in wrap(line, width.saturating_sub(14)) {
-                    lines.push(MessageLine::ShellOutput {
-                        text: format!("  {}", wrapped),
-                    });
+            if unthrottled {
+                // Show all lines for orchestration mode
+                for line in text_lines.iter() {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
                 }
-            }
-            if text_lines.len() > max_lines {
-                lines.push(MessageLine::ShellOutput {
-                    text: format!("  ... {} more lines", text_lines.len() - max_lines),
-                });
+            } else {
+                // Throttled mode - show last N lines
+                let max_lines = 30;
+                let skip_count = if text_lines.len() > max_lines {
+                    text_lines.len() - max_lines
+                } else {
+                    0
+                };
+                for line in text_lines.iter().skip(skip_count) {
+                    for wrapped in wrap(line, width.saturating_sub(14)) {
+                        lines.push(MessageLine::ShellOutput {
+                            text: format!("  {}", wrapped),
+                        });
+                    }
+                }
             }
         }
         _ => {}
@@ -750,6 +934,30 @@ fn render_diff_opencode(lines: &mut Vec<MessageLine>, diff: &FileDiff, _width: u
 // Input Hints (above input)
 // ============================================================================
 
+/// Shorten model name for display (e.g., "claude-sonnet-4-20250514" -> "claude-sonnet-4")
+fn shorten_model_name(model: &str) -> String {
+    // Handle common patterns
+    if model.contains("claude") {
+        // claude-sonnet-4-20250514 -> claude-sonnet-4
+        // claude-3-5-sonnet-20241022 -> claude-3.5-sonnet
+        if let Some(pos) = model.rfind("-20") {
+            return model[..pos].to_string();
+        }
+    }
+    if model.contains("/") {
+        // anthropic/claude-3.5-sonnet -> claude-3.5-sonnet
+        if let Some(pos) = model.rfind('/') {
+            return model[pos + 1..].to_string();
+        }
+    }
+    // Default: just return as-is, but limit length
+    if model.len() > 25 {
+        format!("{}...", &model[..22])
+    } else {
+        model.to_string()
+    }
+}
+
 fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Show key commands on the left, model on the right
     // Format: "/help  /undo  /redo  /compact  @file  !cmd                    model"
@@ -772,11 +980,12 @@ fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         }
     }
 
-    // Model name on the right
+    // Model name on the right - use actual configured model
     let model_name = if app.ai_connected {
-        "claude-sonnet-4"
+        // Shorten model name for display
+        shorten_model_name(&app.model_display)
     } else {
-        "disconnected"
+        "disconnected".to_string()
     };
 
     // Calculate left side length
@@ -787,7 +996,7 @@ fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         .saturating_sub(left_len as u16 + right_len as u16 + 2) as usize;
 
     spans.push(Span::styled(" ".repeat(padding.max(1)), Style::default()));
-    spans.push(Span::styled(model_name, Style::default().fg(TEXT_DIM)));
+    spans.push(Span::styled(&model_name, Style::default().fg(TEXT_DIM)));
     spans.push(Span::styled(" ", Style::default()));
 
     let line = Line::from(spans);
@@ -993,9 +1202,10 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         (modified_count.min(5) + 2) as u16 // Header + files (max 5) + potential overflow
     };
 
-    // Sidebar sections: [TASK] [CONTEXT] [FILES] [PLAN] [LSP]
+    // Sidebar sections: [TASK] [MODE] [CONTEXT] [FILES] [PLAN] [LSP]
     let sections = Layout::vertical([
         Constraint::Length(4),               // TASK section
+        Constraint::Length(3),               // MODE (agent mode)
         Constraint::Length(3),               // CONTEXT (token usage)
         Constraint::Length(modified_height), // FILES (modified files)
         Constraint::Min(6),                  // PLAN (variable height)
@@ -1004,10 +1214,11 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     .split(inner);
 
     draw_sidebar_task(f, app, sections[0]);
-    draw_sidebar_context(f, app, sections[1]);
-    draw_sidebar_files(f, app, sections[2]);
-    draw_sidebar_plan(f, app, sections[3]);
-    draw_sidebar_lsp(f, app, sections[4]);
+    draw_sidebar_mode(f, app, sections[1]);
+    draw_sidebar_context(f, app, sections[2]);
+    draw_sidebar_files(f, app, sections[3]);
+    draw_sidebar_plan(f, app, sections[4]);
+    draw_sidebar_lsp(f, app, sections[5]);
 }
 
 fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
@@ -1062,6 +1273,42 @@ fn draw_sidebar_task(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             )));
         }
     }
+
+    let para = Paragraph::new(lines);
+    f.render_widget(para, area);
+}
+
+fn draw_sidebar_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let mut lines = vec![Line::from(Span::styled(
+        " MODE",
+        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+    ))];
+
+    let mode = app.agent_mode.short_name();
+    let description = app.agent_mode.description();
+
+    // Color based on mode
+    let mode_color = match mode {
+        "BUILD" => ACCENT_GREEN,
+        "PLAN" => ACCENT_CYAN,
+        _ => TEXT_PRIMARY,
+    };
+
+    // Mode display with color
+    lines.push(Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(
+            format!("{}", mode),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                " - {}",
+                description.split('.').next().unwrap_or(description)
+            ),
+            Style::default().fg(TEXT_SECONDARY),
+        ),
+    ]));
 
     let para = Paragraph::new(lines);
     f.render_widget(para, area);
@@ -1178,156 +1425,228 @@ fn draw_sidebar_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 }
 
 fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    // Check if we're in build mode to show tool steps instead of todo plan
+    // Check if we're in build mode
     let show_tool_steps = app.agent_mode == crate::tools::AgentMode::Build;
+    let is_thinking = app.ai_thinking;
 
+    // 1. ACTIVE PLAN (High Priority)
+    // If there is an active plan (agent executing), show it.
+    // In Build Mode, we prioritize this over the combined view if it exists.
+    if show_tool_steps && app.sidebar.active_plan.is_some() {
+        draw_active_plan(f, app, area);
+        return;
+    }
+
+    // 2. COMBINED VIEW (Build Mode)
+    // Show Todo List AND Tool Steps if both exist
+    if show_tool_steps {
+        let has_todos = app
+            .sidebar
+            .todo_plan
+            .as_ref()
+            .map(|p| !p.items.is_empty())
+            .unwrap_or(false);
+        let has_steps = !app.sidebar.tool_steps.is_empty();
+
+        if has_todos && has_steps {
+            // Split area: 50% for Todos (Top), 50% for Steps (Bottom)
+            let chunks = Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+
+            draw_todo_list_section(f, app, chunks[0], " TASKS");
+            draw_tool_steps_section(f, app, chunks[1], " STEPS");
+        } else if has_todos {
+            draw_todo_list_section(f, app, area, " TASKS");
+        } else if has_steps {
+            draw_tool_steps_section(f, app, area, " STEPS");
+        } else {
+            // Empty state
+            draw_empty_state(f, " TASKS & STEPS", area);
+        }
+        return;
+    }
+
+    // 3. PLAN MODE (Standard View)
+    // Show Todo List (Plan)
+    if let Some(ref _todo_plan) = app.sidebar.todo_plan {
+        draw_todo_list_section(f, app, area, " PLAN");
+    } else if is_thinking {
+        draw_thinking(f, app, area, " PLAN");
+    } else {
+        draw_empty_state(f, " PLAN", area);
+    }
+}
+
+fn draw_active_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let mut lines = vec![Line::from(Span::styled(
-        if show_tool_steps { " STEPS" } else { " PLAN" },
+        " PLAN",
         Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
     ))];
 
-    // In build mode, show tool execution steps
-    if show_tool_steps && !app.sidebar.tool_steps.is_empty() {
-        let tool_steps = &app.sidebar.tool_steps;
+    let active_plan = app.sidebar.active_plan.as_ref().unwrap();
 
-        // Show progress bar based on completed vs total tool steps
-        let completed_count = app.sidebar.completed_tool_steps();
-        let total_count = tool_steps.len();
-        let percent = if total_count > 0 {
-            (completed_count as f32 / total_count as f32) * 100.0
+    // Progress bar
+    let percent = active_plan.progress_percent();
+    let bar_width = area.width.saturating_sub(4) as usize;
+    let filled = ((percent / 100.0) * bar_width as f32) as usize;
+    let empty = bar_width.saturating_sub(filled);
+
+    lines.push(Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+        Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+    ]));
+
+    // Step count
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {}/{} steps",
+            active_plan.completed_count(),
+            active_plan.steps.len()
+        ),
+        Style::default().fg(TEXT_SECONDARY),
+    )));
+
+    if active_plan.awaiting_approval {
+        lines.push(Line::from(Span::styled(
+            " ⏸ Awaiting approval",
+            Style::default().fg(ACCENT_YELLOW),
+        )));
+    }
+
+    // Visible steps logic
+    let max_items = area.height.saturating_sub(5) as usize;
+    let total_steps = active_plan.steps.len();
+    let in_progress_idx = active_plan.current_step_idx;
+
+    let scroll_start = if let Some(idx) = in_progress_idx {
+        if total_steps <= max_items {
+            0
+        } else if idx < max_items / 2 {
+            0
+        } else if idx > total_steps - max_items / 2 {
+            total_steps.saturating_sub(max_items)
         } else {
-            0.0
+            idx.saturating_sub(max_items / 2)
+        }
+    } else {
+        0
+    };
+
+    let visible_steps: Vec<&PlanStepDisplay> = active_plan
+        .steps
+        .iter()
+        .skip(scroll_start)
+        .take(max_items)
+        .collect();
+
+    if scroll_start > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" ↑ {} more above", scroll_start),
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    for step in visible_steps.iter() {
+        let (icon, icon_color) = match step.status {
+            PlanStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+            PlanStepStatus::InProgress => {
+                let spinner_chars = ["◐", "◓", "◑", "◒"];
+                let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                (spinner.to_string(), ACCENT_CYAN)
+            }
+            PlanStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
+            PlanStepStatus::Skipped => ("⊘".to_string(), TEXT_DIM),
+            PlanStepStatus::Pending => ("◯".to_string(), TEXT_DIM),
         };
 
-        let bar_width = area.width.saturating_sub(4) as usize;
-        let filled = ((percent / 100.0) * bar_width as f32) as usize;
-        let empty = bar_width.saturating_sub(filled);
+        let max_len = area.width.saturating_sub(5) as usize;
+        let desc = if step.description.len() > max_len {
+            format!("{}...", &step.description[..max_len.saturating_sub(3)])
+        } else {
+            step.description.clone()
+        };
+
+        let desc_style = match step.status {
+            PlanStepStatus::InProgress => Style::default().fg(TEXT_PRIMARY),
+            PlanStepStatus::Completed => Style::default().fg(TEXT_DIM),
+            PlanStepStatus::Failed => Style::default().fg(ACCENT_RED),
+            _ => Style::default().fg(TEXT_SECONDARY),
+        };
 
         lines.push(Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
-            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+            Span::styled(desc, desc_style),
         ]));
+    }
 
-        // Show step count
-        let progress = format!(" {}/{} tools", completed_count, total_count);
+    // Bottom scroll
+    let items_below = total_steps.saturating_sub(scroll_start + visible_steps.len());
+    if items_below > 0 {
         lines.push(Line::from(Span::styled(
-            progress,
-            Style::default().fg(TEXT_SECONDARY),
+            format!(" ↓ {} more below", items_below),
+            Style::default().fg(TEXT_MUTED),
         )));
+    }
 
-        // Show recent tool steps (max items based on available height)
-        let max_items = area.height.saturating_sub(4) as usize;
-        let scroll_offset = app.sidebar.tool_steps_scroll_offset;
-        let total_steps = tool_steps.len();
+    f.render_widget(Paragraph::new(lines), area);
+}
 
-        // Calculate visible range with scroll offset
-        let visible_steps: Vec<_> = tool_steps
-            .iter()
-            .rev() // Show most recent first (index 0 in reversed list is most recent)
-            .skip(scroll_offset)
-            .take(max_items)
-            .collect();
+fn draw_todo_list_section(f: &mut Frame, app: &ShellTuiApp, area: Rect, title: &str) {
+    if let Some(ref todo_plan) = app.sidebar.todo_plan {
+        let mut lines = Vec::new();
+        // Use compact mode if height is small (e.g. when split view is active)
+        let is_compact = area.height < 8;
 
-        // Show scroll indicator at top if scrolled down (showing older items)
-        if scroll_offset > 0 {
+        if is_compact {
             lines.push(Line::from(Span::styled(
                 format!(
-                    " ↑ {} newer steps (Alt+↑ to scroll)",
-                    scroll_offset.min(total_steps)
+                    "{} ({}/{})",
+                    title,
+                    todo_plan.completed_count(),
+                    todo_plan.items.len()
                 ),
-                Style::default().fg(TEXT_MUTED),
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
             )));
-        }
+        } else {
+            lines.push(Line::from(Span::styled(
+                title,
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+            )));
 
-        for step in visible_steps.iter() {
-            // Use animated spinner for running steps
-            let (icon, icon_color) = match step.status {
-                crate::tui::sidebar::ToolStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
-                crate::tui::sidebar::ToolStepStatus::Running => {
-                    let spinner_chars = ["◐", "◓", "◑", "◒"];
-                    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
-                    (spinner.to_string(), ACCENT_CYAN)
-                }
-                crate::tui::sidebar::ToolStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
-            };
-
-            // Format tool name and description
-            let display_text = if step.description.is_empty() {
-                step.tool_name.clone()
-            } else {
-                format!("{}: {}", step.tool_name, step.description)
-            };
-
-            // Truncate if too long
-            let max_len = area.width.saturating_sub(5) as usize;
-            let desc = if display_text.len() > max_len {
-                format!("{}...", &display_text[..max_len.saturating_sub(3)])
-            } else {
-                display_text
-            };
-
-            // Style based on status
-            let desc_style = match step.status {
-                crate::tui::sidebar::ToolStepStatus::Running => Style::default().fg(TEXT_PRIMARY),
-                crate::tui::sidebar::ToolStepStatus::Completed => Style::default().fg(TEXT_DIM),
-                crate::tui::sidebar::ToolStepStatus::Failed => Style::default().fg(ACCENT_RED),
-            };
+            let percent = todo_plan.progress_percent();
+            let bar_width = area.width.saturating_sub(4) as usize;
+            let filled = ((percent / 100.0) * bar_width as f32) as usize;
+            let empty = bar_width.saturating_sub(filled);
 
             lines.push(Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
-                Span::styled(desc, desc_style),
+                Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+                Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
             ]));
-        }
 
-        // Show scroll indicator at bottom if there are more older steps
-        let items_below = total_steps.saturating_sub(scroll_offset + visible_steps.len());
-        if items_below > 0 {
             lines.push(Line::from(Span::styled(
-                format!(" ↓ {} older steps (Alt+↓ to scroll)", items_below),
-                Style::default().fg(TEXT_MUTED),
+                format!(
+                    " {}/{} tasks",
+                    todo_plan.completed_count(),
+                    todo_plan.items.len()
+                ),
+                Style::default().fg(TEXT_SECONDARY),
             )));
         }
-    }
-    // In plan mode or when no tool steps, show todo plan if available
-    else if let Some(ref todo_plan) = app.sidebar.todo_plan {
-        // Show progress bar
-        let percent = todo_plan.progress_percent();
-        let bar_width = area.width.saturating_sub(4) as usize;
-        let filled = ((percent / 100.0) * bar_width as f32) as usize;
-        let empty = bar_width.saturating_sub(filled);
 
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
-            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
-        ]));
-
-        // Show item count
-        let progress = format!(
-            " {}/{} tasks",
-            todo_plan.completed_count(),
-            todo_plan.items.len()
-        );
-        lines.push(Line::from(Span::styled(
-            progress,
-            Style::default().fg(TEXT_SECONDARY),
-        )));
-
-        // Calculate visible items - scroll to show in_progress item or most recent
-        let max_items = area.height.saturating_sub(4) as usize;
+        let header_height = if is_compact { 1 } else { 3 };
+        let max_items = area.height.saturating_sub(header_height + 1) as usize; // +1 for scroll indicator
         let total_items = todo_plan.items.len();
-
-        // Find the in_progress item index, or default to showing from the end
         let in_progress_idx = todo_plan
             .items
             .iter()
             .position(|i| i.status == "in_progress");
 
-        // Calculate scroll offset to keep in_progress item visible, or show latest items
         let scroll_start = if let Some(idx) = in_progress_idx {
-            // Center the in-progress item if possible
             if total_items <= max_items {
                 0
             } else if idx < max_items / 2 {
@@ -1338,7 +1657,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 idx.saturating_sub(max_items / 2)
             }
         } else {
-            // No in-progress item, show from start (completed items first)
             0
         };
 
@@ -1349,7 +1667,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             .take(max_items)
             .collect();
 
-        // Show scroll indicator at top if needed
         if scroll_start > 0 {
             lines.push(Line::from(Span::styled(
                 format!(" ↑ {} more above", scroll_start),
@@ -1357,9 +1674,7 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             )));
         }
 
-        // Show each visible todo item with status icon
         for item in visible_items.iter() {
-            // Use animated spinner for in-progress items
             let (icon, icon_color) = match item.status.as_str() {
                 "completed" => ("✓".to_string(), ACCENT_GREEN),
                 "in_progress" => {
@@ -1371,7 +1686,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 _ => ("?".to_string(), TEXT_MUTED),
             };
 
-            // Truncate item content
             let max_len = area.width.saturating_sub(5) as usize;
             let desc = if item.content.len() > max_len {
                 format!("{}...", &item.content[..max_len.saturating_sub(3)])
@@ -1379,7 +1693,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 item.content.clone()
             };
 
-            // Highlight in-progress item, dim completed items
             let desc_style = match item.status.as_str() {
                 "in_progress" => Style::default().fg(TEXT_PRIMARY),
                 "completed" => Style::default().fg(TEXT_DIM),
@@ -1393,7 +1706,6 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             ]));
         }
 
-        // Show scroll indicator at bottom if needed
         let items_below = total_items.saturating_sub(scroll_start + visible_items.len());
         if items_below > 0 {
             lines.push(Line::from(Span::styled(
@@ -1401,28 +1713,145 @@ fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
                 Style::default().fg(TEXT_MUTED),
             )));
         }
-    } else if app.ai_thinking {
-        // Show thinking spinner when AI is processing
-        let spinner_chars = ["◐", "◓", "◑", "◒"];
-        let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
-            Span::styled("Thinking...", Style::default().fg(TEXT_SECONDARY)),
-        ]));
+
+        f.render_widget(Paragraph::new(lines), area);
+    }
+}
+
+fn draw_tool_steps_section(f: &mut Frame, app: &ShellTuiApp, area: Rect, title: &str) {
+    let tool_steps = &app.sidebar.tool_steps;
+    let completed_count = app.sidebar.completed_tool_steps();
+    let total_count = tool_steps.len();
+
+    let mut lines = Vec::new();
+    let is_compact = area.height < 8;
+
+    if is_compact {
+        lines.push(Line::from(Span::styled(
+            format!("{} ({}/{})", title, completed_count, total_count),
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )));
     } else {
         lines.push(Line::from(Span::styled(
-            if show_tool_steps {
-                " No steps"
-            } else {
-                " No tasks"
-            },
+            title,
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )));
+
+        let percent = if total_count > 0 {
+            (completed_count as f32 / total_count as f32) * 100.0
+        } else {
+            0.0
+        };
+        let bar_width = area.width.saturating_sub(4) as usize;
+        let filled = ((percent / 100.0) * bar_width as f32) as usize;
+        let empty = bar_width.saturating_sub(filled);
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("█".repeat(filled), Style::default().fg(ACCENT_GREEN)),
+            Span::styled("░".repeat(empty), Style::default().fg(TEXT_MUTED)),
+        ]));
+
+        lines.push(Line::from(Span::styled(
+            format!(" {}/{} tools", completed_count, total_count),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    }
+
+    let header_height = if is_compact { 1 } else { 3 };
+    let max_items = area.height.saturating_sub(header_height + 1) as usize;
+    let scroll_offset = app.sidebar.tool_steps_scroll_offset;
+
+    let visible_steps: Vec<_> = tool_steps
+        .iter()
+        .rev()
+        .skip(scroll_offset)
+        .take(max_items)
+        .collect();
+
+    if scroll_offset > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" ↑ {} newer steps", scroll_offset.min(total_count)),
             Style::default().fg(TEXT_MUTED),
         )));
     }
 
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
+    for step in visible_steps.iter() {
+        let (icon, icon_color) = match step.status {
+            ToolStepStatus::Completed => ("✓".to_string(), ACCENT_GREEN),
+            ToolStepStatus::Running => {
+                let spinner_chars = ["◐", "◓", "◑", "◒"];
+                let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+                (spinner.to_string(), ACCENT_CYAN)
+            }
+            ToolStepStatus::Failed => ("✗".to_string(), ACCENT_RED),
+        };
+
+        let display_text = if step.description.is_empty() {
+            step.tool_name.clone()
+        } else {
+            format!("{}: {}", step.tool_name, step.description)
+        };
+
+        let max_len = area.width.saturating_sub(5) as usize;
+        let desc = if display_text.len() > max_len {
+            format!("{}...", &display_text[..max_len.saturating_sub(3)])
+        } else {
+            display_text
+        };
+
+        let desc_style = match step.status {
+            ToolStepStatus::Running => Style::default().fg(TEXT_PRIMARY),
+            ToolStepStatus::Completed => Style::default().fg(TEXT_DIM),
+            ToolStepStatus::Failed => Style::default().fg(ACCENT_RED),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
+            Span::styled(desc, desc_style),
+        ]));
+    }
+
+    let items_below = total_count.saturating_sub(scroll_offset + visible_steps.len());
+    if items_below > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" ↓ {} older steps", items_below),
+            Style::default().fg(TEXT_MUTED),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_thinking(f: &mut Frame, app: &ShellTuiApp, area: Rect, title: &str) {
+    let spinner_chars = ["◐", "◓", "◑", "◒"];
+    let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
+    let thinking_word = app.spinner.current();
+    let lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+            Span::styled(thinking_word, Style::default().fg(TEXT_SECONDARY)),
+        ]),
+    ];
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_empty_state(f: &mut Frame, title: &str, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            title,
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(" No content", Style::default().fg(TEXT_MUTED))),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_sidebar_lsp(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
@@ -1612,6 +2041,91 @@ fn draw_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     f.render_widget(list, inner);
 }
 
+/// Draw command autocomplete popup for slash commands
+fn draw_command_autocomplete_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let suggestions = &app.command_autocomplete.suggestions;
+    if suggestions.is_empty() {
+        return;
+    }
+
+    // Calculate popup position and size
+    let popup_height = (suggestions.len() as u16 + 2).min(10); // +2 for borders, max 10 items
+    let popup_width = (suggestions
+        .iter()
+        .map(|s| s.command.len() + s.description.len() + 4) // Extra space for formatting
+        .max()
+        .unwrap_or(40) as u16)
+        .min(80)
+        .max(40);
+
+    // Position above the input line
+    let popup_area = Rect {
+        x: 2,                                            // Align with input area
+        y: area.height.saturating_sub(popup_height + 4), // Above input area (4 = input height estimate)
+        width: popup_width,
+        height: popup_height,
+    };
+
+    // Clear the background
+    f.render_widget(Clear, popup_area);
+
+    // Create block with title
+    let block = Block::default()
+        .title(" Commands ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(BORDER_ACCENT))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Create list items
+    let items: Vec<ListItem> = suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let is_selected = i == app.command_autocomplete.selected;
+
+            let style = if is_selected {
+                Style::default()
+                    .bg(ACCENT_BLUE)
+                    .fg(BG_PRIMARY)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    &cmd.command,
+                    if is_selected {
+                        Style::default()
+                            .bg(ACCENT_BLUE)
+                            .fg(BG_PRIMARY)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(ACCENT_GREEN)
+                            .add_modifier(Modifier::BOLD)
+                    },
+                ),
+                Span::styled(" - ", style),
+                Span::styled(
+                    &cmd.description,
+                    if is_selected {
+                        Style::default().bg(ACCENT_BLUE).fg(BG_PRIMARY)
+                    } else {
+                        Style::default().fg(TEXT_SECONDARY)
+                    },
+                ),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items);
+    f.render_widget(list, inner);
+}
+
 /// Draw the commands reference modal
 fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
     use crate::commands::slash::get_commands_text;
@@ -1713,5 +2227,163 @@ fn draw_commands_modal(f: &mut Frame, _app: &ShellTuiApp, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((0, 0)); // TODO: Add scrolling support with arrow keys
 
+    f.render_widget(paragraph, inner);
+}
+
+/// Draw plan approval popup for Plan mode
+fn draw_plan_approval_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    use crate::planning::PlanStepStatus;
+
+    // Calculate modal size - centered, sized to fit content (larger modal)
+    let modal_width = (area.width as f32 * 0.85).min(100.0) as u16;
+
+    // Calculate height based on content (header + steps + footer)
+    let step_count = app.pending_approval_plan.as_ref().map(|p| p.steps.len()).unwrap_or(0);
+    // Header (2) + plan title (2) + "Steps:" (1) + steps + total (2) + footer (3) + padding (2)
+    let content_height = 2 + 2 + 1 + step_count + 2 + 3 + 2;
+    let modal_height = ((content_height as u16) + 2) // +2 for borders
+        .min((area.height as f32 * 0.9) as u16) // Use 90% of screen height
+        .max(18); // Minimum height
+
+    let popup_area = Rect {
+        x: (area.width.saturating_sub(modal_width)) / 2,
+        y: (area.height.saturating_sub(modal_height)) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+
+    // Clear the background
+    f.render_widget(Clear, popup_area);
+
+    // Create the modal block
+    let block = Block::default()
+        .title(" Plan Approval ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_CYAN))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Calculate how many steps we can show (reserve space for header + footer)
+    let available_lines = inner.height as usize;
+    let header_lines = 5; // Header + plan title + empty + "Steps:" + empty
+    let footer_lines = 4; // Total + empty + key hints
+    let max_visible_steps = available_lines.saturating_sub(header_lines + footer_lines);
+
+    // Build content
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header
+    lines.push(Line::from(vec![Span::styled(
+        "Review the plan before execution",
+        Style::default()
+            .fg(TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD),
+    )]));
+    lines.push(Line::from(""));
+
+    // Plan info
+    if let Some(ref plan) = app.pending_approval_plan {
+        // Title
+        lines.push(Line::from(vec![
+            Span::styled("Plan: ", Style::default().fg(TEXT_SECONDARY)),
+            Span::styled(
+                &plan.title,
+                Style::default()
+                    .fg(ACCENT_GREEN)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::from(""));
+
+        // Steps
+        lines.push(Line::from(Span::styled(
+            "Steps:",
+            Style::default()
+                .fg(TEXT_PRIMARY)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        let steps_to_show = plan.steps.len().min(max_visible_steps);
+        for (i, step) in plan.steps.iter().take(steps_to_show).enumerate() {
+            let status_icon = match step.status {
+                PlanStepStatus::Pending => "○",
+                PlanStepStatus::InProgress => "◐",
+                PlanStepStatus::Completed => "✓",
+                PlanStepStatus::Failed => "✗",
+                PlanStepStatus::Skipped => "−",
+            };
+
+            // Truncate description if too long
+            let max_desc_len = (modal_width as usize).saturating_sub(10);
+            let description = if step.description.len() > max_desc_len {
+                format!("{}...", &step.description[..max_desc_len.saturating_sub(3)])
+            } else {
+                step.description.clone()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} {}. ", status_icon, i + 1),
+                    Style::default().fg(TEXT_SECONDARY),
+                ),
+                Span::styled(description, Style::default().fg(TEXT_PRIMARY)),
+            ]));
+        }
+
+        // Show "and X more..." if there are hidden steps
+        if plan.steps.len() > steps_to_show {
+            let remaining = plan.steps.len() - steps_to_show;
+            lines.push(Line::from(Span::styled(
+                format!("     ... and {} more steps", remaining),
+                Style::default().fg(TEXT_DIM),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("Total: {} steps", plan.steps.len()),
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Loading plan details...",
+            Style::default().fg(TEXT_SECONDARY),
+        )));
+    }
+
+    // Footer with key hints - always visible
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            " Y ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(ACCENT_GREEN)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Approve  ", Style::default().fg(TEXT_PRIMARY)),
+        Span::styled(
+            " N ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(ACCENT_RED)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Reject  ", Style::default().fg(TEXT_PRIMARY)),
+        Span::styled(
+            " Esc ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(TEXT_SECONDARY)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Cancel", Style::default().fg(TEXT_PRIMARY)),
+    ]));
+
+    // Render paragraph
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
     f.render_widget(paragraph, inner);
 }

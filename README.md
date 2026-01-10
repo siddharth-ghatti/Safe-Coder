@@ -1,6 +1,6 @@
 # Safe Coder
 
-A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Safe Coder works as a standalone coding assistant with full tool capabilities, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
+A powerful **AI-enhanced shell** and **multi-agent orchestrator** built in Rust. Safe Coder provides an interactive shell environment with integrated AI assistance, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
 
 <p align="center">
   <img src="assets/safe-coder-demo.gif" alt="Safe Coder Demo" width="800">
@@ -10,6 +10,7 @@ A powerful **AI coding CLI** and **multi-agent orchestrator** built in Rust. Saf
 
 | Feature | Safe Coder | Claude Code | Cursor | Aider |
 |---------|------------|-------------|--------|-------|
+| **Interactive AI Shell** | ✅ Shell-first with AI assistance | ❌ | ❌ | ❌ |
 | **Multi-Agent Orchestration** | ✅ Claude + Gemini + Copilot | ❌ | ❌ | ❌ |
 | **Subagent System** | ✅ 5 specialized types | ❌ | ❌ | ❌ |
 | **Multi-Model Subagents** | ✅ Per-agent LLM config | ❌ | ❌ | ❌ |
@@ -39,21 +40,145 @@ export OPENROUTER_API_KEY="sk-or-v1-..."  # 75+ models
 # OR
 export ANTHROPIC_API_KEY="sk-ant-..."     # Claude directly
 
-# Start coding
+# Start the interactive shell
 cd your-project
-safe-coder chat
+safe-coder                  # Starts interactive shell
+safe-coder --ai             # Starts with AI connected
 ```
 
-**Key Commands:**
+**Key Commands in Shell:**
 ```bash
-@ How do I add authentication?     # Ask AI
-@file.rs                           # Add file to context
-!cargo test                        # Run shell command
-/undo                              # Undo last changes
-/redo                              # Redo changes
-/compact                           # Free up context tokens
-@orchestrate add auth and tests    # Multi-agent task
+# Shell commands work normally
+ls -la
+git status
+cargo test
+
+# AI assistance commands  
+ai-connect                   # Connect to AI assistant
+ai how do I add auth?        # Ask AI for help with shell context
+chat                         # Enter interactive coding mode
+
+# In chat mode
+@file.rs                     # Add file to context
+!cargo test                  # Run shell command without leaving chat
+/undo                        # Undo last changes
+/redo                        # Redo changes
+/compact                     # Free up context tokens
+
+# Multi-agent orchestration
+orchestrate add auth and tests  # Delegate complex tasks
 ```
+
+## Shell-First Workflow Guide
+
+Safe Coder's shell is designed as the primary interface, combining the familiarity of a terminal with powerful AI assistance. Here's how to make the most of it:
+
+### Getting Started with the Shell
+
+```bash
+# Start the interactive shell
+cd your-project
+safe-coder                    # Default shell mode
+
+# Connect to AI assistance
+ai-connect                    # Within the shell
+# OR start with AI connected
+safe-coder --ai              # From command line
+```
+
+### Core Shell Features
+
+**🖥️ All your regular commands work:**
+```bash
+ls -la
+git status
+npm test
+cargo build
+python main.py
+```
+
+**🤖 AI assistance when you need it:**
+```bash
+# Ask for help with current shell context
+ai how do I optimize this Rust code?
+ai what's wrong with my git setup?
+ai suggest a better project structure
+
+# Get specific coding help
+ai write a dockerfile for this node app
+ai fix the failing tests
+```
+
+**🔄 Seamless mode switching:**
+```bash
+# Enter full coding mode when needed
+chat
+  # Now in chat mode - full AI conversation
+  # Use @file.rs to add context
+  # Use !command to run shell commands
+  # Type 'exit' to return to shell
+
+# Back to shell mode for regular commands
+exit  # or 'shell'
+```
+
+### Advanced Shell Workflows
+
+**📁 Project Discovery:**
+```bash
+ls                           # Browse files
+find . -name "*.rs"         # Search for files
+ai analyze this codebase    # Get AI overview
+```
+
+**🔍 Debugging Sessions:**
+```bash
+cargo test                  # Run tests
+# Test fails...
+ai explain this error       # Get AI help with error context
+# AI suggests fix
+cargo test                  # Try again
+```
+
+**🚀 Development Flow:**
+```bash
+git status                  # Check repo state
+ai review my recent changes # AI reviews your work
+git add .
+git commit -m "$(ai suggest a commit message)"
+```
+
+**🛠️ Multi-Step Tasks:**
+```bash
+# Complex tasks that need multiple steps
+ai-connect
+chat
+# Now in full AI mode
+@src/**/*.rs               # Add all source files to context
+refactor the auth module to use async/await
+# AI does the refactoring with full context
+exit
+# Back to shell
+cargo test                 # Verify changes
+```
+
+### Shell vs Chat vs Orchestrate
+
+| Mode | Best For | Example Use |
+|------|----------|-------------|
+| **Shell** | Daily development, quick help | `git status`, `ai fix this error` |
+| **Chat** | Focused coding tasks | Adding features, refactoring code |
+| **Orchestrate** | Complex multi-step projects | `orchestrate "build a REST API with auth"` |
+
+### Pro Tips
+
+1. **Use shell for quick questions**: Instead of leaving your terminal, just ask `ai how do I...`
+
+2. **Chat mode for deep work**: When you need AI to understand lots of context and make multiple changes
+
+3. **Orchestration for big tasks**: Let AI agents work in parallel on different parts of large projects
+
+4. **Mix and match**: Start in shell, go to chat for focused work, return to shell for testing
 
 ## 🌟 What's New
 

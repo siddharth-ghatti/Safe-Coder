@@ -4,7 +4,11 @@
 //! high-level planner that delegates tasks to specialized CLI agents (Claude Code,
 //! Gemini CLI) running in isolated git workspaces.
 
+// TODO: Fix type mismatches in these modules
+// pub mod live_orchestration;
 pub mod planner;
+// pub mod self_orchestration;
+// pub mod streaming_worker;
 pub mod task;
 pub mod worker;
 pub mod workspace;
@@ -20,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::approval::ExecutionMode;
+use crate::approval::UserMode;
 
 /// The main orchestrator that coordinates between the planner and workers
 pub struct Orchestrator {
@@ -78,8 +82,8 @@ pub struct OrchestratorConfig {
     pub use_worktrees: bool,
     /// Throttle limits per worker type
     pub throttle_limits: ThrottleLimits,
-    /// Execution mode: Plan (requires approval) or Act (auto-execute)
-    pub execution_mode: ExecutionMode,
+    /// User mode: Plan (requires approval) or Build (auto-execute)
+    pub user_mode: UserMode,
 }
 
 /// Throttle limits for different worker types
@@ -113,7 +117,7 @@ impl Default for OrchestratorConfig {
             enabled_workers: vec![WorkerKind::ClaudeCode], // Default to just Claude
             use_worktrees: true,
             throttle_limits: ThrottleLimits::default(),
-            execution_mode: ExecutionMode::default(),
+            user_mode: UserMode::default(),
         }
     }
 }
@@ -160,8 +164,8 @@ impl Orchestrator {
         };
 
         // Step 1.5: Handle planning mode - show detailed plan and ask for approval
-        match self.config.execution_mode {
-            ExecutionMode::Plan => {
+        match self.config.user_mode {
+            UserMode::Plan => {
                 // Show detailed plan
                 let detailed_plan = self.format_orchestration_plan(&plan);
                 println!("{}", detailed_plan);
@@ -174,8 +178,8 @@ impl Orchestrator {
                 }
                 println!("\n✅ Plan approved. Distributing tasks to workers...\n");
             }
-            ExecutionMode::Act => {
-                // In Act mode, we skip the detailed output since it may be running
+            UserMode::Build => {
+                // In Build mode, we skip the detailed output since it may be running
                 // in a TUI context where channel-based updates are used instead.
                 // The caller is responsible for displaying progress.
             }
@@ -677,7 +681,7 @@ mod tests {
                 copilot_max_concurrent: 1,
                 start_delay_ms: 50,
             },
-            execution_mode: ExecutionMode::default(),
+            user_mode: UserMode::default(),
         };
 
         let orchestrator = Orchestrator::new(temp_dir.path().to_path_buf(), config)
@@ -710,7 +714,7 @@ mod tests {
                 copilot_max_concurrent: 2,
                 start_delay_ms: 0,
             },
-            execution_mode: ExecutionMode::default(),
+            user_mode: UserMode::default(),
         };
 
         let mut orchestrator = Orchestrator::new(temp_dir.path().to_path_buf(), config)

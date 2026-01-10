@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use crate::approval::{ApprovalMode, ExecutionMode, ExecutionPlan, PlannedTool};
+use crate::approval::{ApprovalMode, ExecutionPlan, PlannedTool, UserMode};
 use crate::checkpoint::{CheckpointManager, DirectoryCheckpointManager};
 use crate::config::Config;
 use crate::context::ContextManager;
@@ -13,6 +13,7 @@ use crate::custom_commands::CustomCommandManager;
 use crate::git::GitManager;
 use crate::llm::{create_client, ContentBlock, LlmClient, Message, ToolDefinition};
 use crate::loop_detector::{DoomLoopAction, LoopDetector};
+use crate::lsp::LspManager;
 use crate::mcp::McpManager;
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
@@ -21,6 +22,9 @@ use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan}
 use crate::prompts;
 use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
+// Unified planning imports (reserved for future use)
+// use crate::unified_planning::{ExecutionMode as UnifiedExecutionMode, UnifiedPlanner, PlanEvent as UnifiedPlanEvent};
+// use crate::unified_planning::integration::create_runner;
 
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
@@ -65,6 +69,9 @@ pub enum SessionEvent {
     },
     /// Plan event (from planning system)
     Plan(PlanEvent),
+    /// Plan approval sender (TUI should store this to send approval)
+    /// Note: Using unbounded channel since oneshot::Sender doesn't implement Clone
+    PlanApprovalSender(tokio::sync::mpsc::UnboundedSender<bool>),
     /// Token usage update from LLM response
     TokenUsage {
         input_tokens: usize,
@@ -80,8 +87,8 @@ pub enum SessionEvent {
 
 pub struct Session {
     config: Config,
-    llm_client: Box<dyn LlmClient>,
-    tool_registry: ToolRegistry,
+    llm_client: Arc<dyn LlmClient>,
+    tool_registry: Arc<ToolRegistry>,
     messages: Vec<Message>,
     project_path: PathBuf,
 
@@ -94,7 +101,7 @@ pub struct Session {
     // Features
     persistence: SessionPersistence,
     approval_mode: ApprovalMode,
-    execution_mode: ExecutionMode,
+    user_mode: UserMode,
     agent_mode: AgentMode,
     stats: SessionStats,
     memory: MemoryManager,
@@ -110,6 +117,13 @@ pub struct Session {
 
     // MCP server manager
     mcp_manager: McpManager,
+
+    // LSP manager for diagnostics
+    lsp_manager: LspManager,
+
+    // Unified planning state
+    current_plan: Option<crate::unified_planning::UnifiedPlan>,
+    plan_history: Vec<crate::unified_planning::UnifiedPlan>,
 }
 
 impl Session {
@@ -123,12 +137,12 @@ impl Session {
         project_path: PathBuf,
         event_tx: Option<mpsc::UnboundedSender<SessionEvent>>,
     ) -> Result<Self> {
-        let llm_client = create_client(&config).await?;
+        let llm_client: Arc<dyn LlmClient> = Arc::from(create_client(&config).await?);
 
         // Initialize tool registry with subagent support
-        let mut tool_registry = if let Some(ref tx) = event_tx {
+        let mut tool_registry = if let Some(tx) = event_tx.clone() {
             ToolRegistry::new()
-                .with_subagent_support_and_events(config.clone(), project_path.clone(), tx.clone())
+                .with_subagent_support_and_events(config.clone(), project_path.clone(), tx)
                 .await
         } else {
             ToolRegistry::new()
@@ -140,10 +154,12 @@ impl Session {
         let mut mcp_manager = McpManager::new(config.mcp.clone());
         mcp_manager.initialize(&project_path).await?;
 
-        // Register MCP tools with the tool registry
+        // Register MCP tools with the tool registry before wrapping in Arc
         for tool in mcp_manager.get_tools() {
             tool_registry.register(tool);
         }
+
+        let tool_registry = Arc::new(tool_registry);
 
         if mcp_manager.is_active() {
             tracing::info!(
@@ -164,6 +180,16 @@ impl Session {
         let dir_checkpoints =
             DirectoryCheckpointManager::new(project_path.clone(), config.checkpoint.clone())?;
 
+        // Initialize LSP manager for diagnostics
+        // Pass None to use default LSP configs - the LspConfigWrapper from config.lsp
+        // is for user overrides which we'll apply later if needed
+        let mut lsp_manager = LspManager::new(project_path.clone(), None);
+        if config.lsp.enabled {
+            if let Err(e) = lsp_manager.initialize().await {
+                tracing::warn!("LSP initialization failed (continuing without LSP): {}", e);
+            }
+        }
+
         Ok(Self {
             config,
             llm_client,
@@ -178,7 +204,7 @@ impl Session {
 
             persistence,
             approval_mode: ApprovalMode::default(),
-            execution_mode: ExecutionMode::default(),
+            user_mode: UserMode::default(),
             agent_mode: AgentMode::default(),
             stats: SessionStats::new(),
             memory,
@@ -190,18 +216,21 @@ impl Session {
             last_output: String::new(),
             subagent_event_tx: event_tx,
             mcp_manager,
+            lsp_manager,
+            current_plan: None,
+            plan_history: Vec::new(),
         })
     }
 
-    /// Set execution mode (Plan or Act)
-    pub fn set_execution_mode(&mut self, mode: ExecutionMode) {
-        self.execution_mode = mode;
-        tracing::info!("Execution mode set to: {}", mode);
+    /// Set user mode (Plan or Build)
+    pub fn set_user_mode(&mut self, mode: UserMode) {
+        self.user_mode = mode;
+        tracing::info!("User mode set to: {}", mode);
     }
 
-    /// Get current execution mode
-    pub fn execution_mode(&self) -> ExecutionMode {
-        self.execution_mode
+    /// Get current user mode
+    pub fn user_mode(&self) -> UserMode {
+        self.user_mode
     }
 
     /// Set agent mode (Plan or Build)
@@ -232,6 +261,383 @@ impl Session {
         self.permission_manager.summary()
     }
 
+    /// Get LLM client for unified planning
+    pub fn get_llm_client(&self) -> Arc<dyn LlmClient> {
+        self.llm_client.clone()
+    }
+
+    /// Get tool registry for unified planning
+    pub fn get_tool_registry(&self) -> Arc<ToolRegistry> {
+        self.tool_registry.clone()
+    }
+
+    /// Get the current plan (if any)
+    pub fn get_current_plan(&self) -> Option<&crate::unified_planning::UnifiedPlan> {
+        self.current_plan.as_ref()
+    }
+
+    /// Get plan history
+    pub fn get_plan_history(&self) -> &[crate::unified_planning::UnifiedPlan] {
+        &self.plan_history
+    }
+
+    /// Set the current plan
+    fn set_current_plan(&mut self, plan: crate::unified_planning::UnifiedPlan) {
+        // Move any existing plan to history
+        if let Some(old_plan) = self.current_plan.take() {
+            // Only keep last 10 plans in history
+            if self.plan_history.len() >= 10 {
+                self.plan_history.remove(0);
+            }
+            self.plan_history.push(old_plan);
+        }
+        self.current_plan = Some(plan);
+    }
+
+    /// Format current plan for display
+    pub fn format_current_plan(&self) -> String {
+        match &self.current_plan {
+            Some(plan) => {
+                let mut output = String::new();
+                output.push_str(&format!("## {}\n\n", plan.title));
+                output.push_str(&format!("Status: {:?}\n", plan.status));
+                output.push_str(&format!("Mode: {:?}\n\n", plan.execution_mode));
+
+                output.push_str("### Steps:\n");
+                for (group_idx, group) in plan.groups.iter().enumerate() {
+                    if plan.groups.len() > 1 {
+                        output.push_str(&format!("\n**Phase {}**", group_idx + 1));
+                        if !group.depends_on.is_empty() {
+                            output.push_str(&format!(" (depends on: {})", group.depends_on.join(", ")));
+                        }
+                        output.push('\n');
+                    }
+                    for step in &group.steps {
+                        let status_icon = match step.status {
+                            crate::unified_planning::StepStatus::Pending => "◯",
+                            crate::unified_planning::StepStatus::InProgress => "◐",
+                            crate::unified_planning::StepStatus::Completed => "✓",
+                            crate::unified_planning::StepStatus::Failed => "✗",
+                            crate::unified_planning::StepStatus::Skipped => "○",
+                        };
+                        output.push_str(&format!("{} {}\n", status_icon, step.description));
+                    }
+                }
+
+                if let Some(summary) = plan.groups.iter()
+                    .flat_map(|g| g.steps.iter())
+                    .filter_map(|s| s.result.as_ref())
+                    .last()
+                    .map(|r| &r.output)
+                {
+                    if !summary.is_empty() {
+                        output.push_str(&format!("\n### Summary:\n{}\n", summary));
+                    }
+                }
+
+                output
+            }
+            None => "No active plan. Submit a task to create a plan.".to_string(),
+        }
+    }
+
+    /// Format plan groups for display
+    pub fn format_plan_groups(&self) -> String {
+        match &self.current_plan {
+            Some(plan) => {
+                let mut output = String::new();
+                output.push_str(&format!("## Plan Groups: {}\n\n", plan.title));
+
+                for (i, group) in plan.groups.iter().enumerate() {
+                    let status = if group.steps.iter().all(|s| s.status == crate::unified_planning::StepStatus::Completed) {
+                        "✓ Completed"
+                    } else if group.steps.iter().any(|s| s.status == crate::unified_planning::StepStatus::InProgress) {
+                        "◐ In Progress"
+                    } else if group.steps.iter().any(|s| s.status == crate::unified_planning::StepStatus::Failed) {
+                        "✗ Failed"
+                    } else {
+                        "◯ Pending"
+                    };
+
+                    let parallel_note = if group.steps.len() > 1 {
+                        format!(" (parallel: {} steps)", group.steps.len())
+                    } else {
+                        String::new()
+                    };
+
+                    output.push_str(&format!("### Group {}: {}{}\n", i + 1, status, parallel_note));
+
+                    if !group.depends_on.is_empty() {
+                        output.push_str(&format!("  Dependencies: {}\n", group.depends_on.join(", ")));
+                    }
+
+                    for step in &group.steps {
+                        let status_icon = match step.status {
+                            crate::unified_planning::StepStatus::Pending => "  ◯",
+                            crate::unified_planning::StepStatus::InProgress => "  ◐",
+                            crate::unified_planning::StepStatus::Completed => "  ✓",
+                            crate::unified_planning::StepStatus::Failed => "  ✗",
+                            crate::unified_planning::StepStatus::Skipped => "  ○",
+                        };
+                        output.push_str(&format!("{} {}\n", status_icon, step.description));
+                    }
+                    output.push('\n');
+                }
+
+                output
+            }
+            None => "No active plan with groups.".to_string(),
+        }
+    }
+
+    /// Format plan history for display
+    pub fn format_plan_history(&self) -> String {
+        if self.plan_history.is_empty() && self.current_plan.is_none() {
+            return "No plans executed in this session.".to_string();
+        }
+
+        let mut output = String::new();
+        output.push_str("## Plan History\n\n");
+
+        // Show current plan first
+        if let Some(ref plan) = self.current_plan {
+            let status = match plan.status {
+                crate::unified_planning::PlanStatus::Completed => "✓ Completed",
+                crate::unified_planning::PlanStatus::Failed => "✗ Failed",
+                crate::unified_planning::PlanStatus::Executing => "◐ Executing",
+                crate::unified_planning::PlanStatus::AwaitingApproval => "⏳ Awaiting Approval",
+                _ => "◯ Pending",
+            };
+            output.push_str(&format!("**Current**: {} [{}] ({:?})\n", plan.title, status, plan.execution_mode));
+        }
+
+        // Show history (most recent first)
+        for (i, plan) in self.plan_history.iter().rev().enumerate() {
+            let status = match plan.status {
+                crate::unified_planning::PlanStatus::Completed => "✓",
+                crate::unified_planning::PlanStatus::Failed => "✗",
+                _ => "○",
+            };
+            output.push_str(&format!("{}. {} {} ({:?})\n", i + 1, status, plan.title, plan.execution_mode));
+        }
+
+        output
+    }
+
+    /// Send message using unified planning system
+    ///
+    /// This uses the new unified planning approach:
+    /// 1. Create a plan with the LLM
+    /// 2. Show plan (if Plan mode) or execute (if Build mode)
+    /// 3. Execute steps with DirectExecutor
+    /// 4. Return summary
+    pub async fn send_message_with_planning(&mut self, request: String) -> Result<String> {
+        use crate::unified_planning::{
+            integration::{create_runner, create_runner_with_approval},
+            ExecutionMode as UnifiedExecutionMode, UnifiedPlanner,
+        };
+
+        // Emit thinking event
+        if let Some(ref tx) = self.subagent_event_tx {
+            let _ = tx.send(SessionEvent::Thinking(
+                "Creating execution plan...".to_string(),
+            ));
+        }
+
+        // Always use Direct execution for inline shell execution
+        let execution_mode = UnifiedExecutionMode::Direct;
+
+        // Create planner
+        let planner = UnifiedPlanner::new(execution_mode);
+
+        // Get context
+        let project_context = self.memory.get_system_prompt().await.ok();
+
+        // Create plan
+        let plan = planner
+            .create_plan(&*self.llm_client, &request, project_context.as_deref())
+            .await
+            .context("Failed to create execution plan")?;
+
+        // Store the plan for /plan commands
+        self.set_current_plan(plan.clone());
+
+        // In Plan mode: Create plan, show it, wait for approval, but DON'T execute
+        // User must switch to Build mode to execute
+        if self.user_mode.requires_approval() {
+            use crate::planning::PlanEvent as LegacyEvent;
+
+            // Send plan to UI for display
+            if let Some(ref tx) = self.subagent_event_tx {
+                let _ = tx.send(SessionEvent::Plan(LegacyEvent::PlanCreated {
+                    plan: plan.to_legacy_plan(),
+                }));
+            }
+
+            // Format plan summary for text response
+            let mut plan_text = format!("## Plan: {}\n\n", plan.title);
+            plan_text.push_str("**Plan Mode is READ-ONLY. This plan shows what will be done.**\n\n");
+
+            for (i, group) in plan.groups.iter().enumerate() {
+                plan_text.push_str(&format!("### Phase {}\n", i + 1));
+                for step in &group.steps {
+                    plan_text.push_str(&format!("- **{}**: {}\n", step.description, step.instructions));
+                    if !step.relevant_files.is_empty() {
+                        plan_text.push_str(&format!("  Files: {}\n", step.relevant_files.join(", ")));
+                    }
+                }
+                plan_text.push('\n');
+            }
+
+            plan_text.push_str("\n---\n");
+            plan_text.push_str("**Plan complete. Switch to BUILD mode (Ctrl+G) to execute this plan.**\n");
+            plan_text.push_str("*In Plan mode, Safe-Coder only creates plans - no files are modified.*\n");
+
+            // Send text chunk for display
+            if let Some(ref tx) = self.subagent_event_tx {
+                let _ = tx.send(SessionEvent::TextChunk(plan_text.clone()));
+            }
+
+            return Ok(plan_text);
+        }
+
+        // Build mode: Execute the plan immediately
+        let runner = create_runner(
+            self.project_path.clone(),
+            Arc::new(self.config.clone()),
+            self.llm_client.clone(),
+            self.get_tool_registry(),
+        );
+
+        // Execute plan and get events
+        let (initial_plan, mut events) = runner.execute(plan).await?;
+        let mut final_summary = initial_plan.summary();
+        let mut final_success = false;
+
+        // Forward plan events to session events and await completion
+        while let Some(event) = events.recv().await {
+            use crate::planning::PlanEvent as LegacyEvent;
+            use crate::unified_planning::PlanEvent as UPEvent;
+
+            // Update current plan based on events
+            match &event {
+                UPEvent::PlanCompleted { summary, success, .. } => {
+                    final_summary = summary.clone();
+                    final_success = *success;
+                    // Update the stored plan's status
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.status = if *success {
+                            crate::unified_planning::PlanStatus::Completed
+                        } else {
+                            crate::unified_planning::PlanStatus::Failed
+                        };
+                    }
+                }
+                UPEvent::StepStarted { step_id, .. } => {
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.update_step_status(step_id, crate::unified_planning::StepStatus::InProgress);
+                    }
+                }
+                UPEvent::StepCompleted { step_id, success, .. } => {
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.update_step_status(
+                            step_id,
+                            if *success {
+                                crate::unified_planning::StepStatus::Completed
+                            } else {
+                                crate::unified_planning::StepStatus::Failed
+                            },
+                        );
+                    }
+                }
+                UPEvent::PlanStarted { .. } => {
+                    if let Some(ref mut plan) = self.current_plan {
+                        plan.status = crate::unified_planning::PlanStatus::Executing;
+                    }
+                }
+                _ => {}
+            }
+
+            // Forward to session event stream if available
+            if let Some(ref tx) = self.subagent_event_tx {
+                // Map common events to legacy format for UI compatibility
+                let legacy_event = match &event {
+                    UPEvent::PlanCreated { plan, .. } => Some(LegacyEvent::PlanCreated {
+                        plan: plan.to_legacy_plan(),
+                    }),
+                    UPEvent::StepStarted {
+                        plan_id,
+                        step_id,
+                        description,
+                        ..
+                    } => Some(LegacyEvent::StepStarted {
+                        plan_id: plan_id.clone(),
+                        step_id: step_id.clone(),
+                        description: description.clone(),
+                    }),
+                    UPEvent::StepProgress {
+                        plan_id,
+                        step_id,
+                        message,
+                    } => Some(LegacyEvent::StepProgress {
+                        plan_id: plan_id.clone(),
+                        step_id: step_id.clone(),
+                        message: message.clone(),
+                    }),
+                    UPEvent::StepCompleted {
+                        plan_id,
+                        step_id,
+                        success,
+                        ..
+                    } => Some(LegacyEvent::StepCompleted {
+                        plan_id: plan_id.clone(),
+                        step_id: step_id.clone(),
+                        success: *success,
+                        output: None,
+                        error: None,
+                    }),
+                    UPEvent::PlanCompleted {
+                        plan_id,
+                        success,
+                        summary,
+                    } => Some(LegacyEvent::PlanCompleted {
+                        plan_id: plan_id.clone(),
+                        success: *success,
+                        summary: summary.clone(),
+                    }),
+                    UPEvent::PlanAwaitingApproval { plan_id } => {
+                        Some(LegacyEvent::AwaitingApproval {
+                            plan_id: plan_id.clone(),
+                        })
+                    }
+                    UPEvent::PlanApproved { plan_id } => Some(LegacyEvent::PlanApproved {
+                        plan_id: plan_id.clone(),
+                    }),
+                    UPEvent::PlanRejected { plan_id, .. } => Some(LegacyEvent::PlanRejected {
+                        plan_id: plan_id.clone(),
+                    }),
+                    _ => None,
+                };
+
+                if let Some(le) = legacy_event {
+                    let _ = tx.send(SessionEvent::Plan(le));
+                }
+            }
+        }
+
+        // Return summary
+        Ok(final_summary)
+    }
+
+    /// Convert unified plan to legacy plan format for events
+    fn convert_unified_plan_to_legacy(
+        &self,
+        plan: &crate::unified_planning::UnifiedPlan,
+    ) -> crate::planning::TaskPlan {
+        // Use the built-in conversion method
+        plan.to_legacy_plan()
+    }
+
     /// Get mutable reference to permission manager for advanced configuration
     pub fn permissions_mut(&mut self) -> &mut PermissionManager {
         &mut self.permission_manager
@@ -255,6 +661,72 @@ impl Session {
         Ok(())
     }
 
+    /// Coalesce multiple rapid requests into a single LLM call
+    /// This is useful when multiple related requests come in quick succession
+    pub async fn send_coalesced_messages(&mut self, messages: Vec<String>) -> Result<String> {
+        if messages.is_empty() {
+            return Ok(String::new());
+        }
+        
+        if messages.len() == 1 {
+            return self.send_message(messages.into_iter().next().unwrap()).await;
+        }
+        
+        // Combine multiple messages into a single optimized request
+        let combined = format!(
+            "Handle these {} related requests efficiently:\n\n{}",
+            messages.len(),
+            messages
+                .iter()
+                .enumerate()
+                .map(|(i, msg)| format!("{}. {}", i + 1, msg))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        );
+        
+        tracing::info!("Coalescing {} requests into single LLM call", messages.len());
+        self.send_message(combined).await
+    }
+
+    /// Determine if a message should use unified planning
+    fn should_use_planning(&self, message: &str) -> bool {
+        let msg_lower = message.to_lowercase();
+        let msg_len = message.len();
+        
+        // Skip planning for simple queries
+        if msg_lower.starts_with("what") || 
+           msg_lower.starts_with("how") || 
+           msg_lower.starts_with("explain") || 
+           msg_lower.starts_with("why") ||
+           msg_lower.starts_with("where") ||
+           msg_lower.starts_with("when") ||
+           msg_lower.starts_with("who") {
+            return false;
+        }
+        
+        // Skip for very short messages (likely simple commands)
+        if msg_len < 30 {
+            return false;
+        }
+        
+        // Use planning for task-oriented requests
+        let has_task_indicators = msg_lower.contains("implement") ||
+            msg_lower.contains("create") ||
+            msg_lower.contains("build") ||
+            msg_lower.contains("add") ||
+            msg_lower.contains("modify") ||
+            msg_lower.contains("update") ||
+            msg_lower.contains("fix") ||
+            msg_lower.contains("refactor") ||
+            msg_lower.contains("step") ||
+            msg_lower.contains("plan") ||
+            msg_lower.contains("task") ||
+            msg_lower.contains("feature");
+            
+        // Use planning for longer, complex requests
+        has_task_indicators || msg_len > 100
+    }
+
     pub async fn send_message(&mut self, user_message: String) -> Result<String> {
         // Create checkpoint before processing user task (git-agnostic safety)
         if self.dir_checkpoints.is_enabled() {
@@ -262,6 +734,29 @@ impl Session {
             if let Err(e) = self.dir_checkpoints.create_checkpoint(&label).await {
                 tracing::warn!("Failed to create checkpoint: {}", e);
             }
+        }
+
+        // Smart fallback: Only try unified planning for appropriate requests
+        if self.should_use_planning(&user_message) {
+            tracing::debug!("Using unified planning for task-oriented request");
+            
+            // Try unified planning path (creates internal event channel)
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let prev_tx = self.subagent_event_tx.clone();
+            self.subagent_event_tx = Some(event_tx);
+            let planning_result = self.send_message_with_planning(user_message.clone()).await;
+            self.subagent_event_tx = prev_tx;
+
+            // Drain events (no UI to send them to in this method)
+            while event_rx.try_recv().is_ok() {}
+
+            if let Ok(resp) = planning_result {
+                return Ok(resp);
+            }
+            
+            tracing::debug!("Planning failed, falling back to direct execution");
+        } else {
+            tracing::debug!("Using direct execution for simple query");
         }
 
         // Track stats
@@ -344,9 +839,9 @@ impl Session {
             // Build execution plan from tool calls
             let execution_plan = self.build_execution_plan(&assistant_message);
 
-            // Handle based on execution mode
-            match self.execution_mode {
-                ExecutionMode::Plan => {
+            // Handle based on user mode
+            match self.user_mode {
+                UserMode::Plan => {
                     // Show detailed plan and ask for approval
                     let plan_output = execution_plan.format_detailed(true);
                     response_text.push_str("\n");
@@ -380,7 +875,7 @@ impl Session {
 
                     response_text.push_str("\n✅ Plan approved. Executing...\n\n");
                 }
-                ExecutionMode::Act => {
+                UserMode::Build => {
                     // Show brief plan summary (not detailed)
                     if !execution_plan.tools.is_empty() {
                         let brief = format!(
@@ -498,9 +993,42 @@ impl Session {
 
             // Add tool results as a new user message
             if !tool_results.is_empty() {
+                let mut final_results = tool_results;
+
+                // Check if any file modifications were made
+                let had_file_edits = tools_executed
+                    .iter()
+                    .any(|t| t == "edit_file" || t == "write_file");
+
+                if had_file_edits {
+                    // Give LSP a moment to process file changes
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                    // Run build verification after file modifications
+                    if let Some(build_errors) = self.verify_build().await {
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
+                                build_errors
+                            ),
+                        });
+                    }
+
+                    // Check for LSP diagnostics after file modifications
+                    let diagnostics_summary = self.lsp_manager.get_diagnostics_summary().await;
+                    if !diagnostics_summary.is_empty() {
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                diagnostics_summary
+                            ),
+                        });
+                    }
+                }
+
                 self.messages.push(Message {
                     role: crate::llm::Role::User,
-                    content: tool_results,
+                    content: final_results,
                 });
             }
         }
@@ -567,8 +1095,147 @@ impl Session {
         let system_prompt =
             prompts::build_system_prompt(self.agent_mode, project_context.as_deref(), None);
 
-        // Create a persistent plan ID for this task - will accumulate steps across LLM calls
+        // Create a persistent plan ID for this task
         let task_plan_id = format!("plan-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+
+        // === PLAN MODE: Create plan, get approval, then execute ===
+        if self.agent_mode == AgentMode::Plan || self.user_mode.requires_approval() {
+            let _ = event_tx.send(SessionEvent::Thinking("Creating plan...".to_string()));
+
+            // Ask LLM to create a plan (exploration + planning in one call)
+            let plan_prompt = format!(
+                "The user wants: {}\n\n\
+                First, briefly explore the relevant parts of the codebase using the available tools.\n\
+                Then create a concise plan showing what steps you would take to accomplish this task.\n\
+                Format your plan as:\n\
+                ## Plan: [Title]\n\
+                1. [Step description]\n\
+                2. [Step description]\n\
+                ...\n\n\
+                Do NOT execute any changes yet - just explore and plan.",
+                user_message
+            );
+
+            self.messages.push(Message::user(plan_prompt));
+
+            // Let LLM explore and create plan
+            let tools: Vec<ToolDefinition> = self
+                .tool_registry
+                .get_tools_schema_for_mode(AgentMode::Plan) // Read-only tools only
+                .into_iter()
+                .map(|schema| ToolDefinition {
+                    name: schema["name"].as_str().unwrap().to_string(),
+                    description: schema["description"].as_str().unwrap().to_string(),
+                    input_schema: schema["input_schema"].clone(),
+                })
+                .collect();
+
+            // Run exploration loop until LLM produces a plan
+            loop {
+                let llm_response = self
+                    .llm_client
+                    .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                    .await?;
+
+                let assistant_message = llm_response.message;
+
+                // Check for tool calls
+                let has_tool_calls = assistant_message
+                    .content
+                    .iter()
+                    .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
+
+                // Stream text to UI
+                for block in &assistant_message.content {
+                    if let ContentBlock::Text { text } = block {
+                        response_text.push_str(text);
+                        response_text.push('\n');
+                        let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                    }
+                }
+
+                self.messages.push(assistant_message.clone());
+
+                if !has_tool_calls {
+                    // No more tool calls - plan should be complete
+                    break;
+                }
+
+                // Execute read-only tool calls
+                let mut tool_results = Vec::new();
+                for block in &assistant_message.content {
+                    if let ContentBlock::ToolUse { id, name, input } = block {
+                        let description = self.describe_tool_action(name, input);
+
+                        // Send proper tool events for vertical rendering
+                        let _ = event_tx.send(SessionEvent::ToolStart {
+                            name: name.clone(),
+                            description: description.clone(),
+                        });
+
+                        let tool_context = ToolContext::new(&self.project_path, &self.config.tools);
+                        let (result, success) = if let Some(tool) = self.tool_registry.get_tool(name) {
+                            match tool.execute(input.clone(), &tool_context).await {
+                                Ok(r) => (r, true),
+                                Err(e) => (format!("Error: {}", e), false),
+                            }
+                        } else {
+                            (format!("Unknown tool: {}", name), false)
+                        };
+
+                        // Send tool completion event
+                        let _ = event_tx.send(SessionEvent::ToolComplete {
+                            name: name.clone(),
+                            success,
+                        });
+
+                        tool_results.push(ContentBlock::ToolResult {
+                            tool_use_id: id.clone(),
+                            content: result,
+                        });
+                    }
+                }
+
+                self.messages.push(Message {
+                    role: crate::llm::Role::User,
+                    content: tool_results,
+                });
+            }
+
+            // Plan created - parse the plan from response text
+            let (plan_title, plan_steps) = parse_plan_from_response(&response_text);
+
+            // Create the TaskPlan for the UI
+            let mut task_plan = TaskPlan::new(task_plan_id.clone(), user_message.clone());
+            task_plan.title = plan_title;
+            task_plan.steps = plan_steps;
+            task_plan.status = PlanStatus::AwaitingApproval;
+
+            // Send PlanCreated event FIRST so UI has the plan data
+            let _ = event_tx.send(SessionEvent::Plan(PlanEvent::PlanCreated {
+                plan: task_plan,
+            }));
+
+            // Show approval prompt
+            response_text.push_str("\n---\n");
+            response_text.push_str("**Plan ready for approval.**\n");
+            response_text.push_str("Type `approve` (or `yes`/`y`) to switch to BUILD mode and execute.\n");
+            response_text.push_str("Type `reject` (or `no`/`n`) to cancel.\n");
+            let _ = event_tx.send(SessionEvent::TextChunk(
+                "\n---\n**Plan ready for approval.**\nType `approve` to execute or `reject` to cancel.\n".to_string()
+            ));
+
+            // Now send AwaitingApproval to trigger the approval dialog
+            let _ = event_tx.send(SessionEvent::Plan(PlanEvent::AwaitingApproval {
+                plan_id: task_plan_id.clone(),
+            }));
+
+            return Ok(response_text);
+        }
+
+        // === BUILD MODE: Direct reactive execution (like Claude Code) ===
+        let _ = event_tx.send(SessionEvent::Thinking("Working on it...".to_string()));
+
         let mut plan_created = false;
         let mut total_step_count = 0usize;
 
@@ -867,24 +1534,29 @@ impl Session {
                         }
                     }
 
-                    // For edit_file, send diff if we have old content
+                    // For edit_file/write_file, send diff event for sidebar
                     // Note: edit_file uses "file_path", write_file uses "path"
                     if (name == "edit_file" || name == "write_file") && success {
-                        if let Some(old) = old_content {
-                            let path_key = if name == "edit_file" {
-                                "file_path"
-                            } else {
-                                "path"
-                            };
-                            if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
-                                let full_path = self.project_path.join(path);
-                                if let Ok(new_content) = std::fs::read_to_string(&full_path) {
-                                    let _ = event_tx.send(SessionEvent::FileDiff {
-                                        path: path.to_string(),
-                                        old_content: old,
-                                        new_content,
-                                    });
-                                }
+                        let path_key = if name == "edit_file" {
+                            "file_path"
+                        } else {
+                            "path"
+                        };
+                        if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
+                            let full_path = self.project_path.join(path);
+
+                            // Send diff event - use empty string for old_content if file is new
+                            if let Ok(new_content) = std::fs::read_to_string(&full_path) {
+                                let _ = event_tx.send(SessionEvent::FileDiff {
+                                    path: path.to_string(),
+                                    old_content: old_content.unwrap_or_default(),
+                                    new_content: new_content.clone(),
+                                });
+                            }
+
+                            // Notify LSP of file change for diagnostics
+                            if let Err(e) = self.lsp_manager.notify_file_changed(&full_path).await {
+                                tracing::debug!("LSP file change notification failed: {}", e);
                             }
                         }
                     }
@@ -947,9 +1619,60 @@ impl Session {
 
             // Add tool results as a new user message
             if !tool_results.is_empty() {
+                let mut final_results = tool_results;
+                let mut has_issues = false;
+
+                // Check if any file modifications were made
+                let had_file_edits = tools_executed
+                    .iter()
+                    .any(|t| t == "edit_file" || t == "write_file");
+
+                if had_file_edits {
+                    // Give LSP a moment to process file changes
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                    // Run build verification after file modifications
+                    if let Some(build_errors) = self.verify_build().await {
+                        has_issues = true;
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
+                                build_errors
+                            ),
+                        });
+
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n❌ Build failed - errors detected\n".to_string(),
+                        ));
+                    }
+
+                    // Check for LSP diagnostics after file modifications
+                    let diagnostics_summary = self.lsp_manager.get_diagnostics_summary().await;
+                    if !diagnostics_summary.is_empty() {
+                        has_issues = true;
+                        final_results.push(ContentBlock::Text {
+                            text: format!(
+                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                diagnostics_summary
+                            ),
+                        });
+
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n⚠️ LSP detected issues - see diagnostics above\n".to_string(),
+                        ));
+                    }
+
+                    // If no issues, confirm build success
+                    if !has_issues {
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n✓ Build verified successfully\n".to_string(),
+                        ));
+                    }
+                }
+
                 self.messages.push(Message {
                     role: crate::llm::Role::User,
-                    content: tool_results,
+                    content: final_results,
                 });
             }
         }
@@ -1031,54 +1754,160 @@ impl Session {
         plan
     }
 
-    /// Generate a human-readable description of a tool action
+    /// Get the build command for this project from config
+    pub fn get_build_command(&self) -> Option<String> {
+        self.config.build.get_build_command(&self.project_path)
+    }
+
+    /// Get build command hint for prompts
+    pub fn get_build_command_hint(&self) -> String {
+        self.config.build.get_build_command_hint(&self.project_path)
+    }
+
+    /// Run build verification and return any errors
+    ///
+    /// This runs the project's build command and returns the output if there are errors.
+    /// Returns None if build succeeds or if no build command is available.
+    pub async fn verify_build(&self) -> Option<String> {
+        let build_cmd = self.get_build_command()?;
+        let timeout = self.config.build.timeout_secs;
+        let max_output = self.config.build.max_output_bytes;
+
+        // Run the build command with timeout
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&build_cmd)
+                .current_dir(&self.project_path)
+                .output(),
+        )
+        .await;
+
+        let output = match output {
+            Ok(Ok(o)) => o,
+            Ok(Err(_)) => return Some("Build command failed to execute".to_string()),
+            Err(_) => return Some(format!("Build timed out after {}s", timeout)),
+        };
+
+        if output.status.success() {
+            None
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let combined = format!("{}{}", stdout, stderr);
+
+            // Only return if there's meaningful output
+            if combined.trim().is_empty() {
+                Some("Build failed with no output".to_string())
+            } else {
+                // Limit output to configured max size
+                let truncated = if combined.len() > max_output {
+                    format!("{}...\n[output truncated]", &combined[..max_output])
+                } else {
+                    combined.to_string()
+                };
+                Some(truncated)
+            }
+        }
+    }
+
+    /// Generate a human-readable description of a tool action with parameters
     fn describe_tool_action(&self, name: &str, params: &serde_json::Value) -> String {
         match name {
             "read_file" => {
-                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                    format!("Read file: {}", path)
-                } else {
-                    "Read a file".to_string()
-                }
+                let path = params.get("file_path")
+                    .or_else(|| params.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                format!("📖 Read `{}`", path)
             }
             "write_file" => {
-                if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                    let content_preview = params
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .map(|c| {
-                            if c.len() > 50 {
-                                format!("{}...", &c[..50])
-                            } else {
-                                c.to_string()
-                            }
-                        })
-                        .unwrap_or_default();
-                    format!("Write to {}: {}", path, content_preview)
-                } else {
-                    "Write a file".to_string()
-                }
+                let path = params.get("file_path")
+                    .or_else(|| params.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let lines = params.get("content")
+                    .and_then(|v| v.as_str())
+                    .map(|c| c.lines().count())
+                    .unwrap_or(0);
+                format!("📝 Write `{}` ({} lines)", path, lines)
             }
             "edit_file" => {
-                if let Some(path) = params.get("file_path").and_then(|v| v.as_str()) {
-                    format!("Edit file: {}", path)
+                let path = params.get("file_path")
+                    .or_else(|| params.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let old = params.get("old_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                let new = params.get("new_string")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                format!("✏️ Edit `{}` ({} → {} chars)", path, old, new)
+            }
+            "glob" => {
+                let pattern = params.get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let path = params.get("path")
+                    .and_then(|v| v.as_str());
+                if let Some(p) = path {
+                    format!("🔍 Glob `{}` in `{}`", pattern, p)
                 } else {
-                    "Edit a file".to_string()
+                    format!("🔍 Glob `{}`", pattern)
                 }
+            }
+            "grep" => {
+                let pattern = params.get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let path = params.get("path")
+                    .and_then(|v| v.as_str());
+                if let Some(p) = path {
+                    format!("🔎 Grep `{}` in `{}`", pattern, p)
+                } else {
+                    format!("🔎 Grep `{}`", pattern)
+                }
+            }
+            "list" => {
+                let path = params.get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(".");
+                format!("📁 List `{}`", path)
             }
             "bash" => {
-                if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
-                    let cmd_preview = if cmd.len() > 60 {
-                        format!("{}...", &cmd[..60])
-                    } else {
-                        cmd.to_string()
-                    };
-                    format!("Run command: {}", cmd_preview)
+                let cmd = params.get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let cmd_preview = if cmd.len() > 50 {
+                    format!("{}...", &cmd[..50])
                 } else {
-                    "Execute bash command".to_string()
-                }
+                    cmd.to_string()
+                };
+                format!("💻 Run `{}`", cmd_preview)
             }
-            _ => format!("Execute {}", name),
+            "webfetch" => {
+                let url = params.get("url")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let url_short = if url.len() > 40 {
+                    format!("{}...", &url[..40])
+                } else {
+                    url.to_string()
+                };
+                format!("🌐 Fetch `{}`", url_short)
+            }
+            "todowrite" => {
+                let count = params.get("todos")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                format!("📋 Update todos ({} items)", count)
+            }
+            _ => format!("🔧 {}", name),
         }
     }
 
@@ -1231,13 +2060,84 @@ impl Session {
     /// Switch to a different model
     pub async fn switch_model(&mut self, model: &str) -> Result<()> {
         self.config.llm.model = model.to_string();
-        self.llm_client = create_client(&self.config).await?;
+        self.llm_client = Arc::from(create_client(&self.config).await?);
         Ok(())
     }
 
     /// Get current model name
     pub fn get_current_model(&self) -> String {
         self.config.llm.model.clone()
+    }
+
+    /// List available models for the current provider
+    pub async fn list_available_models(&self) -> Result<String> {
+        use crate::config::LlmProvider;
+
+        match &self.config.llm.provider {
+            LlmProvider::GitHubCopilot => {
+                // Get the stored GitHub token
+                let token_path = Config::token_path(&LlmProvider::GitHubCopilot)?;
+                if !token_path.exists() {
+                    return Ok("Not logged in to GitHub Copilot. Run /login to authenticate.".to_string());
+                }
+
+                let stored_token = crate::auth::StoredToken::load(&token_path)?;
+                let github_token = stored_token.get_access_token();
+
+                // Get Copilot token from GitHub token
+                let copilot_token = crate::llm::copilot::get_copilot_token(github_token).await?;
+
+                // Fetch available models
+                let models = crate::llm::copilot::get_copilot_models(&copilot_token).await?;
+
+                let mut output = String::from("📋 Available GitHub Copilot Models:\n\n");
+                let current_model = &self.config.llm.model;
+
+                for model in models {
+                    let marker = if model.id == *current_model { " ← current" } else { "" };
+                    let preview = if model.preview.unwrap_or(false) { " (preview)" } else { "" };
+                    output.push_str(&format!("  • {}{}{}\n", model.id, preview, marker));
+                }
+
+                output.push_str("\nUse /model <name> to switch models.");
+                Ok(output)
+            }
+            LlmProvider::Anthropic => {
+                let mut output = String::from("📋 Available Anthropic Models:\n\n");
+                let current_model = &self.config.llm.model;
+                let models = [
+                    "claude-opus-4-20250514",
+                    "claude-sonnet-4-20250514",
+                    "claude-3-5-sonnet-20241022",
+                    "claude-3-5-haiku-20241022",
+                    "claude-3-opus-20240229",
+                    "claude-3-haiku-20240307",
+                ];
+                for model in models {
+                    let marker = if model == current_model { " ← current" } else { "" };
+                    output.push_str(&format!("  • {}{}\n", model, marker));
+                }
+                output.push_str("\nUse /model <name> to switch models.");
+                Ok(output)
+            }
+            LlmProvider::OpenAI => {
+                let mut output = String::from("📋 Available OpenAI Models:\n\n");
+                let current_model = &self.config.llm.model;
+                let models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4", "gpt-3.5-turbo"];
+                for model in models {
+                    let marker = if model == current_model { " ← current" } else { "" };
+                    output.push_str(&format!("  • {}{}\n", model, marker));
+                }
+                output.push_str("\nUse /model <name> to switch models.");
+                Ok(output)
+            }
+            LlmProvider::OpenRouter => {
+                Ok("📋 OpenRouter Models:\n\nOpenRouter supports many models. Visit https://openrouter.ai/models for the full list.\n\nUse /model <provider/model-name> to switch models.".to_string())
+            }
+            LlmProvider::Ollama => {
+                Ok("📋 Ollama Models:\n\nRun `ollama list` to see installed models.\n\nUse /model <name> to switch models.".to_string())
+            }
+        }
     }
 
     /// Set approval mode
@@ -1477,4 +2377,60 @@ impl Session {
 
         Ok(output)
     }
+}
+
+/// Parse a plan from LLM response text
+///
+/// Expected format:
+/// ```
+/// ## Plan: [Title]
+/// 1. [Step description]
+/// 2. [Step description]
+/// ...
+/// ```
+fn parse_plan_from_response(response: &str) -> (String, Vec<PlanStep>) {
+    let mut title = "Untitled Plan".to_string();
+    let mut steps = Vec::new();
+
+    // Try to find "## Plan: [title]" or just "## [title]"
+    for line in response.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## Plan:") {
+            title = trimmed.trim_start_matches("## Plan:").trim().to_string();
+        } else if trimmed.starts_with("## ") && title == "Untitled Plan" {
+            // Fallback: use any ## header as title
+            title = trimmed.trim_start_matches("## ").trim().to_string();
+        }
+    }
+
+    // Parse numbered steps (e.g., "1. Do something", "2. Do another thing")
+    let step_regex = regex::Regex::new(r"^\s*(\d+)\.\s+(.+)$").unwrap();
+    for line in response.lines() {
+        if let Some(caps) = step_regex.captures(line) {
+            if let Some(description) = caps.get(2) {
+                let desc_text = description.as_str().trim().to_string();
+                let step_id = format!("step-{}", steps.len() + 1);
+                steps.push(PlanStep::new(step_id, desc_text));
+            }
+        }
+    }
+
+    // If no numbered steps found, try to extract bullet points
+    if steps.is_empty() {
+        for line in response.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+                let desc_text = trimmed[2..].trim().to_string();
+                let step_id = format!("step-{}", steps.len() + 1);
+                steps.push(PlanStep::new(step_id, desc_text));
+            }
+        }
+    }
+
+    // If still no steps found, create a generic step
+    if steps.is_empty() {
+        steps.push(PlanStep::new("step-1".to_string(), "Execute the plan".to_string()));
+    }
+
+    (title, steps)
 }

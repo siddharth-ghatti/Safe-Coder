@@ -25,10 +25,12 @@ use tokio::sync::{mpsc, Mutex};
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
 use crate::config::Config;
+use crate::llm::create_client;
 use crate::lsp::{default_lsp_configs, LspClient, LspManager};
 use crate::orchestrator::TaskPlan;
 use crate::planning::PlanEvent;
 use crate::session::{Session, SessionEvent};
+use crate::unified_planning::{ExecutionMode, UnifiedPlanner};
 
 /// Message types for async command execution
 #[derive(Debug)]
@@ -105,6 +107,8 @@ enum AiUpdate {
         block_id: String,
         tokens_compressed: usize,
     },
+    /// Plan approval sender (for TUI to respond to plan approval)
+    PlanApprovalSender(tokio::sync::mpsc::UnboundedSender<bool>),
 }
 
 /// Message types for orchestration updates
@@ -314,8 +318,8 @@ impl ShellTuiRunner {
                 self.app.clear_dirty();
             }
 
-            // Poll for events
-            if event::poll(Duration::from_millis(30))? {
+            // Poll for events (16ms = ~60fps for smooth scrolling)
+            if event::poll(Duration::from_millis(16))? {
                 match event::read()? {
                     Event::Key(key) => {
                         match self
@@ -544,6 +548,30 @@ impl ShellTuiRunner {
                         // Complete tool step in sidebar if in build mode
                         if self.app.agent_mode == crate::tools::AgentMode::Build {
                             self.app.sidebar.complete_tool_step(&tool_name, success);
+
+                            // Update plan step progress for file-modifying tools
+                            if self.app.plan_executing && success {
+                                let is_file_tool = tool_name == "edit_file"
+                                    || tool_name == "write_file"
+                                    || tool_name == "Edit"
+                                    || tool_name == "Write";
+
+                                if is_file_tool {
+                                    // Complete current step and move to next
+                                    let current = self.app.current_plan_step;
+                                    let total = self.app.plan_step_count();
+
+                                    self.app.complete_plan_step(current, true);
+
+                                    if current + 1 < total {
+                                        self.app.current_plan_step = current + 1;
+                                        self.app.start_plan_step(current + 1);
+                                    } else {
+                                        // Plan complete
+                                        self.app.plan_executing = false;
+                                    }
+                                }
+                            }
                         }
 
                         // Mark the tool block as complete
@@ -554,8 +582,8 @@ impl ShellTuiRunner {
                                 child.exit_code = Some(if success { 0 } else { 1 });
                             }
                         }
-                        // If todo_write tool completed, sync todos to sidebar
-                        if tool_name == "todo_write" && success {
+                        // If todowrite tool completed, sync todos to sidebar
+                        if tool_name == "todowrite" && success {
                             self.app.sync_todos_to_sidebar();
                         }
                         self.app.mark_dirty();
@@ -608,6 +636,10 @@ impl ShellTuiRunner {
                     AiUpdate::PlanEvent { event, .. } => {
                         // Update sidebar with plan event
                         self.app.update_plan(&event);
+                    }
+                    AiUpdate::PlanApprovalSender(tx) => {
+                        // Store approval sender for TUI to use when user approves/rejects
+                        self.app.set_plan_approval_tx(tx);
                     }
                     AiUpdate::TokenUsage {
                         input_tokens,
@@ -851,6 +883,51 @@ impl ShellTuiRunner {
             }
         }
 
+        // Handle plan approval popup
+        if self.app.is_plan_approval_visible() {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Switch to build mode and approve
+                    self.app.set_agent_mode(crate::tools::AgentMode::Build);
+                    self.app.approve_plan();
+
+                    // Sync with session and trigger execution
+                    if let Some(session) = &self.app.session {
+                        let session = session.clone();
+                        tokio::spawn(async move {
+                            let mut session = session.lock().await;
+                            session.set_agent_mode(crate::tools::AgentMode::Build);
+                        });
+                    }
+
+                    // Trigger AI to execute the plan by sending a message
+                    self.execute_ai_query(
+                        "The plan has been approved. Execute it now step by step.",
+                        ai_tx.clone(),
+                    )
+                    .await?;
+
+                    return Ok(false);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Show feedback message
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "❌ Plan rejected. You can modify your request and try again.".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
+                    self.app.reject_plan();
+                    return Ok(false);
+                }
+                _ => {
+                    // Ignore other keys while popup is visible
+                    return Ok(false);
+                }
+            }
+        }
+
         match code {
             // Ctrl+C - cancel or clear
             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -910,20 +987,47 @@ impl ShellTuiRunner {
 
             // Ctrl+G - cycle agent mode (PLAN/BUILD)
             KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
+                let _old_mode = self.app.agent_mode;
                 self.app.cycle_agent_mode();
-                // Show feedback and sync with session
-                let mode = self.app.agent_mode;
+                let new_mode = self.app.agent_mode;
                 let prompt = self.app.current_prompt();
-                let block = CommandBlock::system(
-                    format!("Agent mode: {} - {}", mode.short_name(), mode.description()),
-                    prompt,
-                );
+
+                // Show prominent mode switch feedback
+                let message = if new_mode == crate::tools::AgentMode::Plan {
+                    format!(
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         🔍 PLAN MODE ACTIVATED\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         • Read-only exploration mode\n\
+                         • AI will analyze and create plans\n\
+                         • No files will be modified\n\
+                         • Type 'approve' or press Ctrl+G to switch to BUILD mode"
+                    )
+                } else {
+                    // Switching to BUILD mode
+                    let pending_plan_msg = if self.app.pending_approval_plan.is_some() {
+                        "\n• Ready to execute pending plan!"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         🔨 BUILD MODE ACTIVATED\n\
+                         ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\
+                         • Full execution mode\n\
+                         • AI can modify files and run commands\n\
+                         • Press Ctrl+G to switch to PLAN mode{}",
+                        pending_plan_msg
+                    )
+                };
+
+                let block = CommandBlock::system(message, prompt);
                 self.app.add_block(block);
 
                 // Sync agent mode with session if connected
                 if let Some(session) = &self.app.session {
                     let session = session.clone();
-                    let agent_mode = mode;
+                    let agent_mode = new_mode;
                     tokio::spawn(async move {
                         let mut session = session.lock().await;
                         session.set_agent_mode(agent_mode);
@@ -994,7 +1098,9 @@ impl ShellTuiRunner {
                 if self.app.file_picker.visible {
                     // Left arrow does nothing in file picker
                 } else if self.app.autocomplete_visible() {
+                    // Hide any autocomplete and move cursor
                     self.app.autocomplete.hide();
+                    self.app.command_autocomplete.hide();
                     self.app.cursor_left();
                 } else {
                     self.app.cursor_left();
@@ -1123,6 +1229,43 @@ impl ShellTuiRunner {
         orch_tx: mpsc::UnboundedSender<OrchestrationUpdate>,
     ) -> Result<()> {
         let input = input.trim();
+        let input_lower = input.to_lowercase();
+
+        // Check for plan approval commands when a plan is pending
+        if self.app.plan_approval_tx.is_some() || self.app.pending_approval_plan.is_some() {
+            if input_lower == "approve" || input_lower == "yes" || input_lower == "y" {
+                // Switch to build mode and approve
+                self.app.set_agent_mode(crate::tools::AgentMode::Build);
+                self.app.approve_plan();
+
+                // Sync with session
+                if let Some(session) = &self.app.session {
+                    let session = session.clone();
+                    tokio::spawn(async move {
+                        let mut session = session.lock().await;
+                        session.set_agent_mode(crate::tools::AgentMode::Build);
+                    });
+                }
+
+                // Trigger AI to execute the plan
+                self.execute_ai_query(
+                    "The plan has been approved. Execute it now step by step.",
+                    ai_tx.clone(),
+                )
+                .await?;
+
+                return Ok(());
+            } else if input_lower == "reject" || input_lower == "no" || input_lower == "n" {
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    "❌ Plan rejected. You can modify your request and try again.".to_string(),
+                    prompt,
+                );
+                self.app.add_block(block);
+                self.app.reject_plan();
+                return Ok(());
+            }
+        }
 
         // Check for slash commands first (e.g., /connect, /help)
         if let Some(slash_cmd) = ShellTuiApp::parse_slash_command(input) {
@@ -1338,6 +1481,27 @@ Keyboard Shortcuts:
                 self.disconnect_ai();
             }
 
+            SlashCommand::Agent => {
+                self.app.cycle_agent_mode();
+                let mode = self.app.agent_mode;
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    format!("Agent mode: {} - {}", mode.short_name(), mode.description()),
+                    prompt,
+                );
+                self.app.add_block(block);
+
+                // Sync agent mode with session if connected
+                if let Some(session) = &self.app.session {
+                    let session = session.clone();
+                    let agent_mode = mode;
+                    tokio::spawn(async move {
+                        let mut session = session.lock().await;
+                        session.set_agent_mode(agent_mode);
+                    });
+                }
+            }
+
             SlashCommand::Help => {
                 let prompt = self.app.current_prompt();
                 let help_text = r#"Safe Coder Shell - AI-Powered Development
@@ -1348,6 +1512,7 @@ Commands:
   /help             Show this help
   /tools            List available AI tools
   /mode             Toggle permission mode (ASK/EDIT/YOLO)
+  /agent            Toggle agent mode (PLAN/BUILD)
   /orchestrate      Run multi-agent task
 
 Shell:
@@ -1365,6 +1530,7 @@ Examples:
 Keyboard:
   Ctrl+C      Cancel/exit
   Ctrl+P      Toggle permission mode
+  Ctrl+G      Toggle agent mode
   Ctrl+L      Clear screen
   Tab         Autocomplete"#;
                 let block = CommandBlock::system(help_text.to_string(), prompt);
@@ -1467,14 +1633,269 @@ Keyboard:
                     }
                 });
             }
+
+            SlashCommand::Models => {
+                let prompt = self.app.current_prompt();
+
+                // Get models based on current provider
+                let provider = &self.config.llm.provider;
+                let output = match provider {
+                    crate::config::LlmProvider::GitHubCopilot => {
+                        // Try to get models from GitHub Copilot
+                        match self.get_copilot_models().await {
+                            Ok(models) => {
+                                let mut output = String::from("📋 Available GitHub Copilot Models:\n\n");
+                                let current_model = &self.config.llm.model;
+                                for model in models {
+                                    let marker = if model.id == *current_model { " ← current" } else { "" };
+                                    let preview = if model.preview.unwrap_or(false) { " (preview)" } else { "" };
+                                    output.push_str(&format!("  • {}{}{}\n", model.id, preview, marker));
+                                }
+                                output.push_str("\nUse /model <name> to switch models.");
+                                output
+                            }
+                            Err(e) => format!("Failed to fetch models: {}\n\nMake sure you're logged in with /login copilot", e),
+                        }
+                    }
+                    crate::config::LlmProvider::Anthropic => {
+                        let mut output = String::from("📋 Available Anthropic Models:\n\n");
+                        let current_model = &self.config.llm.model;
+                        let models = [
+                            "claude-opus-4-20250514",
+                            "claude-sonnet-4-20250514",
+                            "claude-3-5-sonnet-20241022",
+                            "claude-3-5-haiku-20241022",
+                        ];
+                        for model in models {
+                            let marker = if model == current_model { " ← current" } else { "" };
+                            output.push_str(&format!("  • {}{}\n", model, marker));
+                        }
+                        output.push_str("\nUse /model <name> to switch models.");
+                        output
+                    }
+                    crate::config::LlmProvider::OpenAI => {
+                        let mut output = String::from("📋 Available OpenAI Models:\n\n");
+                        let current_model = &self.config.llm.model;
+                        let models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"];
+                        for model in models {
+                            let marker = if model == current_model { " ← current" } else { "" };
+                            output.push_str(&format!("  • {}{}\n", model, marker));
+                        }
+                        output.push_str("\nUse /model <name> to switch models.");
+                        output
+                    }
+                    crate::config::LlmProvider::OpenRouter => {
+                        "📋 OpenRouter Models:\n\nVisit https://openrouter.ai/models for the full list.\nUse /model <provider/model-name> to switch.".to_string()
+                    }
+                    crate::config::LlmProvider::Ollama => {
+                        "📋 Ollama Models:\n\nRun `ollama list` to see installed models.\nUse /model <name> to switch.".to_string()
+                    }
+                };
+
+                let block = CommandBlock::system(output, prompt);
+                self.app.add_block(block);
+            }
+
+            SlashCommand::Provider(provider_opt) => {
+                let prompt = self.app.current_prompt();
+
+                match provider_opt {
+                    Some(provider_str) => {
+                        // Switch provider
+                        let new_provider = match provider_str.to_lowercase().as_str() {
+                            "anthropic" | "claude" => Some((crate::config::LlmProvider::Anthropic, "claude-sonnet-4-20250514")),
+                            "openai" | "gpt" => Some((crate::config::LlmProvider::OpenAI, "gpt-4o")),
+                            "copilot" | "github-copilot" | "github" => Some((crate::config::LlmProvider::GitHubCopilot, "gpt-4o")),
+                            "openrouter" => Some((crate::config::LlmProvider::OpenRouter, "anthropic/claude-3.5-sonnet")),
+                            "ollama" => Some((crate::config::LlmProvider::Ollama, "llama3")),
+                            _ => None,
+                        };
+
+                        if let Some((provider, default_model)) = new_provider {
+                            self.config.llm.provider = provider.clone();
+                            self.config.llm.model = default_model.to_string();
+
+                            // Update display model name in app
+                            self.app.model_display = default_model.to_string();
+
+                            // Save config
+                            if let Err(e) = self.config.save() {
+                                let block = CommandBlock::system(
+                                    format!("Warning: Failed to save config: {}", e),
+                                    prompt.clone(),
+                                );
+                                self.app.add_block(block);
+                            }
+
+                            let provider_name = match provider {
+                                crate::config::LlmProvider::Anthropic => "Anthropic",
+                                crate::config::LlmProvider::OpenAI => "OpenAI",
+                                crate::config::LlmProvider::GitHubCopilot => "GitHub Copilot",
+                                crate::config::LlmProvider::OpenRouter => "OpenRouter",
+                                crate::config::LlmProvider::Ollama => "Ollama",
+                            };
+
+                            let block = CommandBlock::system(
+                                format!("✓ Switched to {} (model: {})\n\nUse /connect to reconnect with new provider.", provider_name, default_model),
+                                prompt,
+                            );
+                            self.app.add_block(block);
+
+                            // Disconnect current AI connection so reconnect uses new provider
+                            self.disconnect_ai();
+                        } else {
+                            let block = CommandBlock::system(
+                                format!("Unknown provider: {}\n\nAvailable providers:\n  • anthropic (Claude)\n  • openai (GPT)\n  • copilot (GitHub Copilot)\n  • openrouter\n  • ollama", provider_str),
+                                prompt,
+                            );
+                            self.app.add_block(block);
+                        }
+                    }
+                    None => {
+                        // Show current provider
+                        let current = match &self.config.llm.provider {
+                            crate::config::LlmProvider::Anthropic => "anthropic",
+                            crate::config::LlmProvider::OpenAI => "openai",
+                            crate::config::LlmProvider::GitHubCopilot => "github-copilot",
+                            crate::config::LlmProvider::OpenRouter => "openrouter",
+                            crate::config::LlmProvider::Ollama => "ollama",
+                        };
+                        let block = CommandBlock::system(
+                            format!("Current provider: {}\nCurrent model: {}\n\nUse /provider <name> to switch.\nAvailable: anthropic, openai, copilot, openrouter, ollama", current, self.config.llm.model),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                }
+            }
+
+            SlashCommand::Model(model_opt) => {
+                let prompt = self.app.current_prompt();
+
+                match model_opt {
+                    Some(model_str) => {
+                        self.config.llm.model = model_str.clone();
+
+                        // Save config
+                        if let Err(e) = self.config.save() {
+                            let block = CommandBlock::system(
+                                format!("Warning: Failed to save config: {}", e),
+                                prompt.clone(),
+                            );
+                            self.app.add_block(block);
+                        }
+
+                        let block = CommandBlock::system(
+                            format!("✓ Switched to model: {}\n\nUse /connect to reconnect with new model.", model_str),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+
+                        // Disconnect so reconnect uses new model
+                        self.disconnect_ai();
+                    }
+                    None => {
+                        let block = CommandBlock::system(
+                            format!("Current model: {}\n\nUse /model <name> to switch.\nUse /models to see available models.", self.config.llm.model),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                }
+            }
+
+            SlashCommand::Login(provider_opt) => {
+                let prompt = self.app.current_prompt();
+                let provider_str = provider_opt.as_deref().unwrap_or("copilot");
+
+                match provider_str.to_lowercase().as_str() {
+                    "copilot" | "github-copilot" | "github" => {
+                        let block = CommandBlock::system(
+                            "Starting GitHub Copilot login...\n\nPlease follow the device flow in your browser.".to_string(),
+                            prompt.clone(),
+                        );
+                        self.app.add_block(block);
+
+                        // Run login flow
+                        match self.login_github_copilot().await {
+                            Ok(()) => {
+                                // Switch provider to copilot
+                                self.config.llm.provider = crate::config::LlmProvider::GitHubCopilot;
+                                self.config.llm.model = "gpt-4o".to_string();
+                                let _ = self.config.save();
+
+                                let block = CommandBlock::system(
+                                    "✓ Successfully logged in to GitHub Copilot!\n\nProvider switched to GitHub Copilot.\nUse /models to see available models.\nUse /connect to connect.".to_string(),
+                                    prompt,
+                                );
+                                self.app.add_block(block);
+                            }
+                            Err(e) => {
+                                let block = CommandBlock::system(
+                                    format!("✗ Login failed: {}", e),
+                                    prompt,
+                                );
+                                self.app.add_block(block);
+                            }
+                        }
+                    }
+                    "anthropic" | "claude" => {
+                        let block = CommandBlock::system(
+                            "Anthropic login:\n\nSet your API key in config or environment:\n  export ANTHROPIC_API_KEY=your-key-here\n\nOr edit ~/.config/safe-coder/config.toml".to_string(),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                    _ => {
+                        let block = CommandBlock::system(
+                            format!("Unknown provider: {}\n\nAvailable for login:\n  • copilot (GitHub Copilot device flow)\n  • anthropic (API key)", provider_str),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                }
+            }
         }
 
         Ok(())
     }
 
+    /// Get available models from GitHub Copilot
+    async fn get_copilot_models(&self) -> Result<Vec<crate::llm::copilot::CopilotModel>> {
+        use crate::config::LlmProvider;
+
+        let token_path = crate::config::Config::token_path(&LlmProvider::GitHubCopilot)?;
+        if !token_path.exists() {
+            anyhow::bail!("Not logged in to GitHub Copilot");
+        }
+
+        let stored_token = crate::auth::StoredToken::load(&token_path)?;
+        let github_token = stored_token.get_access_token();
+
+        let copilot_token = crate::llm::copilot::get_copilot_token(github_token).await?;
+        let models = crate::llm::copilot::get_copilot_models(&copilot_token).await?;
+
+        Ok(models)
+    }
+
+    /// Login to GitHub Copilot using device flow
+    async fn login_github_copilot(&mut self) -> Result<()> {
+        use crate::auth::github_copilot::GitHubCopilotAuth;
+        use crate::auth::{run_device_flow, StoredToken};
+        use crate::config::LlmProvider;
+
+        let auth = GitHubCopilotAuth::new();
+        let token = run_device_flow(&auth, "GitHub Copilot").await?;
+
+        // Save the token
+        let token_path = crate::config::Config::token_path(&LlmProvider::GitHubCopilot)?;
+        token.save(&token_path)?;
+
+        Ok(())
+    }
+
     /// Run orchestration asynchronously
-    /// Run orchestration asynchronously - simplified version for TUI
-    /// This runs Claude CLI directly without the full workspace/worktree setup
+    /// This creates a proper plan using UnifiedPlanner before executing tasks
     async fn run_orchestration(
         project_path: PathBuf,
         config: Config,
@@ -1487,44 +1908,202 @@ Keyboard:
             block_id: block_id.clone(),
         });
 
-        // For TUI mode, we'll run Claude CLI directly without worktrees
-        // This is simpler and more reliable for interactive use
         let cli_path = config.orchestrator.claude_cli_path.clone();
 
-        // Create a simple plan with one task
+        // Create LLM client and use UnifiedPlanner to create a proper plan
+        let llm_client = match create_client(&config).await {
+            Ok(client) => client,
+            Err(e) => {
+                let _ = tx.send(OrchestrationUpdate::Complete {
+                    block_id,
+                    summary: format!("Failed to create LLM client for planning: {}", e),
+                    success_count: 0,
+                    fail_count: 1,
+                });
+                return;
+            }
+        };
+
+        // Use UnifiedPlanner to create a thoughtful, structured plan
+        let planner = UnifiedPlanner::new(ExecutionMode::Orchestration);
+        let unified_plan = match planner.create_plan(llm_client.as_ref(), &task, None).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                // Fall back to simple single-task plan if planning fails
+                eprintln!("Planning failed, using simple plan: {}", e);
+                let _ = tx.send(OrchestrationUpdate::TaskOutput {
+                    block_id: block_id.clone(),
+                    task_id: "planning".to_string(),
+                    line: format!(
+                        "Note: Advanced planning unavailable ({}), using direct execution",
+                        e
+                    ),
+                });
+
+                // Create fallback simple plan
+                use crate::orchestrator::Task;
+                let mut plan = TaskPlan::new(
+                    "tui-task-1".to_string(),
+                    task.clone(),
+                    format!("Execute: {}", task),
+                );
+                plan.add_task(Task::new("task-1".to_string(), task.clone(), task.clone()));
+
+                let _ = tx.send(OrchestrationUpdate::PlanReady {
+                    block_id: block_id.clone(),
+                    plan: plan.clone(),
+                });
+
+                // Execute fallback single task
+                Self::execute_single_task(&cli_path, &project_path, &task, block_id, tx).await;
+                return;
+            }
+        };
+
+        // Convert UnifiedPlan to TaskPlan for display
         use crate::orchestrator::Task;
-        let mut plan = TaskPlan::new(
-            "tui-task-1".to_string(),
+        let mut task_plan = TaskPlan::new(
+            unified_plan.id.clone(),
             task.clone(),
-            format!("Execute: {}", task),
+            unified_plan.title.clone(),
         );
-        plan.add_task(Task::new("task-1".to_string(), task.clone(), task.clone()));
+
+        // Flatten groups into tasks for execution
+        let mut all_tasks: Vec<(String, String, String)> = Vec::new();
+        for group in &unified_plan.groups {
+            for step in &group.steps {
+                task_plan.add_task(Task::new(
+                    step.id.clone(),
+                    step.description.clone(),
+                    step.instructions.clone(),
+                ));
+                all_tasks.push((
+                    step.id.clone(),
+                    step.description.clone(),
+                    step.instructions.clone(),
+                ));
+            }
+        }
 
         // Send plan ready
         let _ = tx.send(OrchestrationUpdate::PlanReady {
             block_id: block_id.clone(),
-            plan: plan.clone(),
+            plan: task_plan.clone(),
         });
 
+        // Send executing status
+        let _ = tx.send(OrchestrationUpdate::Executing {
+            block_id: block_id.clone(),
+            task_count: all_tasks.len(),
+        });
+
+        // Execute each task sequentially (groups could be parallelized in full orchestration mode)
+        let mut success_count = 0;
+        let mut fail_count = 0;
+        let mut all_outputs = Vec::new();
+
+        for (task_id, description, instructions) in all_tasks {
+            // Send task started
+            let _ = tx.send(OrchestrationUpdate::TaskStarted {
+                block_id: block_id.clone(),
+                task_id: task_id.clone(),
+                description: description.clone(),
+                worker: "claude".to_string(),
+            });
+
+            // Build the full prompt for this step
+            let step_prompt = format!(
+                "Task: {}\n\nInstructions:\n{}\n\nOriginal request context: {}",
+                description, instructions, task
+            );
+
+            // Run Claude CLI for this step
+            let result = Self::run_claude_cli(
+                &cli_path,
+                &project_path,
+                &step_prompt,
+                block_id.clone(),
+                task_id.clone(),
+                tx.clone(),
+            )
+            .await;
+
+            let (success, output) = match result {
+                Ok(output) => (true, output),
+                Err(e) => (false, e.to_string()),
+            };
+
+            if success {
+                success_count += 1;
+            } else {
+                fail_count += 1;
+            }
+
+            all_outputs.push(format!("## {}\n{}", description, output));
+
+            // Send task completed
+            let _ = tx.send(OrchestrationUpdate::TaskCompleted {
+                block_id: block_id.clone(),
+                task_id: task_id.clone(),
+                success,
+                output: output.clone(),
+            });
+
+            // Stop on failure (could be configurable)
+            if !success {
+                break;
+            }
+        }
+
+        // Send completion
+        let _ = tx.send(OrchestrationUpdate::Complete {
+            block_id,
+            summary: if fail_count == 0 {
+                format!(
+                    "All {} tasks completed successfully:\n\n{}",
+                    success_count,
+                    all_outputs.join("\n\n")
+                )
+            } else {
+                format!(
+                    "{} succeeded, {} failed:\n\n{}",
+                    success_count,
+                    fail_count,
+                    all_outputs.join("\n\n")
+                )
+            },
+            success_count,
+            fail_count,
+        });
+    }
+
+    /// Execute a single task as fallback when planning fails
+    async fn execute_single_task(
+        cli_path: &str,
+        project_path: &PathBuf,
+        task: &str,
+        block_id: String,
+        tx: mpsc::UnboundedSender<OrchestrationUpdate>,
+    ) {
         // Send executing status
         let _ = tx.send(OrchestrationUpdate::Executing {
             block_id: block_id.clone(),
             task_count: 1,
         });
 
-        // Send task started (using Claude as the worker for shell mode)
+        // Send task started
         let _ = tx.send(OrchestrationUpdate::TaskStarted {
             block_id: block_id.clone(),
             task_id: "1".to_string(),
-            description: task.clone(),
+            description: task.to_string(),
             worker: "claude".to_string(),
         });
 
-        // Run Claude CLI directly with streaming output
+        // Run Claude CLI directly
         let result = Self::run_claude_cli(
-            &cli_path,
-            &project_path,
-            &task,
+            cli_path,
+            project_path,
+            task,
             block_id.clone(),
             "1".to_string(),
             tx.clone(),
@@ -2088,6 +2667,10 @@ Keyboard:
                                 block_id: block_id_inner.clone(),
                                 event: plan_event,
                             },
+                            // Plan approval sender - forward to TUI
+                            SessionEvent::PlanApprovalSender(tx) => {
+                                AiUpdate::PlanApprovalSender(tx)
+                            }
                             // Token usage updates
                             SessionEvent::TokenUsage {
                                 input_tokens,
@@ -2160,6 +2743,13 @@ Keyboard:
         let mut config = self.config.clone();
         config.git.auto_commit = false;
 
+        // Debug: log the provider and model being used
+        tracing::info!(
+            "connect_ai: Using provider {:?}, model {}",
+            config.llm.provider,
+            config.llm.model
+        );
+
         match Session::new(config, self.app.cwd.clone()).await {
             Ok(session) => {
                 self.app.session = Some(Arc::new(Mutex::new(session)));
@@ -2170,8 +2760,16 @@ Keyboard:
                 );
             }
             Err(e) => {
+                tracing::error!("connect_ai failed: {:?}", e);
+                // Show full error chain for debugging
+                let mut error_details = format!("Failed to connect: {}", e);
+                let mut source = e.source();
+                while let Some(s) = source {
+                    error_details.push_str(&format!("\n  Caused by: {}", s));
+                    source = s.source();
+                }
                 block.fail(
-                    format!("Failed to connect: {}", e),
+                    error_details,
                     "Make sure you have configured an API key or run 'safe-coder login'"
                         .to_string(),
                     1,

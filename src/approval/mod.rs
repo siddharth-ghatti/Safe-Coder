@@ -1,25 +1,26 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Execution mode for the agent
+/// User-facing execution mode for the agent
+/// Controls whether to show plan and require approval before execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ExecutionMode {
+pub enum UserMode {
     /// Plan mode: Deep planning with user approval before execution
     /// Shows detailed analysis of what will be done and waits for user confirmation
     Plan,
-    /// Act mode: Lighter planning that auto-executes
-    /// Still plans internally but executes without asking
-    Act,
+    /// Build mode: Lighter planning that auto-executes
+    /// Still plans internally but executes without asking (like Claude Code)
+    Build,
 }
 
-impl ExecutionMode {
-    /// Parse execution mode from string
+impl UserMode {
+    /// Parse user mode from string
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
-            "plan" => Ok(ExecutionMode::Plan),
-            "act" => Ok(ExecutionMode::Act),
+            "plan" => Ok(UserMode::Plan),
+            "build" | "act" => Ok(UserMode::Build), // Accept "act" for backward compatibility
             _ => Err(anyhow::anyhow!(
-                "Invalid execution mode. Valid modes: plan, act"
+                "Invalid user mode. Valid modes: plan, build"
             )),
         }
     }
@@ -27,29 +28,29 @@ impl ExecutionMode {
     /// Convert to string
     pub fn as_str(&self) -> &str {
         match self {
-            ExecutionMode::Plan => "plan",
-            ExecutionMode::Act => "act",
+            UserMode::Plan => "plan",
+            UserMode::Build => "build",
         }
     }
 
     /// Check if this mode requires user approval before execution
     pub fn requires_approval(&self) -> bool {
-        matches!(self, ExecutionMode::Plan)
+        matches!(self, UserMode::Plan)
     }
 
     /// Check if this mode should show detailed planning output
     pub fn show_detailed_plan(&self) -> bool {
-        matches!(self, ExecutionMode::Plan)
+        matches!(self, UserMode::Plan)
     }
 }
 
-impl Default for ExecutionMode {
+impl Default for UserMode {
     fn default() -> Self {
-        ExecutionMode::Act
+        UserMode::Build
     }
 }
 
-impl std::fmt::Display for ExecutionMode {
+impl std::fmt::Display for UserMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
     }
@@ -99,7 +100,7 @@ impl ApprovalMode {
             ApprovalMode::AutoEdit => {
                 // Auto-approve read, write, edit; ask for bash and others
                 !matches!(tool_name, "read_file" | "write_file" | "edit_file")
-            },
+            }
             ApprovalMode::Default => true,
             ApprovalMode::Plan => true,
         }
@@ -218,7 +219,11 @@ impl ExecutionPlan {
             description: description.clone(),
             parameters: serde_json::json!({}),
             expected_outcome: description,
-            risk_level: if requires_approval { RiskLevel::Medium } else { RiskLevel::Low },
+            risk_level: if requires_approval {
+                RiskLevel::Medium
+            } else {
+                RiskLevel::Low
+            },
         });
     }
 
@@ -261,8 +266,12 @@ impl ExecutionPlan {
 
         // Complexity indicator
         if deep {
-            let complexity_bar = "█".repeat(self.complexity as usize) + &"░".repeat(5 - self.complexity as usize);
-            output.push_str(&format!("📊 Complexity: [{}] ({}/5)\n\n", complexity_bar, self.complexity));
+            let complexity_bar =
+                "█".repeat(self.complexity as usize) + &"░".repeat(5 - self.complexity as usize);
+            output.push_str(&format!(
+                "📊 Complexity: [{}] ({}/5)\n\n",
+                complexity_bar, self.complexity
+            ));
         }
 
         // Affected files
@@ -286,7 +295,10 @@ impl ExecutionPlan {
                 tool.description
             ));
 
-            if deep && !tool.expected_outcome.is_empty() && tool.expected_outcome != tool.description {
+            if deep
+                && !tool.expected_outcome.is_empty()
+                && tool.expected_outcome != tool.description
+            {
                 output.push_str(&format!("      → Expected: {}\n", tool.expected_outcome));
             }
         }
@@ -375,28 +387,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_execution_mode_parse() {
-        assert_eq!(ExecutionMode::from_str("plan").unwrap(), ExecutionMode::Plan);
-        assert_eq!(ExecutionMode::from_str("act").unwrap(), ExecutionMode::Act);
-        assert!(ExecutionMode::from_str("invalid").is_err());
+    fn test_user_mode_parse() {
+        assert_eq!(UserMode::from_str("plan").unwrap(), UserMode::Plan);
+        assert_eq!(UserMode::from_str("build").unwrap(), UserMode::Build);
+        assert_eq!(UserMode::from_str("act").unwrap(), UserMode::Build); // Backward compat
+        assert!(UserMode::from_str("invalid").is_err());
     }
 
     #[test]
-    fn test_execution_mode_properties() {
-        let plan = ExecutionMode::Plan;
+    fn test_user_mode_properties() {
+        let plan = UserMode::Plan;
         assert!(plan.requires_approval());
         assert!(plan.show_detailed_plan());
 
-        let act = ExecutionMode::Act;
-        assert!(!act.requires_approval());
-        assert!(!act.show_detailed_plan());
+        let build = UserMode::Build;
+        assert!(!build.requires_approval());
+        assert!(!build.show_detailed_plan());
     }
 
     #[test]
     fn test_approval_mode_parse() {
         assert_eq!(ApprovalMode::from_str("plan").unwrap(), ApprovalMode::Plan);
-        assert_eq!(ApprovalMode::from_str("default").unwrap(), ApprovalMode::Default);
-        assert_eq!(ApprovalMode::from_str("auto-edit").unwrap(), ApprovalMode::AutoEdit);
+        assert_eq!(
+            ApprovalMode::from_str("default").unwrap(),
+            ApprovalMode::Default
+        );
+        assert_eq!(
+            ApprovalMode::from_str("auto-edit").unwrap(),
+            ApprovalMode::AutoEdit
+        );
         assert_eq!(ApprovalMode::from_str("yolo").unwrap(), ApprovalMode::Yolo);
     }
 
@@ -417,12 +436,12 @@ mod tests {
         plan.add_tool(
             PlannedTool::new("read_file", "Read config.rs")
                 .with_params(serde_json::json!({"path": "src/config.rs"}))
-                .auto_risk()
+                .auto_risk(),
         );
         plan.add_tool(
             PlannedTool::new("bash", "Run tests")
                 .with_params(serde_json::json!({"command": "cargo test"}))
-                .auto_risk()
+                .auto_risk(),
         );
         plan.set_complexity(2);
 

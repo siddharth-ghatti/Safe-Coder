@@ -13,6 +13,8 @@ pub enum SlashCommand {
     Chat(ChatSubcommand),
     Memory(MemorySubcommand),
     Model(Option<String>),
+    /// List available models for the current provider
+    Models,
     Restore(Option<String>),
     ApprovalMode(Option<String>),
     ExecutionMode(Option<String>),
@@ -34,7 +36,19 @@ pub enum SlashCommand {
     Compact,
     /// Skill management
     Skill(SkillSubcommand),
+    /// Show current unified plan status
+    Plan(PlanSubcommand),
     Unknown(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum PlanSubcommand {
+    /// Show current plan status
+    Show,
+    /// List all step groups
+    Groups,
+    /// Show plan history
+    History,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +114,7 @@ impl SlashCommand {
             "chat" => Self::parse_chat_subcommand(args),
             "memory" => Self::parse_memory_subcommand(args),
             "model" => SlashCommand::Model(args.get(0).map(|s| s.to_string())),
+            "models" => SlashCommand::Models,
             "restore" => SlashCommand::Restore(args.get(0).map(|s| s.to_string())),
             "approval-mode" => SlashCommand::ApprovalMode(args.get(0).map(|s| s.to_string())),
             // /mode and /agent are aliases for execution mode
@@ -123,7 +138,22 @@ impl SlashCommand {
             "sessions" => SlashCommand::Chat(ChatSubcommand::List),
             // Skill management
             "skill" | "skills" => Self::parse_skill_subcommand(args),
+            // Plan management
+            "plan" => Self::parse_plan_subcommand(args),
             _ => SlashCommand::Unknown(input.to_string()),
+        }
+    }
+
+    fn parse_plan_subcommand(args: &[&str]) -> SlashCommand {
+        if args.is_empty() {
+            return SlashCommand::Plan(PlanSubcommand::Show);
+        }
+
+        match args[0].to_lowercase().as_str() {
+            "show" | "status" => SlashCommand::Plan(PlanSubcommand::Show),
+            "groups" | "parallel" => SlashCommand::Plan(PlanSubcommand::Groups),
+            "history" | "log" => SlashCommand::Plan(PlanSubcommand::History),
+            _ => SlashCommand::Plan(PlanSubcommand::Show),
         }
     }
 
@@ -291,6 +321,10 @@ pub async fn execute_slash_command(
                 )))
             }
         },
+        SlashCommand::Models => {
+            let models = session.list_available_models().await?;
+            Ok(CommandResult::Message(models))
+        }
         SlashCommand::Restore(file) => {
             session.restore_file(file.as_deref()).await?;
             Ok(CommandResult::Message(
@@ -314,14 +348,14 @@ pub async fn execute_slash_command(
             }
         },
         SlashCommand::ExecutionMode(mode) => {
-            use crate::approval::ExecutionMode;
+            use crate::approval::UserMode;
             match mode {
                 Some(m) => {
-                    let exec_mode = ExecutionMode::from_str(&m)?;
-                    session.set_execution_mode(exec_mode);
-                    let description = match exec_mode {
-                        ExecutionMode::Plan => "Deep planning with user approval before execution",
-                        ExecutionMode::Act => "Lightweight planning with auto-execution",
+                    let user_mode = UserMode::from_str(&m)?;
+                    session.set_user_mode(user_mode);
+                    let description = match user_mode {
+                        UserMode::Plan => "Deep planning with user approval before execution",
+                        UserMode::Build => "Lightweight planning with auto-execution",
                     };
                     Ok(CommandResult::Message(format!(
                         "✓ Execution mode set to: {} ({})",
@@ -329,12 +363,16 @@ pub async fn execute_slash_command(
                     )))
                 }
                 None => {
-                    let current = session.execution_mode();
+                    let current = session.user_mode();
                     let description = match current {
-                        ExecutionMode::Plan => "Deep planning with user approval before execution",
-                        ExecutionMode::Act => "Lightweight planning with auto-execution",
+                        UserMode::Plan => "Deep planning with user approval before execution",
+                        UserMode::Build => "Lightweight planning with auto-execution",
                     };
-                    Ok(CommandResult::Message(format!("Current execution mode: {} ({})\n\nAvailable modes:\n  plan - Deep planning with user approval\n  act  - Auto-execution with brief summaries", current, description)))
+                    Ok(CommandResult::Message(format!(
+                        "Current execution mode: {} ({})",
+                        current.as_str(),
+                        description
+                    )))
                 }
             }
         }
@@ -388,10 +426,28 @@ pub async fn execute_slash_command(
             Ok(CommandResult::Message(result))
         }
         SlashCommand::Skill(subcmd) => execute_skill_command(subcmd).await,
+        SlashCommand::Plan(subcmd) => execute_plan_command(subcmd, session).await,
         SlashCommand::Unknown(cmd) => Ok(CommandResult::Message(format!(
             "Unknown command: /{}. Type /help for available commands.",
             cmd
         ))),
+    }
+}
+
+async fn execute_plan_command(subcmd: PlanSubcommand, session: &Session) -> Result<CommandResult> {
+    match subcmd {
+        PlanSubcommand::Show => {
+            let output = session.format_current_plan();
+            Ok(CommandResult::Message(output))
+        }
+        PlanSubcommand::Groups => {
+            let output = session.format_plan_groups();
+            Ok(CommandResult::Message(output))
+        }
+        PlanSubcommand::History => {
+            let output = session.format_plan_history();
+            Ok(CommandResult::Message(output))
+        }
     }
 }
 
@@ -584,6 +640,7 @@ CONFIGURATION
   /mode [plan|act]    Set execution mode (plan/act)
   /agent [plan|act]   Alias for /mode
   /model [name]       Switch model or show current
+  /models             List available models for current provider
   /approval-mode [mode]  Set approval mode (plan/default/auto-edit/yolo)
   /settings           Show current settings
 
@@ -611,6 +668,11 @@ SKILLS (specialized knowledge)
   /skill activate <name>   Activate a skill
   /skill deactivate <name> Deactivate a skill
   /skill info <name>  Show skill details
+
+UNIFIED PLANNING
+  /plan               Show current plan status
+  /plan groups        Show step groups and parallelism
+  /plan history       Show plan execution history
 
 OTHER
   /copy               Copy last output to clipboard
@@ -693,6 +755,8 @@ pub fn get_commands_text() -> String {
                         • act  - Auto-execution with brief summaries
   /agent [plan|act]     Alias for /mode
   /model [name]         Switch AI model or show current model
+  /models               List available models for current provider
+                        (fetches dynamically for GitHub Copilot)
   /approval-mode [mode] Set approval mode:
                         • plan    - Show execution plan before running
                         • default - Ask before each tool use
@@ -722,6 +786,15 @@ pub fn get_commands_text() -> String {
   /skill activate <name>  Activate a skill (injects knowledge into prompts)
   /skill deactivate <name> Deactivate a skill
   /skill info <name>      Show details about a specific skill
+
+📐 UNIFIED PLANNING
+  /plan                   Show current plan status and execution mode
+  /plan groups            Show step groups with parallelism info
+  /plan history           Show execution history of plans
+                          The unified planning system creates mode-aware plans:
+                          • Direct - Sequential inline execution
+                          • Subagent - Parallel internal agents
+                          • Orchestration - Parallel CLI workers in git worktrees
 
 📋 OTHER UTILITIES
   /copy                 Copy the last AI response to clipboard
