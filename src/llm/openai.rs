@@ -23,11 +23,32 @@ struct OpenAiRequest {
     max_tokens: Option<usize>,
 }
 
+/// Content can be either a simple string or an array of content parts (for multimodal)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OpenAiContent {
+    Text(String),
+    Parts(Vec<OpenAiContentPart>),
+}
+
+/// Content part for multimodal messages
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlData },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ImageUrlData {
+    url: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenAiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OpenAiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,9 +149,31 @@ impl OpenAiClient {
 
     /// Convert from shared format to OpenAI-specific format
     fn from_compat_message(msg: OpenAiCompatMessage) -> OpenAiMessage {
+        // Handle multimodal content (images) vs simple text
+        let content = if let Some(parts) = msg.content_parts {
+            // Multimodal: convert to content parts array
+            let openai_parts: Vec<OpenAiContentPart> = parts
+                .into_iter()
+                .map(|part| match part {
+                    openai_compat::OpenAiContentPart::Text { text } => {
+                        OpenAiContentPart::Text { text }
+                    }
+                    openai_compat::OpenAiContentPart::ImageUrl { url } => {
+                        OpenAiContentPart::ImageUrl {
+                            image_url: ImageUrlData { url },
+                        }
+                    }
+                })
+                .collect();
+            Some(OpenAiContent::Parts(openai_parts))
+        } else {
+            // Simple text content
+            msg.content.map(OpenAiContent::Text)
+        };
+
         OpenAiMessage {
             role: msg.role,
-            content: msg.content,
+            content,
             tool_calls: msg.tool_calls.map(|calls| {
                 calls.into_iter().map(|tc| OpenAiToolCall {
                     id: tc.id,
@@ -161,7 +204,7 @@ impl LlmClient for OpenAiClient {
         if let Some(system) = system_prompt {
             openai_messages.push(OpenAiMessage {
                 role: "system".to_string(),
-                content: Some(system.to_string()),
+                content: Some(OpenAiContent::Text(system.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,

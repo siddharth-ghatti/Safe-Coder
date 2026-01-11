@@ -1223,8 +1223,49 @@ fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let available_width = inner.width.saturating_sub(3) as usize; // Account for "> " prefix
-    let available_height = inner.height as usize;
+    // Check for attached images and adjust available height
+    let has_images = app.has_attached_images();
+    let image_line_height: u16 = if has_images { 1 } else { 0 };
+
+    // Split inner area if we have images
+    let (image_area, input_inner) = if has_images && inner.height > 1 {
+        let chunks = ratatui::layout::Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                ratatui::layout::Constraint::Length(1),
+                ratatui::layout::Constraint::Min(1),
+            ])
+            .split(inner);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, inner)
+    };
+
+    // Render image indicator if present
+    if let Some(img_area) = image_area {
+        let count = app.attached_images.len();
+        let size = app.attached_images_size_display();
+        let image_spans = vec![
+            Span::styled("📎 ", Style::default().fg(ACCENT_YELLOW)),
+            Span::styled(
+                format!("{} image{} attached", count, if count == 1 { "" } else { "s" }),
+                Style::default().fg(ACCENT_YELLOW),
+            ),
+            Span::styled(
+                format!(" ({})", size),
+                Style::default().fg(TEXT_DIM),
+            ),
+            Span::styled(
+                " - Press Ctrl+Shift+V to clear",
+                Style::default().fg(TEXT_MUTED),
+            ),
+        ];
+        let image_line = Paragraph::new(Line::from(image_spans));
+        f.render_widget(image_line, img_area);
+    }
+
+    let available_width = input_inner.width.saturating_sub(3) as usize; // Account for "> " prefix
+    let available_height = input_inner.height as usize;
 
     // Blinking cursor
     let cursor_visible = app.animation_frame % 16 < 10;
@@ -1243,7 +1284,7 @@ fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
             Span::styled("Type a message...", Style::default().fg(TEXT_MUTED)),
         ];
         let para = Paragraph::new(Line::from(spans));
-        f.render_widget(para, inner);
+        f.render_widget(para, input_inner);
         return;
     }
 
@@ -1314,7 +1355,7 @@ fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     }
 
     let para = Paragraph::new(lines);
-    f.render_widget(para, inner);
+    f.render_widget(para, input_inner);
 }
 
 // ============================================================================

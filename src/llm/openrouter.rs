@@ -46,11 +46,32 @@ struct OpenRouterRequest {
     route: Option<String>,
 }
 
+/// Content can be either a simple string or an array of content parts (for multimodal)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OpenRouterContent {
+    Text(String),
+    Parts(Vec<OpenRouterContentPart>),
+}
+
+/// Content part for multimodal messages
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenRouterContentPart {
+    Text { text: String },
+    ImageUrl { image_url: OpenRouterImageUrlData },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenRouterImageUrlData {
+    url: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenRouterMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OpenRouterContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenRouterToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,9 +178,31 @@ impl OpenRouterClient {
 
     /// Convert from shared format to OpenRouter-specific format
     fn from_compat_message(msg: OpenAiCompatMessage) -> OpenRouterMessage {
+        // Handle multimodal content (images) vs simple text
+        let content = if let Some(parts) = msg.content_parts {
+            // Multimodal: convert to content parts array
+            let openrouter_parts: Vec<OpenRouterContentPart> = parts
+                .into_iter()
+                .map(|part| match part {
+                    openai_compat::OpenAiContentPart::Text { text } => {
+                        OpenRouterContentPart::Text { text }
+                    }
+                    openai_compat::OpenAiContentPart::ImageUrl { url } => {
+                        OpenRouterContentPart::ImageUrl {
+                            image_url: OpenRouterImageUrlData { url },
+                        }
+                    }
+                })
+                .collect();
+            Some(OpenRouterContent::Parts(openrouter_parts))
+        } else {
+            // Simple text content
+            msg.content.map(OpenRouterContent::Text)
+        };
+
         OpenRouterMessage {
             role: msg.role,
-            content: msg.content,
+            content,
             tool_calls: msg.tool_calls.map(|calls| {
                 calls.into_iter().map(|tc| OpenRouterToolCall {
                     id: tc.id,
@@ -190,7 +233,7 @@ impl LlmClient for OpenRouterClient {
         if let Some(system) = system_prompt {
             openrouter_messages.push(OpenRouterMessage {
                 role: "system".to_string(),
-                content: Some(system.to_string()),
+                content: Some(OpenRouterContent::Text(system.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,

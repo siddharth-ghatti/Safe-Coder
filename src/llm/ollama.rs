@@ -121,10 +121,29 @@ impl OllamaClient {
     }
 
     /// Convert from shared format to Ollama-specific format
+    /// Note: Ollama local models generally don't support images, so we extract text only
     fn from_compat_message(msg: OpenAiCompatMessage) -> OllamaMessage {
+        // For multimodal content, extract just the text parts (Ollama doesn't support images)
+        let content = if let Some(parts) = msg.content_parts {
+            parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    openai_compat::OpenAiContentPart::Text { text } => Some(text),
+                    openai_compat::OpenAiContentPart::ImageUrl { .. } => {
+                        // Log that we're skipping an image
+                        tracing::debug!("Skipping image in Ollama message (not supported by local models)");
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            msg.content.unwrap_or_default()
+        };
+
         OllamaMessage {
             role: msg.role,
-            content: msg.content.unwrap_or_default(),
+            content,
             tool_calls: msg.tool_calls.map(|calls| {
                 calls.into_iter().map(|tc| OllamaToolCall {
                     id: tc.id,

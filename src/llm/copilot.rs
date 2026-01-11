@@ -114,11 +114,32 @@ struct CopilotRequest {
     max_tokens: Option<usize>,
 }
 
+/// Content can be either a simple string or an array of content parts (for multimodal)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CopilotContent {
+    Text(String),
+    Parts(Vec<CopilotContentPart>),
+}
+
+/// Content part for multimodal messages
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CopilotContentPart {
+    Text { text: String },
+    ImageUrl { image_url: CopilotImageUrlData },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CopilotImageUrlData {
+    url: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CopilotMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<CopilotContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<CopilotToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,9 +222,31 @@ impl CopilotClient {
 
     /// Convert from shared format to Copilot-specific format
     fn from_compat_message(msg: OpenAiCompatMessage) -> CopilotMessage {
+        // Handle multimodal content (images) vs simple text
+        let content = if let Some(parts) = msg.content_parts {
+            // Multimodal: convert to content parts array
+            let copilot_parts: Vec<CopilotContentPart> = parts
+                .into_iter()
+                .map(|part| match part {
+                    openai_compat::OpenAiContentPart::Text { text } => {
+                        CopilotContentPart::Text { text }
+                    }
+                    openai_compat::OpenAiContentPart::ImageUrl { url } => {
+                        CopilotContentPart::ImageUrl {
+                            image_url: CopilotImageUrlData { url },
+                        }
+                    }
+                })
+                .collect();
+            Some(CopilotContent::Parts(copilot_parts))
+        } else {
+            // Simple text content
+            msg.content.map(CopilotContent::Text)
+        };
+
         CopilotMessage {
             role: msg.role,
-            content: msg.content,
+            content,
             tool_calls: msg.tool_calls.map(|calls| {
                 calls.into_iter().map(|tc| CopilotToolCall {
                     id: tc.id,
@@ -233,7 +276,7 @@ impl LlmClient for CopilotClient {
         if let Some(system) = system_prompt {
             copilot_messages.push(CopilotMessage {
                 role: "system".to_string(),
-                content: Some(system.to_string()),
+                content: Some(CopilotContent::Text(system.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -260,10 +303,15 @@ impl LlmClient for CopilotClient {
             max_tokens: Some(self.max_tokens),
         };
 
+        // Check if any messages contain images (need vision header)
+        let has_images = messages.iter().any(|msg| {
+            msg.content.iter().any(|block| matches!(block, ContentBlock::Image { .. }))
+        });
+
         // GitHub Copilot uses the same endpoint structure as OpenAI
         let url = "https://api.githubcopilot.com/chat/completions";
 
-        let response = self
+        let mut req_builder = self
             .client
             .post(url)
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -271,7 +319,15 @@ impl LlmClient for CopilotClient {
             .header("Editor-Version", "vscode/1.85.0")
             .header("Editor-Plugin-Version", "copilot-chat/0.12.0")
             .header("Copilot-Integration-Id", "vscode-chat")
-            .header("User-Agent", "GitHubCopilotChat/0.12.0")
+            .header("User-Agent", "GitHubCopilotChat/0.12.0");
+
+        // Add vision header if images are present
+        if has_images {
+            tracing::info!("Adding Copilot-Vision-Request header for image request");
+            req_builder = req_builder.header("Copilot-Vision-Request", "true");
+        }
+
+        let response = req_builder
             .json(&request)
             .send()
             .await

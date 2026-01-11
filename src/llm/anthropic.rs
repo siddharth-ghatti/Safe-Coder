@@ -86,6 +86,9 @@ enum AnthropicContent {
     Text {
         text: String,
     },
+    Image {
+        source: AnthropicImageSource,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -95,6 +98,15 @@ enum AnthropicContent {
         tool_use_id: String,
         content: String,
     },
+}
+
+/// Image source for Anthropic API (base64 format)
+#[derive(Debug, Serialize, Deserialize)]
+struct AnthropicImageSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -223,6 +235,13 @@ impl AnthropicClient {
                 .iter()
                 .map(|c| match c {
                     ContentBlock::Text { text } => AnthropicContent::Text { text: text.clone() },
+                    ContentBlock::Image { data, media_type } => AnthropicContent::Image {
+                        source: AnthropicImageSource {
+                            source_type: "base64".to_string(),
+                            media_type: media_type.clone(),
+                            data: data.clone(),
+                        },
+                    },
                     ContentBlock::ToolUse { id, name, input } => AnthropicContent::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
@@ -247,6 +266,10 @@ impl AnthropicClient {
                 .into_iter()
                 .map(|c| match c {
                     AnthropicContent::Text { text } => ContentBlock::Text { text },
+                    AnthropicContent::Image { source } => ContentBlock::Image {
+                        data: source.data,
+                        media_type: source.media_type,
+                    },
                     AnthropicContent::ToolUse { id, name, input } => {
                         ContentBlock::ToolUse { id, name, input }
                     }

@@ -1064,6 +1064,19 @@ impl Session {
         user_message: String,
         event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Result<String> {
+        self.send_message_with_images_and_progress(user_message, vec![], event_tx)
+            .await
+    }
+
+    /// Send a message with images and real-time progress updates via channel
+    /// This allows the UI to show tool executions as they happen
+    /// Images are provided as (base64_data, media_type) tuples
+    pub async fn send_message_with_images_and_progress(
+        &mut self,
+        user_message: String,
+        images: Vec<(String, String)>,
+        event_tx: mpsc::UnboundedSender<SessionEvent>,
+    ) -> Result<String> {
         // Create checkpoint before processing user task (git-agnostic safety)
         if self.dir_checkpoints.is_enabled() {
             let label = user_message.chars().take(100).collect::<String>();
@@ -1079,8 +1092,14 @@ impl Session {
         // Track stats
         self.stats.total_messages += 1;
 
-        // Add user message to history
-        self.messages.push(Message::user(user_message.clone()));
+        // Add user message to history (with images if present)
+        if images.is_empty() {
+            self.messages.push(Message::user(user_message.clone()));
+        } else {
+            tracing::info!("Sending message with {} image(s)", images.len());
+            self.messages
+                .push(Message::user_with_images(user_message.clone(), images));
+        }
 
         // Check if context compaction is needed
         if self.context_manager.needs_compaction(&self.messages) {

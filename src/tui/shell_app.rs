@@ -1074,6 +1074,21 @@ pub struct ShellTuiApp {
     // === Provider/Model Display ===
     /// Display name for current model (e.g., "claude-sonnet-4", "gpt-4o")
     pub model_display: String,
+
+    // === Attached Images ===
+    /// Images attached to the current message (base64 data, media_type)
+    pub attached_images: Vec<AttachedImage>,
+}
+
+/// An image attached to a message
+#[derive(Debug, Clone)]
+pub struct AttachedImage {
+    /// Base64-encoded image data
+    pub data: String,
+    /// MIME type (e.g., "image/png")
+    pub media_type: String,
+    /// Original size in bytes
+    pub size_bytes: usize,
 }
 
 impl ShellTuiApp {
@@ -1144,6 +1159,8 @@ impl ShellTuiApp {
             cached_total_lines: 0,
 
             model_display,
+
+            attached_images: Vec::new(),
         };
 
         // Add welcome message
@@ -2045,6 +2062,86 @@ impl ShellTuiApp {
             "model" => Some(SlashCommand::Model(args)),
             "login" => Some(SlashCommand::Login(args)),
             _ => None,
+        }
+    }
+
+    // === Image Attachment Methods ===
+
+    /// Paste image from clipboard
+    /// Returns true if an image was pasted, false if clipboard has no image
+    pub fn paste_image_from_clipboard(&mut self) -> Result<bool, String> {
+        use arboard::Clipboard;
+        use base64::Engine;
+
+        let mut clipboard = Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
+
+        // Try to get image data from clipboard
+        if let Ok(image_data) = clipboard.get_image() {
+            // Convert RGBA bytes to PNG
+            let width = image_data.width as u32;
+            let height = image_data.height as u32;
+
+            // Create PNG from raw image data
+            let img = image::RgbaImage::from_raw(width, height, image_data.bytes.into_owned())
+                .ok_or("Failed to create image from clipboard data")?;
+
+            // Encode as PNG
+            let mut png_data = Vec::new();
+            img.write_to(&mut std::io::Cursor::new(&mut png_data), image::ImageFormat::Png)
+                .map_err(|e| format!("Failed to encode image as PNG: {}", e))?;
+
+            let size_bytes = png_data.len();
+
+            // Base64 encode
+            let base64_data = base64::engine::general_purpose::STANDARD.encode(&png_data);
+
+            // Add to attached images
+            self.attached_images.push(AttachedImage {
+                data: base64_data,
+                media_type: "image/png".to_string(),
+                size_bytes,
+            });
+
+            self.needs_redraw = true;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Remove an attached image by index
+    pub fn remove_attached_image(&mut self, index: usize) {
+        if index < self.attached_images.len() {
+            self.attached_images.remove(index);
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Clear all attached images
+    pub fn clear_attached_images(&mut self) {
+        self.attached_images.clear();
+        self.needs_redraw = true;
+    }
+
+    /// Check if there are attached images
+    pub fn has_attached_images(&self) -> bool {
+        !self.attached_images.is_empty()
+    }
+
+    /// Take attached images (moves them out, returning ownership)
+    pub fn take_attached_images(&mut self) -> Vec<AttachedImage> {
+        std::mem::take(&mut self.attached_images)
+    }
+
+    /// Get human-readable size string for total attached images
+    pub fn attached_images_size_display(&self) -> String {
+        let total_bytes: usize = self.attached_images.iter().map(|i| i.size_bytes).sum();
+        if total_bytes < 1024 {
+            format!("{} B", total_bytes)
+        } else if total_bytes < 1024 * 1024 {
+            format!("{:.1} KB", total_bytes as f64 / 1024.0)
+        } else {
+            format!("{:.1} MB", total_bytes as f64 / (1024.0 * 1024.0))
         }
     }
 

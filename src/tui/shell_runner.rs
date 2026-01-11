@@ -1126,6 +1126,54 @@ impl ShellTuiRunner {
                 self.app.toggle_sidebar();
             }
 
+            // Ctrl+Shift+V - clear attached images
+            KeyCode::Char('V') if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) => {
+                if self.app.has_attached_images() {
+                    self.app.clear_attached_images();
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "📎 Attached images cleared".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+                }
+            }
+
+            // Ctrl+V - paste (check for images first)
+            KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
+                // Try to paste an image from clipboard
+                match self.app.paste_image_from_clipboard() {
+                    Ok(true) => {
+                        // Image pasted successfully
+                        let count = self.app.attached_images.len();
+                        let size = self.app.attached_images_size_display();
+                        let prompt = self.app.current_prompt();
+                        let block = CommandBlock::system(
+                            format!("📎 Image pasted ({} image{}, {})", count, if count == 1 { "" } else { "s" }, size),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                    Ok(false) => {
+                        // No image in clipboard, try to paste text
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            if let Ok(text) = clipboard.get_text() {
+                                // Insert text at cursor position
+                                for c in text.chars() {
+                                    // Skip newlines - paste as single line
+                                    if c != '\n' && c != '\r' {
+                                        self.app.input_push(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Clipboard access failed: {}", e);
+                    }
+                }
+            }
+
             // Regular character input
             KeyCode::Char(c) => {
                 // Check if file picker is visible - send input there
@@ -2661,6 +2709,14 @@ Keyboard:
             let ai_tx = tx.clone();
             let block_id_clone = block_id.clone();
 
+            // Take attached images (clears them from app state)
+            let attached_images: Vec<(String, String)> = self
+                .app
+                .take_attached_images()
+                .into_iter()
+                .map(|img| (img.data, img.media_type))
+                .collect();
+
             tokio::spawn(async move {
                 let mut session = session.lock().await;
 
@@ -2796,9 +2852,9 @@ Keyboard:
                     }
                 });
 
-                // Call the progress-aware method
+                // Call the progress-aware method (with images if present)
                 match session
-                    .send_message_with_progress(full_query, event_tx)
+                    .send_message_with_images_and_progress(full_query, attached_images, event_tx)
                     .await
                 {
                     Ok(response) => {

@@ -33,6 +33,12 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    Image {
+        /// Base64-encoded image data
+        data: String,
+        /// MIME type (e.g., "image/png", "image/jpeg", "image/gif", "image/webp")
+        media_type: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -42,6 +48,46 @@ pub enum ContentBlock {
         tool_use_id: String,
         content: String,
     },
+}
+
+/// Supported image media types for multimodal messages
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageMediaType {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+}
+
+impl ImageMediaType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ImageMediaType::Png => "image/png",
+            ImageMediaType::Jpeg => "image/jpeg",
+            ImageMediaType::Gif => "image/gif",
+            ImageMediaType::Webp => "image/webp",
+        }
+    }
+
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_lowercase().as_str() {
+            "png" => Some(ImageMediaType::Png),
+            "jpg" | "jpeg" => Some(ImageMediaType::Jpeg),
+            "gif" => Some(ImageMediaType::Gif),
+            "webp" => Some(ImageMediaType::Webp),
+            _ => None,
+        }
+    }
+
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        match mime {
+            "image/png" => Some(ImageMediaType::Png),
+            "image/jpeg" => Some(ImageMediaType::Jpeg),
+            "image/gif" => Some(ImageMediaType::Gif),
+            "image/webp" => Some(ImageMediaType::Webp),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +367,24 @@ impl Message {
         Self {
             role: Role::User,
             content: vec![ContentBlock::Text { text }],
+        }
+    }
+
+    /// Create a user message with text and images
+    pub fn user_with_images(text: String, images: Vec<(String, String)>) -> Self {
+        let mut content = Vec::new();
+
+        // Add text first
+        content.push(ContentBlock::Text { text });
+
+        // Add images
+        for (data, media_type) in images {
+            content.push(ContentBlock::Image { data, media_type });
+        }
+
+        Self {
+            role: Role::User,
+            content,
         }
     }
 

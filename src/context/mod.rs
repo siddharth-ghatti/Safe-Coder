@@ -125,6 +125,10 @@ impl ContextManager {
                     ContentBlock::Text { text } => {
                         total_chars += text.len();
                     }
+                    ContentBlock::Image { data, .. } => {
+                        // Estimate image token contribution
+                        total_chars += data.len() / 10;
+                    }
                     ContentBlock::ToolUse { name, input, .. } => {
                         tool_call_count += 1;
                         total_chars += name.len();
@@ -247,6 +251,11 @@ impl ContextManager {
         for block in &msg.content {
             match block {
                 ContentBlock::Text { text } => chars += text.len(),
+                ContentBlock::Image { data, .. } => {
+                    // Estimate image tokens based on base64 data size
+                    // Images typically use ~85 tokens per image tile (512x512)
+                    chars += data.len() / 10; // Rough estimate
+                }
                 ContentBlock::ToolUse { name, input, .. } => {
                     chars += name.len();
                     chars += input.to_string().len();
@@ -359,6 +368,10 @@ impl ContextManager {
                                 key_decisions.push(format!("Encountered: {}", first_line));
                             }
                         }
+                    }
+                    ContentBlock::Image { .. } => {
+                        // Images are context; note their presence in summary
+                        assistant_actions.push("[Image attached]".to_string());
                     }
                 }
             }

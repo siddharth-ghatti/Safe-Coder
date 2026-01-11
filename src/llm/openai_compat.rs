@@ -11,9 +11,19 @@ use super::{ContentBlock, Message, Role};
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatMessage {
     pub role: String,
+    /// Simple text content (for non-multimodal messages)
     pub content: Option<String>,
+    /// Multimodal content parts (for messages with images)
+    pub content_parts: Option<Vec<OpenAiContentPart>>,
     pub tool_calls: Option<Vec<OpenAiCompatToolCall>>,
     pub tool_call_id: Option<String>,
+}
+
+/// Content part for multimodal OpenAI messages
+#[derive(Debug, Clone)]
+pub enum OpenAiContentPart {
+    Text { text: String },
+    ImageUrl { url: String },
 }
 
 /// A generic OpenAI-compatible tool call
@@ -31,6 +41,7 @@ pub struct OpenAiCompatToolCall {
 /// - Grouping multiple tool calls into a single assistant message
 /// - Ensuring tool results come before text content (for proper ordering)
 /// - Converting between Anthropic-style and OpenAI-style message formats
+/// - Converting images to OpenAI's multimodal content format
 pub fn convert_messages(messages: &[Message]) -> Vec<OpenAiCompatMessage> {
     let mut result = Vec::new();
 
@@ -40,10 +51,11 @@ pub fn convert_messages(messages: &[Message]) -> Vec<OpenAiCompatMessage> {
             Role::Assistant => "assistant",
         };
 
-        // Collect all tool calls and text from this message
+        // Collect all tool calls, text, images from this message
         let mut tool_calls = Vec::new();
         let mut text_content = String::new();
         let mut tool_results = Vec::new();
+        let mut images: Vec<(String, String)> = Vec::new(); // (data, media_type)
 
         for block in &msg.content {
             match block {
@@ -52,6 +64,9 @@ pub fn convert_messages(messages: &[Message]) -> Vec<OpenAiCompatMessage> {
                         text_content.push('\n');
                     }
                     text_content.push_str(text);
+                }
+                ContentBlock::Image { data, media_type } => {
+                    images.push((data.clone(), media_type.clone()));
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     tool_calls.push(OpenAiCompatToolCall {
@@ -73,6 +88,7 @@ pub fn convert_messages(messages: &[Message]) -> Vec<OpenAiCompatMessage> {
             result.push(OpenAiCompatMessage {
                 role: "assistant".to_string(),
                 content: if text_content.is_empty() { None } else { Some(text_content.clone()) },
+                content_parts: None,
                 tool_calls: Some(tool_calls),
                 tool_call_id: None,
             });
@@ -86,19 +102,49 @@ pub fn convert_messages(messages: &[Message]) -> Vec<OpenAiCompatMessage> {
                 result.push(OpenAiCompatMessage {
                     role: "tool".to_string(),
                     content: Some(content),
+                    content_parts: None,
                     tool_calls: None,
                     tool_call_id: Some(tool_use_id),
                 });
             }
 
-            // Then add any text content
-            if !text_content.is_empty() {
-                result.push(OpenAiCompatMessage {
-                    role: role.to_string(),
-                    content: Some(text_content),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
+            // Then add any text/image content
+            let has_images = !images.is_empty();
+            let has_text = !text_content.is_empty();
+
+            if has_images || has_text {
+                if has_images {
+                    // Use multimodal content_parts format
+                    let mut parts = Vec::new();
+
+                    // Add text first if present
+                    if has_text {
+                        parts.push(OpenAiContentPart::Text { text: text_content });
+                    }
+
+                    // Add images as data URLs
+                    for (data, media_type) in images {
+                        let data_url = format!("data:{};base64,{}", media_type, data);
+                        parts.push(OpenAiContentPart::ImageUrl { url: data_url });
+                    }
+
+                    result.push(OpenAiCompatMessage {
+                        role: role.to_string(),
+                        content: None,
+                        content_parts: Some(parts),
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                } else {
+                    // Text-only message
+                    result.push(OpenAiCompatMessage {
+                        role: role.to_string(),
+                        content: Some(text_content),
+                        content_parts: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
             }
 
             // Skip the tool_results loop below since we already processed them
@@ -110,6 +156,7 @@ pub fn convert_messages(messages: &[Message]) -> Vec<OpenAiCompatMessage> {
             result.push(OpenAiCompatMessage {
                 role: "tool".to_string(),
                 content: Some(content),
+                content_parts: None,
                 tool_calls: None,
                 tool_call_id: Some(tool_use_id),
             });
@@ -173,6 +220,7 @@ pub fn validate_tool_pairs(messages: Vec<OpenAiCompatMessage>) -> Vec<OpenAiComp
                     result.push(OpenAiCompatMessage {
                         role: msg.role,
                         content: msg.content,
+                        content_parts: None,
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -246,6 +294,7 @@ mod tests {
             OpenAiCompatMessage {
                 role: "assistant".to_string(),
                 content: Some("Let me help".to_string()),
+                content_parts: None,
                 tool_calls: Some(vec![OpenAiCompatToolCall {
                     id: "orphan_call".to_string(),
                     call_type: "function".to_string(),
@@ -272,6 +321,7 @@ mod tests {
             OpenAiCompatMessage {
                 role: "assistant".to_string(),
                 content: None,
+                content_parts: None,
                 tool_calls: Some(vec![OpenAiCompatToolCall {
                     id: "call_456".to_string(),
                     call_type: "function".to_string(),
@@ -283,6 +333,7 @@ mod tests {
             OpenAiCompatMessage {
                 role: "tool".to_string(),
                 content: Some("file contents".to_string()),
+                content_parts: None,
                 tool_calls: None,
                 tool_call_id: Some("call_456".to_string()),
             },
