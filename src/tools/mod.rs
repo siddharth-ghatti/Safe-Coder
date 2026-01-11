@@ -99,6 +99,7 @@ pub mod subagent;
 pub mod todo;
 pub mod webfetch;
 pub mod write;
+pub mod git;
 
 pub use ast_grep::{patterns, search_file, AstGrepParams, AstGrepTool, AstLanguage, AstMatch};
 pub use bash::BashTool;
@@ -112,6 +113,7 @@ pub use subagent::SubagentTool;
 pub use todo::{TodoReadTool, TodoWriteTool};
 pub use webfetch::WebFetchTool;
 pub use write::WriteTool;
+pub use git::GitTool;
 
 /// Callback type for streaming output updates
 pub type OutputCallback = Arc<dyn Fn(String) + Send + Sync>;
@@ -204,6 +206,8 @@ impl ToolRegistry {
         registry.register(Box::new(TodoReadTool));
         // Build configuration
         registry.register(Box::new(BuildConfigTool));
+        // Git tool
+        registry.register(Box::new(GitTool));
         registry
     }
 
@@ -256,6 +260,8 @@ impl ToolRegistry {
         self.register(Box::new(TodoReadTool));
         // Build configuration
         self.register(Box::new(BuildConfigTool));
+        // Git tool
+        self.register(Box::new(GitTool));
 
         // Create event channel for subagent communication
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SubagentEvent>();

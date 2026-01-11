@@ -11,6 +11,7 @@ pub mod cached;
 pub mod copilot;
 pub mod ollama;
 pub mod openai;
+pub mod openai_compat;
 pub mod openrouter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

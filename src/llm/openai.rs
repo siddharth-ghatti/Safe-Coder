@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::openai_compat::{self, OpenAiCompatMessage};
 use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 pub struct OpenAiClient {
@@ -115,50 +116,34 @@ impl OpenAiClient {
         }
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
-        messages
-            .iter()
-            .flat_map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
+    /// Convert and validate messages using shared OpenAI-compatible logic
+    fn prepare_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
+        // Use shared conversion logic
+        let compat_messages = openai_compat::convert_messages(messages);
+        // Validate tool call/result pairs
+        let validated = openai_compat::validate_tool_pairs(compat_messages);
+        // Convert to OpenAI-specific format
+        validated.into_iter().map(Self::from_compat_message).collect()
+    }
 
-                msg.content.iter().map(move |block| match block {
-                    ContentBlock::Text { text } => OpenAiMessage {
-                        role: role.to_string(),
-                        content: Some(text.clone()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
+    /// Convert from shared format to OpenAI-specific format
+    fn from_compat_message(msg: OpenAiCompatMessage) -> OpenAiMessage {
+        OpenAiMessage {
+            role: msg.role,
+            content: msg.content,
+            tool_calls: msg.tool_calls.map(|calls| {
+                calls.into_iter().map(|tc| OpenAiToolCall {
+                    id: tc.id,
+                    call_type: tc.call_type,
+                    function: OpenAiFunction {
+                        name: tc.function_name,
+                        arguments: tc.function_arguments,
                     },
-                    ContentBlock::ToolUse { id, name, input } => OpenAiMessage {
-                        role: "assistant".to_string(),
-                        content: None,
-                        tool_calls: Some(vec![OpenAiToolCall {
-                            id: id.clone(),
-                            call_type: "function".to_string(),
-                            function: OpenAiFunction {
-                                name: name.clone(),
-                                arguments: serde_json::to_string(input).unwrap_or_default(),
-                            },
-                        }]),
-                        tool_call_id: None,
-                        name: None,
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                    } => OpenAiMessage {
-                        role: "tool".to_string(),
-                        content: Some(content.clone()),
-                        tool_calls: None,
-                        tool_call_id: Some(tool_use_id.clone()),
-                        name: None,
-                    },
-                })
-            })
-            .collect()
+                }).collect()
+            }),
+            tool_call_id: msg.tool_call_id,
+            name: None,
+        }
     }
 }
 
@@ -183,7 +168,7 @@ impl LlmClient for OpenAiClient {
             });
         }
 
-        openai_messages.extend(self.convert_messages(messages));
+        openai_messages.extend(self.prepare_messages(messages));
 
         let openai_tools: Vec<OpenAiTool> = tools
             .iter()

@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::openai_compat::{self, OpenAiCompatMessage};
 use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 pub struct OllamaClient {
@@ -109,47 +110,33 @@ impl OllamaClient {
         }
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<OllamaMessage> {
-        messages
-            .iter()
-            .flat_map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
+    /// Convert and validate messages using shared OpenAI-compatible logic
+    fn prepare_messages(&self, messages: &[Message]) -> Vec<OllamaMessage> {
+        // Use shared conversion logic
+        let compat_messages = openai_compat::convert_messages(messages);
+        // Validate tool call/result pairs
+        let validated = openai_compat::validate_tool_pairs(compat_messages);
+        // Convert to Ollama-specific format
+        validated.into_iter().map(Self::from_compat_message).collect()
+    }
 
-                msg.content.iter().map(move |block| match block {
-                    ContentBlock::Text { text } => OllamaMessage {
-                        role: role.to_string(),
-                        content: text.clone(),
-                        tool_calls: None,
-                        tool_call_id: None,
+    /// Convert from shared format to Ollama-specific format
+    fn from_compat_message(msg: OpenAiCompatMessage) -> OllamaMessage {
+        OllamaMessage {
+            role: msg.role,
+            content: msg.content.unwrap_or_default(),
+            tool_calls: msg.tool_calls.map(|calls| {
+                calls.into_iter().map(|tc| OllamaToolCall {
+                    id: tc.id,
+                    call_type: tc.call_type,
+                    function: OllamaFunction {
+                        name: tc.function_name,
+                        arguments: tc.function_arguments,
                     },
-                    ContentBlock::ToolUse { id, name, input } => OllamaMessage {
-                        role: "assistant".to_string(),
-                        content: String::new(),
-                        tool_calls: Some(vec![OllamaToolCall {
-                            id: id.clone(),
-                            call_type: "function".to_string(),
-                            function: OllamaFunction {
-                                name: name.clone(),
-                                arguments: serde_json::to_string(input).unwrap_or_default(),
-                            },
-                        }]),
-                        tool_call_id: None,
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                    } => OllamaMessage {
-                        role: "tool".to_string(),
-                        content: content.clone(),
-                        tool_calls: None,
-                        tool_call_id: Some(tool_use_id.clone()),
-                    },
-                })
-            })
-            .collect()
+                }).collect()
+            }),
+            tool_call_id: msg.tool_call_id,
+        }
     }
 }
 
@@ -173,7 +160,7 @@ impl LlmClient for OllamaClient {
             });
         }
 
-        ollama_messages.extend(self.convert_messages(messages));
+        ollama_messages.extend(self.prepare_messages(messages));
 
         let ollama_tools = if !tools.is_empty() {
             Some(
