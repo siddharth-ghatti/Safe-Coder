@@ -1,28 +1,134 @@
 # Safe Coder
 
-A powerful **AI-enhanced shell** and **multi-agent orchestrator** built in Rust. Safe Coder provides an interactive shell environment with integrated AI assistance, can delegate complex tasks to specialized AI CLI agents (Claude Code, Gemini CLI) running in isolated git workspaces, and includes a specialized **subagent system** for focused AI assistance with built-in safety controls.
+**Safe Coder** is a Rust-powered, AI-first shell and multi-agent orchestrator for lightning-fast, safe, and powerful large-scale code automation. It combines a modern terminal interface (TUI), deep project awareness, interactive planning, and an innovative multi-agent system—delivering the world's safest and most productive way to use AI for real codebases.
+
+---
+
+## 🚀 What's New
+
+- **PLAN vs BUILD Agent Modes**—Visual mode switcher in the TUI sidebar, `/agent` slash command, and session synchronization for ultra-clear intent and safety boundaries.
+- **Visual Steps/Tasks Sidebar**—Track planning, orchestration, and execution (read-only vs full build) with live status, progress bars, and color-coded feedback.
+- **Improved Multi-Agent Orchestration**—Parallelizes up to 3 agents, supports dependency-aware decomposition, and merges code across isolated worktrees.
+- **Expanded UI/UX**—Modern, themeable TUI based on Ratatui with rich context panes, context-aware autocomplete, file pickers, and more.
+- **Direct LSP (Language Server Protocol) Support**—Auto-managed language servers, inline diagnostic/error highlighting, and code intelligence for multiple languages.
+- **Skill System, Hooks, and Fine-Grained Permissions**—Isolate knowledge, enforce workflow policies, and control exactly how/when AI touches your code.
+
+---
+
+## Demo
 
 <p align="center">
   <img src="assets/safe-coder-demo.gif" alt="Safe Coder Demo" width="800">
 </p>
 
+---
+
+## Table of Contents
+
+- [Why Safe Coder?](#why-safe-coder)
+- [Demo: Shell, Planning, Orchestration](#demo)
+- [Quick Start](#quick-start)
+- [Interactive TUI Features](#interactive-tui-features)
+- [Agent/Planning Modes](#agentplanning-modes)
+- [Advanced Orchestration & Subagents](#advanced-orchestration--subagents)
+- [Configuration, Customization, and Safety](#configuration-customization-and-safety)
+- [Project Structure](#project-structure)
+- [Contributing & License](#contributing--license)
+
+---
+
 ## Why Safe Coder?
 
 | Feature | Safe Coder | Claude Code | Cursor | Aider |
 |---------|------------|-------------|--------|-------|
-| **Interactive AI Shell** | ✅ Shell-first with AI assistance | ❌ | ❌ | ❌ |
-| **Multi-Agent Orchestration** | ✅ Claude + Gemini + Copilot | ❌ | ❌ | ❌ |
-| **Subagent System** | ✅ 5 specialized types | ❌ | ❌ | ❌ |
-| **Multi-Model Subagents** | ✅ Per-agent LLM config | ❌ | ❌ | ❌ |
-| **AST-Grep (Structural Search)** | ✅ Tree-sitter based | ❌ | ❌ | ❌ |
-| **Skill System** | ✅ Loadable knowledge files | ❌ | ❌ | ❌ |
-| **Lifecycle Hooks** | ✅ Pre/Post tool hooks | ❌ | ❌ | ❌ |
-| **75+ Model Support** | ✅ via OpenRouter | ❌ | Limited | ✅ |
-| **LSP Integration** | ✅ Auto-download | ❌ | Built-in | ❌ |
-| **Git-Agnostic Checkpoints** | ✅ Works anywhere | ❌ | ❌ | ❌ |
-| **Undo/Redo** | ✅ `/undo` `/redo` | ✅ | ❌ | ❌ |
-| **Local AI (Ollama)** | ✅ 100% Private | ❌ | ❌ | ✅ |
-| **Native Binary** | ✅ Rust (fast) | Node.js | Electron | Python |
+| **Visual AI Shell** | ✅ | ❌ | ❌ | ❌ |
+| **Multi-Agent Orchestration** | ✅ | ❌ | ❌ | ❌ |
+| **Semantic Planning (PLAN/BUILD)** | ✅ | ❌ | ❌ | ❌ |
+| **Real Steps/Progress UI** | ✅ | ❌ | ❌ | ❌ |
+| **LSP Integration/IDE Features** | ✅ | ❌ | Built-in | ❌ |
+| **Hooks/Skills/Custom Safety** | ✅ | ❌ | ❌ | ❌ |
+| **AST-based Code Search** | ✅ | ❌ | ❌ | ❌ |
+| **Subagent System** | ✅ | ❌ | ❌ | ❌ |
+| **Isolation/Checkpoints** | ✅ | ❌ | ❌ | ❌ |
+| **Undo/Redo** | ✅ | ✅ | ❌ | ❌ |
+| **Local AI (Ollama)** | ✅ | ❌ | ❌ | ✅ |
+| **75+ Model Support (OpenRouter)** | ✅ | ❌ | Limited | ✅ |
+| **Native (Rust, Fast)** | ✅ | Node.js | Electron | Python |
+
+---
+
+
+---
+
+## Interactive TUI Features
+
+- **Shell Mode/TUI**:  
+  Modern command blocks, clickable file pickers, live AI panel, and stepwise task display.
+- **Agent Mode**:  
+  Toggle PLAN (read-only/planning) vs BUILD (full edit/act) visually. Shows in a sidebar, `/agent` toggles, or `Ctrl+G`.
+- **Stepwise Progress**:  
+  Live sidebar shows planning, running tools, dependencies, and current state (color-coded).
+- **Autocomplete & Context**:  
+  Tab-complete tools, files, and custom commands; @-attach files; viewing/editing in-place.
+- **LSP-powered Code Intelligence**:  
+  Inline error highlighting, diagnostics, and completions for Rust, JS/TS, Python, Go, and more.
+
+---
+
+## Advanced Orchestration & Subagents
+
+- **Decompose Requests**:  
+  Free-form natural language ("Add auth then write tests") → task graph, with dependencies.
+- **Isolated Execution**:  
+  Each AI worker runs in a separate git worktree or branch. Fully parallelized (up to 3 agents).
+- **Subagents**:  
+  Specialized roles: Analyzer (read-only/code audit), Tester, Refactorer, Documenter, Custom.
+    - Per-agent LLM config (Claude, GPT, Ollama, etc.)
+    - Toolset restrictions for safety
+    - Real-time progress monitoring
+- **Multi-Agent Throttling & Strategy**:  
+  Assign tasks round-robin, prefer fastest/cheapest agent, or follow dependency order.
+
+---
+
+## Project Structure
+
+```
+safe-coder/
+├── src/
+│   ├── main.rs
+│   ├── config.rs
+│   ├── shell/                # Shell/TUI logic
+│   ├── orchestrator/         # Planning + agent orchestration
+│   ├── tui/                  # Terminal UI
+│   ├── subagents/            # Analyzer/Tester/etc.
+│   ├── llm/                  # Language model clients
+│   ├── tools/                # File/batch/bash/grep/ast tools
+│   ├── skills/               # Context injection
+│   ├── hooks/                # Safety/lifecycle hooks
+│   └── ...
+├── Cargo.toml
+└── README.md
+```
+
+---
+
+## Contributing & License
+
+We welcome contributions! PRs, feature requests, or bug reports are encouraged.
+
+**MIT License** (see LICENSE for details).
+
+---
+
+## Credits
+
+- Powered by [Ratatui](https://github.com/ratatui-org/ratatui), [Tree-sitter](https://tree-sitter.github.io/tree-sitter/), [Similar](https://github.com/mitsuhiko/similar)
+- Multi-agent logic inspired by best practices from AI research and large engineering teams.
+
+---
+
+**Safe Coder:** Warp-speed AI coding with end-to-end transparency, fine-grained safety, and unmatched ergonomics.
 
 <p align="center">
   <img src="assets/orchestration-demo.gif" alt="Multi-Agent Orchestration" width="800">
