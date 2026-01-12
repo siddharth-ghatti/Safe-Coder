@@ -28,3 +28,4 @@ pub mod subagent;
 pub mod tools;
 pub mod tui;
 pub mod unified_planning;
+pub mod server;

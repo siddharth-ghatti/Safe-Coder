@@ -17,6 +17,7 @@ mod permissions;
 mod persistence;
 mod planning;
 mod prompts;
+mod server;
 mod session;
 mod shell;
 mod subagent;
@@ -183,6 +184,22 @@ enum Commands {
         #[arg(long)]
         last: bool,
     },
+    /// Start HTTP server for desktop app integration
+    ///
+    /// This starts an HTTP/WebSocket server that exposes safe-coder's
+    /// functionality via REST APIs and real-time event streams.
+    /// The server can be used by the desktop app or other clients.
+    Serve {
+        /// Port to listen on
+        #[arg(short, long, default_value = "9876")]
+        port: u16,
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Enable CORS for cross-origin requests (for development)
+        #[arg(long)]
+        cors: bool,
+    },
 }
 
 #[tokio::main]
@@ -202,7 +219,7 @@ async fn main() -> Result<()> {
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "safe_coder=info".into()),
+                    .unwrap_or_else(|_| "safe_coder=info,tower_http=info".into()),
             )
             .with(tracing_subscriber::fmt::layer())
             .init();
@@ -273,9 +290,24 @@ async fn main() -> Result<()> {
         Commands::Resume { session_id, last } => {
             handle_resume(session_id, last).await?;
         }
+        Commands::Serve { port, host, cors } => {
+            run_server(port, host, cors).await?;
+        }
     }
 
     Ok(())
+}
+
+/// Run the HTTP server for desktop app integration
+async fn run_server(port: u16, host: String, cors: bool) -> Result<()> {
+    // Tracing is already initialized in main() for non-TUI modes
+    let config = server::ServerConfig {
+        port,
+        host,
+        cors_enabled: cors,
+    };
+
+    server::start_server(config).await
 }
 
 async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String) -> Result<()> {

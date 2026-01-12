@@ -307,6 +307,16 @@ impl Session {
         &self.messages
     }
 
+    /// Set the event sender for real-time updates (used by HTTP server)
+    pub fn set_event_sender(&mut self, tx: mpsc::UnboundedSender<SessionEvent>) {
+        self.subagent_event_tx = Some(tx);
+    }
+
+    /// Clear the event sender
+    pub fn clear_event_sender(&mut self) {
+        self.subagent_event_tx = None;
+    }
+
     /// Set the current plan
     fn set_current_plan(&mut self, plan: crate::unified_planning::UnifiedPlan) {
         // Move any existing plan to history
@@ -765,21 +775,34 @@ impl Session {
         // Smart fallback: Only try unified planning for appropriate requests
         if self.should_use_planning(&user_message) {
             tracing::debug!("Using unified planning for task-oriented request");
-            
-            // Try unified planning path (creates internal event channel)
-            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-            let prev_tx = self.subagent_event_tx.clone();
-            self.subagent_event_tx = Some(event_tx);
-            let planning_result = self.send_message_with_planning(user_message.clone()).await;
-            self.subagent_event_tx = prev_tx;
 
-            // Drain events (no UI to send them to in this method)
-            while event_rx.try_recv().is_ok() {}
+            // Try unified planning path
+            // If we have an external event sender (from HTTP server), use it directly
+            // Otherwise create an internal channel and drain events
+            let has_external_sender = self.subagent_event_tx.is_some();
+
+            let mut internal_rx = if has_external_sender {
+                // Use existing external sender - events will be forwarded to HTTP clients
+                None
+            } else {
+                // No external sender, create internal channel (will drain events)
+                let (event_tx, event_rx) = mpsc::unbounded_channel();
+                self.subagent_event_tx = Some(event_tx);
+                Some(event_rx)
+            };
+
+            let planning_result = self.send_message_with_planning(user_message.clone()).await;
+
+            // Clean up internal channel if we created one
+            if let Some(ref mut rx) = internal_rx {
+                while rx.try_recv().is_ok() {}
+                self.subagent_event_tx = None;
+            }
 
             if let Ok(resp) = planning_result {
                 return Ok(resp);
             }
-            
+
             tracing::debug!("Planning failed, falling back to direct execution");
         } else {
             tracing::debug!("Using direct execution for simple query");
@@ -858,9 +881,13 @@ impl Session {
                 .iter()
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
-            // Extract text from response
+            // Extract text from response and emit events
             for block in &assistant_message.content {
                 if let ContentBlock::Text { text } = block {
+                    // Emit text chunk event for real-time streaming
+                    if let Some(ref tx) = self.subagent_event_tx {
+                        let _ = tx.send(SessionEvent::TextChunk(text.clone()));
+                    }
                     response_text.push_str(text);
                     response_text.push('\n');
                 }

@@ -68,6 +68,16 @@ atty = "0.2"
 arboard = { version = "3.4", features = ["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
+# HTTP Server (for desktop app)
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+utoipa = { version = "4", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }
+portable-pty = "0.8"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 mockito = "1.5"
