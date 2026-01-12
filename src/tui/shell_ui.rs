@@ -67,33 +67,37 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     let bg = Block::default().style(Style::default().bg(BG_PRIMARY));
     f.render_widget(bg, size);
 
-    // Horizontal layout: [main content] [sidebar] (if visible)
-    let sidebar_width = if app.sidebar.visible { 28 } else { 0 };
+    // Responsive sidebar: hide on very small windows, narrow on small, normal on large
+    let sidebar_width = if !app.sidebar.visible {
+        0
+    } else if size.width < 80 {
+        0 // Auto-hide sidebar on very narrow windows
+    } else if size.width < 120 {
+        22 // Narrow sidebar for small windows
+    } else {
+        26 // Normal sidebar
+    };
 
     let horizontal = Layout::horizontal([
-        Constraint::Min(40),               // Main content area
-        Constraint::Length(sidebar_width), // Sidebar (fixed width)
+        Constraint::Min(30),               // Main content area (reduced min)
+        Constraint::Length(sidebar_width), // Sidebar (responsive width)
     ])
     .split(size);
 
     let main_area = horizontal[0];
     let sidebar_area = horizontal[1];
 
-    // Main content layout: [title] [messages] [input hints] [input] [status bar]
+    // Compact layout: [messages] [input] [status bar] (no title bar, hints in status)
     let chunks = Layout::vertical([
-        Constraint::Length(1),                           // Title bar
-        Constraint::Min(5),                              // Messages
-        Constraint::Length(1),                           // Input hints (enter send / model)
+        Constraint::Min(3),                              // Messages
         Constraint::Length(calculate_input_height(app)), // Input area
-        Constraint::Length(1),                           // Status bar
+        Constraint::Length(1),                           // Status bar (includes hints)
     ])
     .split(main_area);
 
-    draw_title_bar(f, app, chunks[0]);
-    draw_messages(f, app, chunks[1]);
-    draw_input_hints(f, app, chunks[2]);
-    draw_input_area(f, app, chunks[3]);
-    draw_status_bar(f, app, chunks[4]);
+    draw_messages(f, app, chunks[0]);
+    draw_input_area(f, app, chunks[1]);
+    draw_status_bar(f, app, chunks[2]);
 
     // Draw sidebar if visible
     if app.sidebar.visible {
@@ -130,24 +134,23 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
 }
 
 fn calculate_input_height(app: &ShellTuiApp) -> u16 {
-    // Estimate wrapped lines (assume ~80 char width, accounting for sidebar)
-    let estimated_width = 60usize; // Conservative estimate
+    // Compact input: 1-3 lines max, minimal borders
+    let estimated_width = 70usize;
     let wrapped_count = if app.input.is_empty() {
         1
     } else {
-        // Count wrapped lines
         let mut count = 0;
         for line in app.input.lines() {
             count += ((line.len() / estimated_width) + 1).max(1);
         }
-        // Handle case where input has no newlines but is long
         if count == 0 {
             count = ((app.input.len() / estimated_width) + 1).max(1);
         }
         count
     };
-    let lines = wrapped_count.min(5) as u16;
-    lines + 2 // borders
+    // Max 3 lines, minimal padding
+    let lines = wrapped_count.min(3) as u16;
+    lines + 1 // just top border
 }
 
 // ============================================================================
@@ -1263,8 +1266,9 @@ fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 // ============================================================================
 
 fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    // Compact: just top border line, no side borders
     let block = Block::default()
-        .borders(Borders::ALL)
+        .borders(Borders::TOP)
         .border_style(Style::default().fg(BORDER_SUBTLE))
         .style(Style::default().bg(BG_INPUT));
 
@@ -1411,51 +1415,58 @@ fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 // ============================================================================
 
 fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    // Get path, truncate if needed
-    let path = app
-        .cwd
-        .to_string_lossy()
-        .replace(&std::env::var("HOME").unwrap_or_default(), "~");
-
     let mode = app.agent_mode.short_name();
+    let is_narrow = area.width < 100;
 
-    // Build left side: safe-coder + path
-    let mut spans = vec![
-        Span::styled(" ", Style::default()),
-        Span::styled(
-            "safe-coder",
-            Style::default()
-                .fg(TEXT_PRIMARY)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ", Style::default()),
-        Span::styled(path.clone(), Style::default().fg(TEXT_SECONDARY)),
-    ];
+    // Compact left side
+    let mut spans = vec![Span::styled(
+        " safe-coder",
+        Style::default()
+            .fg(TEXT_PRIMARY)
+            .add_modifier(Modifier::BOLD),
+    )];
 
-    // Build right side: keyboard shortcuts + mode
-    // Format: "ctrl+c quit  tab mode  esc clear  BUILD"
-    let right_parts = vec![
-        ("^C", "quit", TEXT_DIM, TEXT_DIM),
-        ("tab", "mode", TEXT_DIM, TEXT_DIM),
-        ("esc", "clear", TEXT_DIM, TEXT_DIM),
-    ];
-
-    let mut right_spans: Vec<Span> = Vec::new();
-    for (key, action, key_color, action_color) in &right_parts {
-        right_spans.push(Span::styled(*key, Style::default().fg(*key_color)));
-        right_spans.push(Span::styled(" ", Style::default()));
-        right_spans.push(Span::styled(*action, Style::default().fg(*action_color)));
-        right_spans.push(Span::styled("  ", Style::default()));
+    // Only show path on wider screens
+    if !is_narrow {
+        let path = app
+            .cwd
+            .to_string_lossy()
+            .replace(&std::env::var("HOME").unwrap_or_default(), "~");
+        let truncated_path = if path.len() > 30 {
+            format!("...{}", &path[path.len()-27..])
+        } else {
+            path
+        };
+        spans.push(Span::styled(
+            format!(" {}", truncated_path),
+            Style::default().fg(TEXT_DIM),
+        ));
     }
 
-    // Add mode indicator
+    // Right side: compact hints + mode
+    let mut right_spans: Vec<Span> = Vec::new();
+
+    // Show "enter to send" hint when input has content
+    if !app.input.is_empty() {
+        right_spans.push(Span::styled("⏎send ", Style::default().fg(TEXT_DIM)));
+    }
+
+    // Compact shortcuts
+    if !is_narrow {
+        right_spans.push(Span::styled("^C", Style::default().fg(TEXT_MUTED)));
+        right_spans.push(Span::styled("quit ", Style::default().fg(TEXT_DIM)));
+        right_spans.push(Span::styled("tab", Style::default().fg(TEXT_MUTED)));
+        right_spans.push(Span::styled("mode ", Style::default().fg(TEXT_DIM)));
+    }
+
+    // Mode indicator (always visible)
     let mode_color = match mode {
         "BUILD" => ACCENT_GREEN,
         "PLAN" => ACCENT_CYAN,
         _ => TEXT_PRIMARY,
     };
     right_spans.push(Span::styled(
-        mode.to_uppercase(),
+        mode,
         Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
     ));
     right_spans.push(Span::styled(" ", Style::default()));
@@ -1465,7 +1476,7 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let right_len: usize = right_spans.iter().map(|s| s.content.len()).sum();
     let padding = area
         .width
-        .saturating_sub(left_len as u16 + right_len as u16 + 1) as usize;
+        .saturating_sub(left_len as u16 + right_len as u16) as usize;
 
     spans.push(Span::styled(" ".repeat(padding.max(1)), Style::default()));
     spans.extend(right_spans);
@@ -1480,7 +1491,7 @@ fn draw_status_bar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 // ============================================================================
 
 fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    // Sidebar background with left border
+    // Add left border for visual separation
     let sidebar_block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(BORDER_SUBTLE))
@@ -1489,106 +1500,83 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let inner = sidebar_block.inner(area);
     f.render_widget(sidebar_block, area);
 
-    // Calculate modified files section height (dynamic based on file count)
+    // Calculate modified files section height (dynamic based on file count, more compact)
     let modified_count = app.sidebar.modified_files.len();
     let modified_height = if modified_count == 0 {
-        2 // Just header + "No changes"
+        0 // Hide empty section
     } else {
-        (modified_count.min(5) + 2) as u16 // Header + files (max 5) + potential overflow
+        (modified_count.min(3) + 1) as u16 // Header + files (max 3)
     };
 
-    // Sidebar sections: [MODE] [CONTEXT] [FILES] [PLAN] [LSP]
-    // Note: TASK section removed - task now shows in main area with shimmer animation
+    // Compact sidebar sections - hide empty sections
     let sections = Layout::vertical([
-        Constraint::Length(3),               // MODE (agent mode)
-        Constraint::Length(3),               // CONTEXT (token usage)
-        Constraint::Length(modified_height), // FILES (modified files)
-        Constraint::Min(8),                  // PLAN (more space now that TASK is removed)
-        Constraint::Length(5),               // LSP connections
+        Constraint::Length(2),               // MODE (compact)
+        Constraint::Length(2),               // CONTEXT (compact)
+        Constraint::Length(modified_height), // FILES (hidden if empty)
+        Constraint::Min(4),                  // PLAN (flexible)
+        Constraint::Length(3),               // LSP (compact)
     ])
     .split(inner);
 
     draw_sidebar_mode(f, app, sections[0]);
     draw_sidebar_context(f, app, sections[1]);
-    draw_sidebar_files(f, app, sections[2]);
+    if modified_count > 0 {
+        draw_sidebar_files(f, app, sections[2]);
+    }
     draw_sidebar_plan(f, app, sections[3]);
     draw_sidebar_lsp(f, app, sections[4]);
 }
 
 fn draw_sidebar_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    let mut lines = vec![Line::from(Span::styled(
-        " MODE",
-        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
-    ))];
-
     let mode = app.agent_mode.short_name();
-    let description = app.agent_mode.description();
-
-    // Color based on mode
     let mode_color = match mode {
         "BUILD" => ACCENT_GREEN,
         "PLAN" => ACCENT_CYAN,
         _ => TEXT_PRIMARY,
     };
 
-    // Mode display with color
-    lines.push(Line::from(vec![
+    // Mode indicator with dot
+    let line = Line::from(vec![
         Span::styled(" ", Style::default()),
         Span::styled(
-            format!("{}", mode),
+            mode,
             Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!(
-                " - {}",
-                description.split('.').next().unwrap_or(description)
-            ),
-            Style::default().fg(TEXT_SECONDARY),
+            if mode == "BUILD" { " ●" } else { " ○" },
+            Style::default().fg(mode_color),
         ),
-    ]));
+    ]);
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(line);
     f.render_widget(para, area);
 }
 
 fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let usage = &app.sidebar.token_usage;
 
-    let mut lines = vec![Line::from(Span::styled(
-        " CONTEXT",
-        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
-    ))];
+    // Context display with progress bar
+    let pct = usage.usage_percent() as usize;
+    let bar_width = 8;
+    let filled = (pct * bar_width / 100).min(bar_width);
+    let bar: String = "▓".repeat(filled) + &"░".repeat(bar_width - filled);
 
-    // Token count - show live tokens and compressed tokens if any
-    if usage.compressed_tokens > 0 {
-        lines.push(Line::from(Span::styled(
-            format!(
-                " {} (+{} compressed)",
-                usage.format_display(),
-                format_number(usage.compressed_tokens)
-            ),
-            Style::default().fg(TEXT_SECONDARY),
-        )));
+    let color = if pct > 80 {
+        ACCENT_RED
+    } else if pct > 60 {
+        ACCENT_YELLOW
     } else {
-        lines.push(Line::from(Span::styled(
-            format!(" {}", usage.format_display()),
-            Style::default().fg(TEXT_SECONDARY),
-        )));
-    }
+        TEXT_SECONDARY
+    };
 
-    // Cache statistics - only show if there's cache activity
-    if usage.has_cache_activity() {
-        lines.push(Line::from(Span::styled(
-            format!(" {}", usage.format_cache_display()),
-            Style::default().fg(Color::Cyan),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!(" {}", usage.format_savings()),
-            Style::default().fg(Color::Green),
-        )));
-    }
+    let line = Line::from(vec![
+        Span::styled(" ", Style::default()),
+        Span::styled(usage.format_display(), Style::default().fg(color)),
+        Span::styled(" ", Style::default()),
+        Span::styled(bar, Style::default().fg(color)),
+    ]);
 
-    let para = Paragraph::new(lines);
+    let para = Paragraph::new(line);
     f.render_widget(para, area);
 }
 
@@ -1619,55 +1607,42 @@ fn format_duration(ms: u64) -> String {
 fn draw_sidebar_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     use super::sidebar::ModificationType;
 
-    let mut lines = vec![Line::from(Span::styled(
-        " FILES",
-        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
-    ))];
-
     let files = &app.sidebar.modified_files;
+    let mut lines = Vec::new();
 
-    if files.is_empty() {
+    // List files with modification icons
+    let max_files = 3;
+    for file in files.iter().take(max_files) {
+        let (icon, color) = match file.modification_type {
+            ModificationType::Created => ("+", ACCENT_GREEN),
+            ModificationType::Edited => ("~", ACCENT_YELLOW),
+            ModificationType::Deleted => ("-", ACCENT_RED),
+        };
+
+        let filename = std::path::Path::new(&file.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.path.clone());
+
+        let max_len = area.width.saturating_sub(4) as usize;
+        let display = if filename.len() > max_len {
+            format!("{}…", &filename[..max_len.saturating_sub(1)])
+        } else {
+            filename
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(icon, Style::default().fg(color)),
+            Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
+        ]));
+    }
+
+    if files.len() > max_files {
         lines.push(Line::from(Span::styled(
-            " No changes",
+            format!(" +{} more", files.len() - max_files),
             Style::default().fg(TEXT_MUTED),
         )));
-    } else {
-        let max_files = 5;
-        for file in files.iter().take(max_files) {
-            // Icon and color based on modification type
-            let (icon, color) = match file.modification_type {
-                ModificationType::Created => ("+", ACCENT_GREEN),
-                ModificationType::Edited => ("~", ACCENT_YELLOW),
-                ModificationType::Deleted => ("-", ACCENT_RED),
-            };
-
-            // Get just the filename, not the full path
-            let filename = std::path::Path::new(&file.path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| file.path.clone());
-
-            // Truncate if too long
-            let max_len = area.width.saturating_sub(5) as usize;
-            let display = if filename.len() > max_len {
-                format!("{}...", &filename[..max_len.saturating_sub(3)])
-            } else {
-                filename
-            };
-
-            lines.push(Line::from(vec![
-                Span::styled(" ", Style::default()),
-                Span::styled(format!("{} ", icon), Style::default().fg(color)),
-                Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
-            ]));
-        }
-
-        if files.len() > max_files {
-            lines.push(Line::from(Span::styled(
-                format!(" ... {} more", files.len() - max_files),
-                Style::default().fg(TEXT_MUTED),
-            )));
-        }
     }
 
     let para = Paragraph::new(lines);
@@ -2105,46 +2080,50 @@ fn draw_empty_state(f: &mut Frame, title: &str, area: Rect) {
 }
 
 fn draw_sidebar_lsp(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    let mut lines = vec![Line::from(Span::styled(
-        " LSP",
-        Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
-    ))];
-
     let connections = &app.sidebar.connections;
+    let mut lines = Vec::new();
 
+    // LSP header with count
     if connections.lsp_servers.is_empty() {
         if app.lsp_initializing {
             let spinner_chars = ["◐", "◓", "◑", "◒"];
             let spinner = spinner_chars[app.animation_frame % spinner_chars.len()];
             lines.push(Line::from(Span::styled(
-                format!(" {} Initializing...", spinner),
+                format!(" LSP {}", spinner),
                 Style::default().fg(TEXT_DIM),
             )));
         } else {
             lines.push(Line::from(Span::styled(
-                " No servers",
+                " LSP ○",
                 Style::default().fg(TEXT_MUTED),
             )));
         }
     } else {
-        for (name, connected) in &connections.lsp_servers {
+        let connected_count = connections.lsp_servers.iter().filter(|(_, c)| *c).count();
+        let total = connections.lsp_servers.len();
+        let color = if connected_count == total { ACCENT_GREEN } else { ACCENT_YELLOW };
+
+        lines.push(Line::from(Span::styled(
+            format!(" LSP {}/{}", connected_count, total),
+            Style::default().fg(color),
+        )));
+
+        // Show servers with status icons
+        for (name, connected) in connections.lsp_servers.iter().take(2) {
             let (icon, color) = if *connected {
                 ("●", ACCENT_GREEN)
             } else {
                 ("○", ACCENT_RED)
             };
-
-            // Truncate server name if needed
-            let max_len = area.width.saturating_sub(5) as usize;
+            let max_len = area.width.saturating_sub(4) as usize;
             let display = if name.len() > max_len {
-                format!("{}...", &name[..max_len.saturating_sub(3)])
+                format!("{}…", &name[..max_len.saturating_sub(1)])
             } else {
                 name.clone()
             };
-
             lines.push(Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled(format!("{} ", icon), Style::default().fg(color)),
+                Span::styled(icon, Style::default().fg(color)),
                 Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
             ]));
         }
