@@ -90,6 +90,12 @@ enum AiUpdate {
         old_content: String,
         new_content: String,
     },
+    /// Diagnostic update after file write/edit
+    DiagnosticUpdate {
+        block_id: String,
+        errors: usize,
+        warnings: usize,
+    },
     /// AI processing complete
     Complete { block_id: String },
     /// AI error
@@ -658,6 +664,22 @@ impl ShellTuiRunner {
                                     old_content,
                                     new_content,
                                 });
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    AiUpdate::DiagnosticUpdate {
+                        block_id,
+                        errors,
+                        warnings,
+                    } => {
+                        // Update diagnostic counts in sidebar
+                        self.app.sidebar.update_diagnostics(errors, warnings);
+
+                        // Store diagnostic info in the most recent tool child block
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.last_mut() {
+                                child.diagnostic_counts = Some((errors, warnings));
                             }
                         }
                         self.app.mark_dirty();
@@ -2771,6 +2793,13 @@ Keyboard:
                                 old_content,
                                 new_content,
                             },
+                            SessionEvent::DiagnosticUpdate { errors, warnings } => {
+                                AiUpdate::DiagnosticUpdate {
+                                    block_id: block_id_inner.clone(),
+                                    errors,
+                                    warnings,
+                                }
+                            }
                             SessionEvent::TextChunk(text) => AiUpdate::TextChunk {
                                 block_id: block_id_inner.clone(),
                                 text,

@@ -820,6 +820,8 @@ pub struct CommandBlock {
     pub children: Vec<CommandBlock>,
     /// File diff for edit operations (tool blocks only)
     pub diff: Option<FileDiff>,
+    /// Diagnostic counts (errors, warnings) after file operations
+    pub diagnostic_counts: Option<(usize, usize)>,
     /// Version counter for render cache invalidation (increments on content change)
     pub render_version: u32,
 }
@@ -839,6 +841,7 @@ impl CommandBlock {
             collapsed: false,
             children: Vec::new(),
             diff: None,
+            diagnostic_counts: None,
             render_version: 0,
         }
     }
@@ -1100,8 +1103,9 @@ impl ShellTuiApp {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "~".to_string());
 
-        // Get model display name before moving config
+        // Get model display name and context window before moving config
         let model_display = config.llm.model.clone();
+        let context_window = config.context.max_tokens;
 
         let mut app = Self {
             cwd: cwd.clone(),
@@ -1145,7 +1149,7 @@ impl ShellTuiApp {
             lsp_status_message: None,
             lsp_initializing: true,
 
-            sidebar: SidebarState::new(),
+            sidebar: SidebarState::with_context_window(context_window),
 
             plan_approval_visible: false,
             pending_approval_plan: None,

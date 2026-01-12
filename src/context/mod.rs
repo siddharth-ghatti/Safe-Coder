@@ -41,7 +41,7 @@ impl Default for ContextConfig {
             min_preserve_messages: 5,          // Always keep at least 5 messages
             max_tool_result_chars: 2000,       // Truncate large tool results
             compaction_warning_threshold: 3,   // Warn after 3 compactions
-            chars_per_token: 4,                // Rough estimate
+            chars_per_token: 2,                // Conservative estimate for code/JSON
         }
     }
 }
@@ -93,6 +93,8 @@ impl CompactionResult {
 #[derive(Debug)]
 pub struct ContextManager {
     config: ContextConfig,
+    /// Last known actual input tokens from API response (for accurate compaction decisions)
+    last_actual_tokens: Option<usize>,
 }
 
 impl ContextManager {
@@ -100,17 +102,43 @@ impl ContextManager {
     pub fn new() -> Self {
         Self {
             config: ContextConfig::default(),
+            last_actual_tokens: None,
         }
     }
 
     /// Create a new context manager with custom config
     pub fn with_config(config: ContextConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            last_actual_tokens: None,
+        }
     }
 
     /// Set max tokens (useful when switching models)
     pub fn set_max_tokens(&mut self, max_tokens: usize) {
         self.config.max_tokens = max_tokens;
+    }
+
+    /// Update with actual token count from API response
+    /// This helps calibrate future compaction decisions
+    pub fn record_actual_tokens(&mut self, input_tokens: usize) {
+        self.last_actual_tokens = Some(input_tokens);
+    }
+
+    /// Get the max tokens limit
+    pub fn max_tokens(&self) -> usize {
+        self.config.max_tokens
+    }
+
+    /// Check if we're approaching the token limit based on actual API token counts
+    /// Returns true if last actual tokens exceeded threshold
+    pub fn needs_compaction_by_actual(&self) -> bool {
+        if let Some(actual) = self.last_actual_tokens {
+            let threshold = (self.config.max_tokens * self.config.compact_threshold_pct) / 100;
+            actual >= threshold
+        } else {
+            false
+        }
     }
 
     /// Analyze current context and return stats

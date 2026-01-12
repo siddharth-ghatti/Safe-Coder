@@ -6,8 +6,8 @@
 
 ## 🚀 What's New
 
-- **PLAN vs BUILD Agent Modes**—Visual mode switcher in the TUI sidebar, `/agent` slash command, and session synchronization for ultra-clear intent and safety boundaries.
-- **Visual Steps/Tasks Sidebar**—Track planning, orchestration, and execution (read-only vs full build) with live status, progress bars, and color-coded feedback.
+- **PLAN vs BUILD Agent Modes**—Visual mode switcher in the TUI sidebar, `/agent` slash command, and `Ctrl+G` keyboard shortcut. Agent mode is always color-coded (GREEN = BUILD, CYAN = PLAN), with session synchronization for clarity and safety boundaries.
+- **Visual Steps/Tasks Sidebar**—Sidebar displays plans/steps with real-time color-coded status: completed (green), running (cyan, animated), failed (red). Tracks both planning and execution phases; details in AGENT_MODE_SUMMARY.md and STEPS_VISUAL_GUIDE.md.
 - **Improved Multi-Agent Orchestration**—Parallelizes up to 3 agents, supports dependency-aware decomposition, and merges code across isolated worktrees.
 - **Expanded UI/UX**—Modern, themeable TUI based on Ratatui with rich context panes, context-aware autocomplete, file pickers, and more.
 - **Direct LSP (Language Server Protocol) Support**—Auto-managed language servers, inline diagnostic/error highlighting, and code intelligence for multiple languages.

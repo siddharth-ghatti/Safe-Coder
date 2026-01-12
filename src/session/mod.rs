@@ -41,6 +41,11 @@ pub enum SessionEvent {
     BashOutputLine { name: String, line: String },
     /// Tool execution completed
     ToolComplete { name: String, success: bool },
+    /// Diagnostic update after file write/edit
+    DiagnosticUpdate {
+        errors: usize,
+        warnings: usize,
+    },
     /// File was edited - includes diff info
     FileDiff {
         path: String,
@@ -197,6 +202,9 @@ impl Session {
             }
         }
 
+        // Create context manager with config settings before moving config into struct
+        let context_manager = ContextManager::with_config(config.context.to_context_config());
+
         Ok(Self {
             config,
             llm_client,
@@ -206,7 +214,7 @@ impl Session {
 
             git_manager,
             loop_detector: LoopDetector::new(),
-            context_manager: ContextManager::new(),
+            context_manager,
             permission_manager: PermissionManager::new(),
 
             persistence,
@@ -826,6 +834,18 @@ impl Session {
             // Track stats from actual token usage if available
             if let Some(usage) = &llm_response.usage {
                 self.stats.total_tokens_sent += usage.input_tokens;
+                // Record actual tokens for better compaction decisions
+                self.context_manager.record_actual_tokens(usage.input_tokens);
+                // Check if we need to compact based on actual token usage
+                if self.context_manager.needs_compaction_by_actual() {
+                    let (compacted, result) = self
+                        .context_manager
+                        .compact(std::mem::take(&mut self.messages));
+                    self.messages = compacted;
+                    if result.did_compact() {
+                        tracing::info!("Context compacted based on actual tokens: {}", result.summary);
+                    }
+                }
             } else {
                 // Fall back to approximate token counting
                 self.stats.total_tokens_sent += user_message.len() / 4;
@@ -1300,6 +1320,8 @@ impl Session {
             // Track stats and emit token usage event
             if let Some(usage) = &llm_response.usage {
                 self.stats.total_tokens_sent += usage.input_tokens;
+                // Record actual tokens for better compaction decisions
+                self.context_manager.record_actual_tokens(usage.input_tokens);
                 // Emit token usage event for sidebar (including cache stats)
                 let _ = event_tx.send(SessionEvent::TokenUsage {
                     input_tokens: usage.input_tokens,
@@ -1307,6 +1329,20 @@ impl Session {
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_creation_tokens: usage.cache_creation_tokens,
                 });
+                // Check if we need to compact based on actual token usage
+                if self.context_manager.needs_compaction_by_actual() {
+                    let (compacted, result) = self
+                        .context_manager
+                        .compact(std::mem::take(&mut self.messages));
+                    self.messages = compacted;
+                    if result.did_compact() {
+                        tracing::info!("Context compacted based on actual tokens: {}", result.summary);
+                        let _ = event_tx.send(SessionEvent::TextChunk(format!(
+                            "\n📦 Context compacted (actual tokens exceeded threshold): {}\n",
+                            result.summary
+                        )));
+                    }
+                }
             } else {
                 // Fall back to approximate token counting
                 self.stats.total_tokens_sent += user_message.len() / 4;
@@ -1598,6 +1634,11 @@ impl Session {
                             if let Err(e) = self.lsp_manager.notify_file_changed(&full_path).await {
                                 tracing::debug!("LSP file change notification failed: {}", e);
                             }
+
+                            // Give LSP a moment to process and send diagnostic update
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            let (errors, warnings) = self.lsp_manager.get_diagnostic_counts().await;
+                            let _ = event_tx.send(SessionEvent::DiagnosticUpdate { errors, warnings });
                         }
                     }
 

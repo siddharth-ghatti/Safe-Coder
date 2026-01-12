@@ -384,6 +384,11 @@ enum MessageLine {
         lines_total: usize,
         truncated: bool,
     },
+    // Diagnostic counts after file operations
+    DiagnosticInfo {
+        errors: usize,
+        warnings: usize,
+    },
 }
 
 impl MessageLine {
@@ -405,25 +410,22 @@ impl MessageLine {
                 Line::from(Span::styled(text.clone(), Style::default().fg(TEXT_DIM)))
             }
 
-            MessageLine::BlockStart => Line::from(Span::styled(
-                "─".repeat(60),
-                Style::default().fg(BORDER_SUBTLE),
-            )),
+            MessageLine::BlockStart => Line::from(""),  // Empty line as separator (cleaner look)
 
             MessageLine::AiText {
                 text,
                 model,
                 timestamp,
             } => {
+                // Cleaner AI text without border
                 let mut spans = vec![
-                    Span::styled("│ ", Style::default().fg(BORDER_ACCENT)),
                     Span::styled(text.clone(), Style::default().fg(TEXT_PRIMARY)),
                 ];
 
                 // Add model/timestamp on first line if present
                 if let (Some(m), Some(t)) = (model, timestamp) {
                     spans.push(Span::styled(
-                        format!("\n  {} ({})", m, t),
+                        format!("  {} ({})", m, t),
                         Style::default().fg(TEXT_DIM),
                     ));
                 }
@@ -432,28 +434,44 @@ impl MessageLine {
             }
 
             MessageLine::ToolHeader { tool, target, duration_ms, exit_code } => {
+                // Claude Code style: "● Tool(target)"
+                let status_color = match exit_code {
+                    Some(0) => ACCENT_GREEN,
+                    Some(_) => ACCENT_RED,
+                    None => ACCENT_CYAN, // Running
+                };
+
                 let mut spans = vec![
-                    Span::styled("│ ", Style::default().fg(BORDER_SUBTLE)),
-                    Span::styled(format!("{} ", tool), Style::default().fg(TEXT_SECONDARY)),
-                    Span::styled(target.clone(), Style::default().fg(TEXT_PRIMARY)),
+                    Span::styled("● ", Style::default().fg(status_color)),
                 ];
 
-                // Add duration and status if complete
+                // Format as "Tool(target)" if target is not empty, else just "Tool"
+                if target.is_empty() {
+                    spans.push(Span::styled(
+                        tool.clone(),
+                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        format!("{}(", tool),
+                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        target.clone(),
+                        Style::default().fg(TEXT_SECONDARY),
+                    ));
+                    spans.push(Span::styled(
+                        ")",
+                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
+                    ));
+                }
+
+                // Add duration if complete
                 if let Some(ms) = duration_ms {
                     let duration_str = format_duration(*ms);
-                    let status_color = match exit_code {
-                        Some(0) => ACCENT_GREEN,
-                        Some(_) => ACCENT_RED,
-                        None => TEXT_DIM,
-                    };
-                    let status_icon = match exit_code {
-                        Some(0) => "✓",
-                        Some(_) => "✗",
-                        None => "…",
-                    };
                     spans.push(Span::styled(
-                        format!(" {} {}", status_icon, duration_str),
-                        Style::default().fg(status_color),
+                        format!(" {}", duration_str),
+                        Style::default().fg(TEXT_DIM),
                     ));
                 }
 
@@ -465,35 +483,33 @@ impl MessageLine {
                 new_num,
                 text,
             } => Line::from(vec![
-                Span::styled("│ ", Style::default().fg(BORDER_SUBTLE)),
-                Span::styled(format!("{:>4} ", old_num), Style::default().fg(TEXT_DIM)),
-                Span::styled(format!("{:>4} ", new_num), Style::default().fg(TEXT_DIM)),
                 Span::styled("  ", Style::default()),
+                Span::styled(format!("{:>3}", old_num), Style::default().fg(TEXT_DIM)),
+                Span::styled(format!("{:>4}", new_num), Style::default().fg(TEXT_DIM)),
+                Span::styled("   ", Style::default()),
                 Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
             ]),
 
             MessageLine::DiffRemove { old_num, text } => Line::from(vec![
-                Span::styled("│ ", Style::default().fg(ACCENT_RED)),
-                Span::styled(format!("{:>4} ", old_num), Style::default().fg(ACCENT_RED)),
-                Span::styled("     ", Style::default()),
-                Span::styled("- ", Style::default().fg(ACCENT_RED)),
+                Span::styled("  ", Style::default()),
+                Span::styled(format!("{:>3}", old_num), Style::default().fg(ACCENT_RED)),
+                Span::styled("    ", Style::default()),
+                Span::styled(" - ", Style::default().fg(ACCENT_RED)),
                 Span::styled(
                     text.clone(),
-                    Style::default()
-                        .fg(ACCENT_RED)
-                        .add_modifier(Modifier::CROSSED_OUT),
+                    Style::default().fg(ACCENT_RED).bg(Color::Rgb(50, 20, 20)),
                 ),
             ]),
 
             MessageLine::DiffAdd { new_num, text } => Line::from(vec![
-                Span::styled("│ ", Style::default().fg(ACCENT_GREEN)),
-                Span::styled("     ", Style::default()),
+                Span::styled("  ", Style::default()),
+                Span::styled("   ", Style::default()),
+                Span::styled(format!("{:>4}", new_num), Style::default().fg(ACCENT_GREEN)),
+                Span::styled(" + ", Style::default().fg(ACCENT_GREEN)),
                 Span::styled(
-                    format!("{:>4} ", new_num),
-                    Style::default().fg(ACCENT_GREEN),
+                    text.clone(),
+                    Style::default().fg(ACCENT_GREEN).bg(Color::Rgb(20, 40, 20)),
                 ),
-                Span::styled("+ ", Style::default().fg(ACCENT_GREEN)),
-                Span::styled(text.clone(), Style::default().fg(ACCENT_GREEN)),
             ]),
 
             MessageLine::ShellOutput { text } => Line::from(vec![
@@ -509,34 +525,34 @@ impl MessageLine {
                 text,
                 spinner_frame,
             } => {
-                // Use shimmer effect for the thinking/running status
-                let mut spans = vec![Span::styled("│ ", Style::default().fg(ACCENT_CYAN))];
-                spans.extend(shimmer::thinking_status(text, *spinner_frame));
-                Line::from(spans)
+                // Claude Code style: "* Running..."
+                let spinners = ["*", "○", "◌", "●"];
+                let spinner = spinners[*spinner_frame / 5 % spinners.len()];
+                Line::from(vec![
+                    Span::styled(format!("{} ", spinner), Style::default().fg(ACCENT_CYAN)),
+                    Span::styled(text.clone(), Style::default().fg(TEXT_DIM)),
+                ])
             }
 
             MessageLine::AiMarkdownLine { spans } => {
-                let mut line_spans = vec![Span::styled("│ ", Style::default().fg(BORDER_ACCENT))];
-                line_spans.extend(spans.clone());
-                Line::from(line_spans)
+                // Cleaner markdown without border
+                Line::from(spans.clone())
             }
 
             MessageLine::ThinkingText { text } => {
-                // Render thinking/reasoning with a distinct dimmed style and prefix
+                // Cleaner thinking/reasoning with dimmed style
                 Line::from(vec![
-                    Span::styled("│ ", Style::default().fg(TEXT_DIM)),
-                    Span::styled("💭 ", Style::default().fg(TEXT_DIM)),
                     Span::styled(
                         text.clone(),
                         Style::default()
-                            .fg(TEXT_SECONDARY)
+                            .fg(TEXT_DIM)
                             .add_modifier(Modifier::ITALIC),
                     ),
                 ])
             }
 
             MessageLine::ToolFooter { exit_code, duration_ms, lines_shown, lines_total, truncated } => {
-                let mut spans = vec![Span::styled("│ ", Style::default().fg(BORDER_SUBTLE))];
+                let mut spans = vec![Span::styled("  └ ", Style::default().fg(TEXT_DIM))];
 
                 // Exit code
                 if let Some(code) = exit_code {
@@ -577,6 +593,31 @@ impl MessageLine {
                         format!("({} lines)", lines_total),
                         Style::default().fg(TEXT_DIM),
                     ));
+                }
+
+                Line::from(spans)
+            }
+
+            MessageLine::DiagnosticInfo { errors, warnings } => {
+                let mut spans = vec![Span::styled("  ", Style::default())];
+
+                // Only show if there are diagnostics
+                if *errors > 0 || *warnings > 0 {
+                    if *errors > 0 {
+                        spans.push(Span::styled(
+                            format!("● {} error{}", errors, if *errors == 1 { "" } else { "s" }),
+                            Style::default().fg(ACCENT_RED),
+                        ));
+                    }
+                    if *warnings > 0 {
+                        if *errors > 0 {
+                            spans.push(Span::styled(", ", Style::default().fg(TEXT_DIM)));
+                        }
+                        spans.push(Span::styled(
+                            format!("▲ {} warning{}", warnings, if *warnings == 1 { "" } else { "s" }),
+                            Style::default().fg(ACCENT_YELLOW),
+                        ));
+                    }
                 }
 
                 Line::from(spans)
@@ -879,6 +920,13 @@ fn render_child_block(
                         lines_total: meta.lines_total,
                         truncated: meta.truncated,
                     });
+                }
+            }
+
+            // Show diagnostic counts if present (after file operations)
+            if let Some((errors, warnings)) = block.diagnostic_counts {
+                if errors > 0 || warnings > 0 {
+                    lines.push(MessageLine::DiagnosticInfo { errors, warnings });
                 }
             }
         }

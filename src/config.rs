@@ -806,7 +806,7 @@ fn default_compaction_warning_threshold() -> usize {
 }
 
 fn default_chars_per_token() -> usize {
-    4 // Rough estimate
+    2 // Conservative estimate for code/JSON (GPT tokenizers use ~2-3 chars per token for structured content)
 }
 
 impl Default for ContextConfig {
