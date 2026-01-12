@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::openai_compat::{self, OpenAiCompatMessage};
 use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 pub struct OpenAiClient {
@@ -22,11 +23,32 @@ struct OpenAiRequest {
     max_tokens: Option<usize>,
 }
 
+/// Content can be either a simple string or an array of content parts (for multimodal)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum OpenAiContent {
+    Text(String),
+    Parts(Vec<OpenAiContentPart>),
+}
+
+/// Content part for multimodal messages
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum OpenAiContentPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlData },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ImageUrlData {
+    url: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct OpenAiMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OpenAiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,50 +137,56 @@ impl OpenAiClient {
         }
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
-        messages
-            .iter()
-            .flat_map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
+    /// Convert and validate messages using shared OpenAI-compatible logic
+    fn prepare_messages(&self, messages: &[Message]) -> Vec<OpenAiMessage> {
+        // Use shared conversion logic
+        let compat_messages = openai_compat::convert_messages(messages);
+        // Validate tool call/result pairs
+        let validated = openai_compat::validate_tool_pairs(compat_messages);
+        // Convert to OpenAI-specific format
+        validated.into_iter().map(Self::from_compat_message).collect()
+    }
 
-                msg.content.iter().map(move |block| match block {
-                    ContentBlock::Text { text } => OpenAiMessage {
-                        role: role.to_string(),
-                        content: Some(text.clone()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
-                    },
-                    ContentBlock::ToolUse { id, name, input } => OpenAiMessage {
-                        role: "assistant".to_string(),
-                        content: None,
-                        tool_calls: Some(vec![OpenAiToolCall {
-                            id: id.clone(),
-                            call_type: "function".to_string(),
-                            function: OpenAiFunction {
-                                name: name.clone(),
-                                arguments: serde_json::to_string(input).unwrap_or_default(),
-                            },
-                        }]),
-                        tool_call_id: None,
-                        name: None,
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                    } => OpenAiMessage {
-                        role: "tool".to_string(),
-                        content: Some(content.clone()),
-                        tool_calls: None,
-                        tool_call_id: Some(tool_use_id.clone()),
-                        name: None,
-                    },
+    /// Convert from shared format to OpenAI-specific format
+    fn from_compat_message(msg: OpenAiCompatMessage) -> OpenAiMessage {
+        // Handle multimodal content (images) vs simple text
+        let content = if let Some(parts) = msg.content_parts {
+            // Multimodal: convert to content parts array
+            let openai_parts: Vec<OpenAiContentPart> = parts
+                .into_iter()
+                .map(|part| match part {
+                    openai_compat::OpenAiContentPart::Text { text } => {
+                        OpenAiContentPart::Text { text }
+                    }
+                    openai_compat::OpenAiContentPart::ImageUrl { url } => {
+                        OpenAiContentPart::ImageUrl {
+                            image_url: ImageUrlData { url },
+                        }
+                    }
                 })
-            })
-            .collect()
+                .collect();
+            Some(OpenAiContent::Parts(openai_parts))
+        } else {
+            // Simple text content
+            msg.content.map(OpenAiContent::Text)
+        };
+
+        OpenAiMessage {
+            role: msg.role,
+            content,
+            tool_calls: msg.tool_calls.map(|calls| {
+                calls.into_iter().map(|tc| OpenAiToolCall {
+                    id: tc.id,
+                    call_type: tc.call_type,
+                    function: OpenAiFunction {
+                        name: tc.function_name,
+                        arguments: tc.function_arguments,
+                    },
+                }).collect()
+            }),
+            tool_call_id: msg.tool_call_id,
+            name: None,
+        }
     }
 }
 
@@ -176,14 +204,14 @@ impl LlmClient for OpenAiClient {
         if let Some(system) = system_prompt {
             openai_messages.push(OpenAiMessage {
                 role: "system".to_string(),
-                content: Some(system.to_string()),
+                content: Some(OpenAiContent::Text(system.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
             });
         }
 
-        openai_messages.extend(self.convert_messages(messages));
+        openai_messages.extend(self.prepare_messages(messages));
 
         let openai_tools: Vec<OpenAiTool> = tools
             .iter()

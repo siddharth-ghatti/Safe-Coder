@@ -1,24 +1,33 @@
 //! Context Compaction
 //!
 //! Manages conversation context to prevent token overflow.
+//! Based on Codex CLI's approach with token-based preservation.
+//!
 //! When context grows too large, it compacts by:
-//! 1. Summarizing older messages
-//! 2. Pruning tool results (keeping recent ones)
-//! 3. Preserving system context and recent messages
+//! 1. Preserving recent tokens (not just message count)
+//! 2. Summarizing older messages
+//! 3. Pruning large tool results
+//! 4. Providing warnings about potential accuracy degradation
 
 use crate::llm::{ContentBlock, Message, Role};
 
 /// Configuration for context compaction
+/// Based on Codex CLI's approach with configurable thresholds
 #[derive(Debug, Clone)]
 pub struct ContextConfig {
     /// Maximum estimated tokens before triggering compaction
     pub max_tokens: usize,
-    /// Trigger compaction at this percentage of max_tokens
+    /// Trigger compaction at this percentage of max_tokens (0-100)
     pub compact_threshold_pct: usize,
-    /// Number of recent messages to preserve
-    pub preserve_recent_messages: usize,
-    /// Number of tool results to keep
-    pub preserve_tool_results: usize,
+    /// Number of recent tokens to preserve during compaction
+    /// Similar to Codex's ~20k token preservation
+    pub preserve_recent_tokens: usize,
+    /// Minimum number of recent messages to always preserve (safety floor)
+    pub min_preserve_messages: usize,
+    /// Maximum size of tool results before truncation (chars)
+    pub max_tool_result_chars: usize,
+    /// Show warning after this many compactions in a session
+    pub compaction_warning_threshold: usize,
     /// Average characters per token (rough estimate)
     pub chars_per_token: usize,
 }
@@ -26,14 +35,17 @@ pub struct ContextConfig {
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            max_tokens: 128_000,          // Claude's context window
-            compact_threshold_pct: 50,    // Compact at 50% to leave room for responses
-            preserve_recent_messages: 20, // Keep last 20 messages for better context
-            preserve_tool_results: 10,    // Keep last 10 tool results
-            chars_per_token: 4,           // Rough estimate
+            max_tokens: 128_000,               // Claude's context window
+            compact_threshold_pct: 60,         // Compact at 60% to leave room for responses
+            preserve_recent_tokens: 20_000,    // Keep ~20k tokens like Codex
+            min_preserve_messages: 5,          // Always keep at least 5 messages
+            max_tool_result_chars: 2000,       // Truncate large tool results
+            compaction_warning_threshold: 3,   // Warn after 3 compactions
+            chars_per_token: 2,                // Conservative estimate for code/JSON
         }
     }
 }
+
 
 /// Result of context analysis
 #[derive(Debug, Clone)]
@@ -52,10 +64,37 @@ pub struct ContextStats {
     pub context_usage_pct: usize,
 }
 
+/// Result of a compaction operation
+#[derive(Debug, Clone)]
+pub struct CompactionResult {
+    /// Number of messages removed
+    pub messages_removed: usize,
+    /// Estimated tokens before compaction
+    pub tokens_before: usize,
+    /// Estimated tokens after compaction
+    pub tokens_after: usize,
+    /// Human-readable summary of what was compacted
+    pub summary: String,
+}
+
+impl CompactionResult {
+    /// Check if any compaction occurred
+    pub fn did_compact(&self) -> bool {
+        self.messages_removed > 0
+    }
+
+    /// Get the number of tokens saved
+    pub fn tokens_saved(&self) -> usize {
+        self.tokens_before.saturating_sub(self.tokens_after)
+    }
+}
+
 /// Manages context compaction for a conversation
 #[derive(Debug)]
 pub struct ContextManager {
     config: ContextConfig,
+    /// Last known actual input tokens from API response (for accurate compaction decisions)
+    last_actual_tokens: Option<usize>,
 }
 
 impl ContextManager {
@@ -63,17 +102,43 @@ impl ContextManager {
     pub fn new() -> Self {
         Self {
             config: ContextConfig::default(),
+            last_actual_tokens: None,
         }
     }
 
     /// Create a new context manager with custom config
     pub fn with_config(config: ContextConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            last_actual_tokens: None,
+        }
     }
 
     /// Set max tokens (useful when switching models)
     pub fn set_max_tokens(&mut self, max_tokens: usize) {
         self.config.max_tokens = max_tokens;
+    }
+
+    /// Update with actual token count from API response
+    /// This helps calibrate future compaction decisions
+    pub fn record_actual_tokens(&mut self, input_tokens: usize) {
+        self.last_actual_tokens = Some(input_tokens);
+    }
+
+    /// Get the max tokens limit
+    pub fn max_tokens(&self) -> usize {
+        self.config.max_tokens
+    }
+
+    /// Check if we're approaching the token limit based on actual API token counts
+    /// Returns true if last actual tokens exceeded threshold
+    pub fn needs_compaction_by_actual(&self) -> bool {
+        if let Some(actual) = self.last_actual_tokens {
+            let threshold = (self.config.max_tokens * self.config.compact_threshold_pct) / 100;
+            actual >= threshold
+        } else {
+            false
+        }
     }
 
     /// Analyze current context and return stats
@@ -87,6 +152,10 @@ impl ContextManager {
                 match block {
                     ContentBlock::Text { text } => {
                         total_chars += text.len();
+                    }
+                    ContentBlock::Image { data, .. } => {
+                        // Estimate image token contribution
+                        total_chars += data.len() / 10;
                     }
                     ContentBlock::ToolUse { name, input, .. } => {
                         tool_call_count += 1;
@@ -121,39 +190,61 @@ impl ContextManager {
     }
 
     /// Compact the context by pruning and summarizing
-    /// Returns the compacted messages and a summary of what was removed
-    pub fn compact(&self, messages: Vec<Message>) -> (Vec<Message>, String) {
-        if messages.len() <= self.config.preserve_recent_messages {
-            return (messages, String::new());
+    /// Uses token-based preservation (like Codex) instead of message count
+    /// Returns the compacted messages, summary, and compaction metadata
+    pub fn compact(&self, messages: Vec<Message>) -> (Vec<Message>, CompactionResult) {
+        // Calculate tokens per message
+        let message_tokens: Vec<usize> = messages
+            .iter()
+            .map(|msg| self.estimate_message_tokens(msg))
+            .collect();
+
+        let total_tokens: usize = message_tokens.iter().sum();
+
+        // Find split point based on token preservation
+        let split_point = self.find_token_based_split(&messages, &message_tokens);
+
+        // Ensure we preserve minimum messages
+        let adjusted_split = if messages.len() - split_point < self.config.min_preserve_messages {
+            messages.len().saturating_sub(self.config.min_preserve_messages)
+        } else {
+            split_point
+        };
+
+        // If nothing to compact, return as-is
+        if adjusted_split == 0 {
+            return (
+                messages,
+                CompactionResult {
+                    messages_removed: 0,
+                    tokens_before: total_tokens,
+                    tokens_after: total_tokens,
+                    summary: String::new(),
+                },
+            );
         }
 
+        // Adjust for safe split (don't break tool call/result pairs)
+        let safe_split = self.find_safe_split_point(&messages, adjusted_split);
+
+        let (old_messages, recent_messages) = messages.split_at(safe_split);
+
+        let tokens_before = total_tokens;
+        let tokens_removed: usize = message_tokens[..safe_split].iter().sum();
+
         let mut compacted = Vec::new();
-        let mut summary_parts = Vec::new();
-
-        // Find a safe split point that doesn't break tool call/result pairs
-        // We need to ensure that any assistant message with tool_calls has its
-        // corresponding tool results in the same section
-        let initial_split = messages
-            .len()
-            .saturating_sub(self.config.preserve_recent_messages);
-
-        // Adjust split point to not break tool call/result pairs
-        let split_point = self.find_safe_split_point(&messages, initial_split);
-
-        let (old_messages, recent_messages) = messages.split_at(split_point);
 
         // Generate summary of old messages
         let old_summary = self.summarize_messages(old_messages);
         if !old_summary.is_empty() {
-            summary_parts.push(format!("Compacted {} messages", old_messages.len()));
-
             // Add summary as a system-style user message
             compacted.push(Message {
                 role: Role::User,
                 content: vec![ContentBlock::Text {
                     text: format!(
-                        "[Context Summary - {} earlier messages compacted]\n\n{}",
+                        "[Context Summary - {} earlier messages compacted (~{} tokens)]\n\n{}",
                         old_messages.len(),
+                        tokens_removed,
                         old_summary
                     ),
                 }],
@@ -165,13 +256,63 @@ impl ContextManager {
             compacted.push(self.prune_message(msg.clone()));
         }
 
-        let summary = if summary_parts.is_empty() {
-            String::new()
-        } else {
-            summary_parts.join("; ")
-        };
+        let tokens_after = self.analyze(&compacted).estimated_tokens;
 
-        (compacted, summary)
+        (
+            compacted,
+            CompactionResult {
+                messages_removed: old_messages.len(),
+                tokens_before,
+                tokens_after,
+                summary: format!(
+                    "Compacted {} messages (~{} tokens)",
+                    old_messages.len(),
+                    tokens_removed
+                ),
+            },
+        )
+    }
+
+    /// Estimate tokens for a single message
+    fn estimate_message_tokens(&self, msg: &Message) -> usize {
+        let mut chars = 0;
+        for block in &msg.content {
+            match block {
+                ContentBlock::Text { text } => chars += text.len(),
+                ContentBlock::Image { data, .. } => {
+                    // Estimate image tokens based on base64 data size
+                    // Images typically use ~85 tokens per image tile (512x512)
+                    chars += data.len() / 10; // Rough estimate
+                }
+                ContentBlock::ToolUse { name, input, .. } => {
+                    chars += name.len();
+                    chars += input.to_string().len();
+                }
+                ContentBlock::ToolResult { content, .. } => {
+                    chars += content.len();
+                }
+            }
+        }
+        chars / self.config.chars_per_token
+    }
+
+    /// Find split point based on token preservation
+    /// Preserves the last N tokens worth of messages
+    fn find_token_based_split(&self, messages: &[Message], message_tokens: &[usize]) -> usize {
+        let mut preserved_tokens = 0;
+        let mut split_idx = messages.len();
+
+        // Work backwards from the end, accumulating tokens
+        for (i, tokens) in message_tokens.iter().enumerate().rev() {
+            if preserved_tokens + tokens > self.config.preserve_recent_tokens {
+                split_idx = i + 1;
+                break;
+            }
+            preserved_tokens += tokens;
+            split_idx = i;
+        }
+
+        split_idx
     }
 
     /// Summarize a set of messages into a compact form
@@ -255,6 +396,10 @@ impl ContextManager {
                                 key_decisions.push(format!("Encountered: {}", first_line));
                             }
                         }
+                    }
+                    ContentBlock::Image { .. } => {
+                        // Images are context; note their presence in summary
+                        assistant_actions.push("[Image attached]".to_string());
                     }
                 }
             }
@@ -398,6 +543,7 @@ impl ContextManager {
 
     /// Prune a single message to reduce size
     fn prune_message(&self, mut msg: Message) -> Message {
+        let max_result_len = self.config.max_tool_result_chars;
         let pruned_content: Vec<ContentBlock> = msg
             .content
             .into_iter()
@@ -407,7 +553,6 @@ impl ContextManager {
                     content,
                 } => {
                     // Truncate large tool results
-                    let max_result_len = 2000;
                     if content.len() > max_result_len {
                         ContentBlock::ToolResult {
                             tool_use_id,
@@ -491,40 +636,41 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_preserves_recent() {
+    fn test_compact_preserves_recent_tokens() {
+        // Configure to preserve only 100 tokens
         let manager = ContextManager::with_config(ContextConfig {
-            preserve_recent_messages: 3,
+            preserve_recent_tokens: 100,
+            min_preserve_messages: 2,
             ..Default::default()
         });
 
-        // Use longer messages so they get included in summary
+        // Create messages that exceed 100 tokens total
+        // Each message is ~20 tokens (80 chars / 4 chars per token)
         let messages: Vec<Message> = (0..10)
             .map(|i| {
                 make_text_message(
                     Role::User,
                     &format!(
-                        "This is a longer message number {} with more content to analyze.",
+                        "This is a longer message number {} with more content to analyze and fill up tokens.",
                         i
                     ),
                 )
             })
             .collect();
 
-        let (compacted, summary) = manager.compact(messages);
+        let (compacted, result) = manager.compact(messages);
 
-        // Should have summary + 3 recent messages = 4
-        assert!(compacted.len() <= 4);
-        // Summary should exist because we compacted messages
-        assert!(
-            !summary.is_empty(),
-            "Summary should not be empty after compaction"
-        );
+        // Should have compacted some messages
+        assert!(result.did_compact(), "Should have compacted messages");
+        assert!(compacted.len() < 10, "Should have fewer messages after compaction");
+        assert!(!result.summary.is_empty(), "Summary should not be empty after compaction");
     }
 
     #[test]
     fn test_no_compact_when_small() {
         let manager = ContextManager::with_config(ContextConfig {
-            preserve_recent_messages: 5,
+            preserve_recent_tokens: 10_000, // Large enough to preserve everything
+            min_preserve_messages: 5,
             ..Default::default()
         });
 
@@ -533,10 +679,10 @@ mod tests {
             make_text_message(Role::Assistant, "Hi there!"),
         ];
 
-        let (compacted, summary) = manager.compact(messages.clone());
+        let (compacted, result) = manager.compact(messages.clone());
 
         assert_eq!(compacted.len(), messages.len());
-        assert!(summary.is_empty());
+        assert!(!result.did_compact());
     }
 
     #[test]

@@ -53,6 +53,8 @@ enum CommandUpdate {
 enum AiUpdate {
     /// AI is thinking/processing
     Thinking { block_id: String, message: String },
+    /// AI reasoning text (explanation before/between tool calls)
+    Reasoning { block_id: String, text: String },
     /// AI response text chunk
     TextChunk { block_id: String, text: String },
     /// AI final response
@@ -87,6 +89,12 @@ enum AiUpdate {
         path: String,
         old_content: String,
         new_content: String,
+    },
+    /// Diagnostic update after file write/edit
+    DiagnosticUpdate {
+        block_id: String,
+        errors: usize,
+        warnings: usize,
     },
     /// AI processing complete
     Complete { block_id: String },
@@ -394,6 +402,46 @@ impl ShellTuiRunner {
                         }
                         self.app.mark_dirty();
                     }
+                    AiUpdate::Reasoning { block_id, text } => {
+                        // Skip empty reasoning
+                        if text.trim().is_empty() {
+                            continue;
+                        }
+
+                        // Show reasoning inline as streaming output with a thinking prefix
+                        // This is more visible than child blocks
+                        if let Some(block) = self.app.get_block_mut(&block_id) {
+                            // Format reasoning with a thinking indicator
+                            let formatted_lines: Vec<String> = text
+                                .lines()
+                                .filter(|l| !l.trim().is_empty())
+                                .map(|l| format!("💭 {}", l))
+                                .collect();
+
+                            match &mut block.output {
+                                BlockOutput::Streaming { lines, .. } => {
+                                    // Add reasoning lines to streaming output
+                                    lines.extend(formatted_lines);
+                                }
+                                BlockOutput::Pending => {
+                                    block.output = BlockOutput::Streaming {
+                                        lines: formatted_lines,
+                                        complete: false,
+                                    };
+                                }
+                                _ => {
+                                    // If already has output, prepend reasoning
+                                    let existing = block.output.get_text();
+                                    let reasoning_text = formatted_lines.join("\n");
+                                    block.output = BlockOutput::Streaming {
+                                        lines: vec![reasoning_text, existing],
+                                        complete: false,
+                                    };
+                                }
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
                     AiUpdate::TextChunk { block_id, text } => {
                         // Skip empty text
                         if text.trim().is_empty() {
@@ -574,12 +622,15 @@ impl ShellTuiRunner {
                             }
                         }
 
-                        // Mark the tool block as complete
+                        // Mark the tool block as complete and calculate duration
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             if let Some(child) = parent.children.iter_mut().rev().find(|c| {
                                 matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
                             }) {
                                 child.exit_code = Some(if success { 0 } else { 1 });
+                                // Calculate duration from block timestamp
+                                let elapsed = chrono::Local::now() - child.timestamp;
+                                child.duration_ms = Some(elapsed.num_milliseconds().max(0) as u64);
                             }
                         }
                         // If todowrite tool completed, sync todos to sidebar
@@ -613,6 +664,22 @@ impl ShellTuiRunner {
                                     old_content,
                                     new_content,
                                 });
+                            }
+                        }
+                        self.app.mark_dirty();
+                    }
+                    AiUpdate::DiagnosticUpdate {
+                        block_id,
+                        errors,
+                        warnings,
+                    } => {
+                        // Update diagnostic counts in sidebar
+                        self.app.sidebar.update_diagnostics(errors, warnings);
+
+                        // Store diagnostic info in the most recent tool child block
+                        if let Some(parent) = self.app.get_block_mut(&block_id) {
+                            if let Some(child) = parent.children.last_mut() {
+                                child.diagnostic_counts = Some((errors, warnings));
                             }
                         }
                         self.app.mark_dirty();
@@ -883,6 +950,47 @@ impl ShellTuiRunner {
             }
         }
 
+        // Handle tool approval modal (highest priority)
+        if self.app.has_pending_tool_approval() {
+            match code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    // Approve this tool
+                    self.app.approve_pending_tool();
+                    return Ok(false);
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    // Approve all - switch to YOLO mode and approve
+                    self.app.set_permission_mode(super::shell_app::PermissionMode::Yolo);
+                    self.app.approve_pending_tool();
+
+                    // Show feedback
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "Switched to YOLO mode - all future actions auto-approved".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
+                    return Ok(false);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    // Deny the tool
+                    self.app.deny_pending_tool();
+
+                    // Show feedback
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "Tool execution denied".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
+                    return Ok(false);
+                }
+                _ => return Ok(false), // Ignore other keys
+            }
+        }
+
         // Handle plan approval popup
         if self.app.is_plan_approval_visible() {
             match code {
@@ -1038,6 +1146,54 @@ impl ShellTuiRunner {
             // Ctrl+B - toggle sidebar visibility
             KeyCode::Char('b') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.app.toggle_sidebar();
+            }
+
+            // Ctrl+Shift+V - clear attached images
+            KeyCode::Char('V') if modifiers.contains(KeyModifiers::CONTROL) && modifiers.contains(KeyModifiers::SHIFT) => {
+                if self.app.has_attached_images() {
+                    self.app.clear_attached_images();
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        "📎 Attached images cleared".to_string(),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+                }
+            }
+
+            // Ctrl+V - paste (check for images first)
+            KeyCode::Char('v') if modifiers.contains(KeyModifiers::CONTROL) => {
+                // Try to paste an image from clipboard
+                match self.app.paste_image_from_clipboard() {
+                    Ok(true) => {
+                        // Image pasted successfully
+                        let count = self.app.attached_images.len();
+                        let size = self.app.attached_images_size_display();
+                        let prompt = self.app.current_prompt();
+                        let block = CommandBlock::system(
+                            format!("📎 Image pasted ({} image{}, {})", count, if count == 1 { "" } else { "s" }, size),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+                    }
+                    Ok(false) => {
+                        // No image in clipboard, try to paste text
+                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                            if let Ok(text) = clipboard.get_text() {
+                                // Insert text at cursor position
+                                for c in text.chars() {
+                                    // Skip newlines - paste as single line
+                                    if c != '\n' && c != '\r' {
+                                        self.app.input_push(c);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Clipboard access failed: {}", e);
+                    }
+                }
             }
 
             // Regular character input
@@ -2575,6 +2731,14 @@ Keyboard:
             let ai_tx = tx.clone();
             let block_id_clone = block_id.clone();
 
+            // Take attached images (clears them from app state)
+            let attached_images: Vec<(String, String)> = self
+                .app
+                .take_attached_images()
+                .into_iter()
+                .map(|img| (img.data, img.media_type))
+                .collect();
+
             tokio::spawn(async move {
                 let mut session = session.lock().await;
 
@@ -2590,6 +2754,10 @@ Keyboard:
                             SessionEvent::Thinking(msg) => AiUpdate::Thinking {
                                 block_id: block_id_inner.clone(),
                                 message: msg,
+                            },
+                            SessionEvent::Reasoning(text) => AiUpdate::Reasoning {
+                                block_id: block_id_inner.clone(),
+                                text,
                             },
                             SessionEvent::ToolStart { name, description } => AiUpdate::ToolStart {
                                 block_id: block_id_inner.clone(),
@@ -2625,6 +2793,13 @@ Keyboard:
                                 old_content,
                                 new_content,
                             },
+                            SessionEvent::DiagnosticUpdate { errors, warnings } => {
+                                AiUpdate::DiagnosticUpdate {
+                                    block_id: block_id_inner.clone(),
+                                    errors,
+                                    warnings,
+                                }
+                            }
                             SessionEvent::TextChunk(text) => AiUpdate::TextChunk {
                                 block_id: block_id_inner.clone(),
                                 text,
@@ -2691,14 +2866,24 @@ Keyboard:
                                     tokens_compressed,
                                 }
                             }
+                            // Compaction warnings (handled by showing inline warning)
+                            SessionEvent::CompactionWarning { message, compaction_count } => {
+                                AiUpdate::Reasoning {
+                                    block_id: block_id_inner.clone(),
+                                    text: format!(
+                                        "\n⚠️  **Context Warning** (compaction #{}): {}\n",
+                                        compaction_count, message
+                                    ),
+                                }
+                            }
                         };
                         let _ = ai_tx_inner.send(update);
                     }
                 });
 
-                // Call the progress-aware method
+                // Call the progress-aware method (with images if present)
                 match session
-                    .send_message_with_progress(full_query, event_tx)
+                    .send_message_with_images_and_progress(full_query, attached_images, event_tx)
                     .await
                 {
                     Ok(response) => {

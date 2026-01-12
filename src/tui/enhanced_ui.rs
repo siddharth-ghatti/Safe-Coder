@@ -16,15 +16,15 @@ use ratatui::{
 pub fn draw_enhanced(f: &mut Frame, app: &mut App, theme: &Theme) {
     let size = f.area();
 
-    // Main layout: header, content, footer
-    let main_layout = LayoutUtils::page_layout(size, 3, 3);
+    // Main layout: header, content, footer (reduced heights for tighter UI)
+    let main_layout = LayoutUtils::page_layout(size, 2, 2);
     let [header_area, content_area, footer_area] = main_layout;
 
     // Draw header
     draw_header(f, header_area, app, theme);
 
-    // Content layout: sidebar and main content
-    let content_layout = LayoutUtils::sidebar_layout(content_area, 30);
+    // Content layout: sidebar and main content (reduced sidebar width)
+    let content_layout = LayoutUtils::sidebar_layout(content_area, 26);
     let [sidebar_area, main_area] = content_layout;
 
     // Draw sidebar
@@ -315,7 +315,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(0),     // Status
-            Constraint::Length(30), // Shortcuts
+            Constraint::Length(35), // Context indicator
         ])
         .split(area);
 
@@ -325,11 +325,13 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .alignment(Alignment::Left);
     f.render_widget(status, footer_layout[0]);
 
-    // Shortcuts
-    let shortcuts = Paragraph::new("Tab: Focus | Esc: Help | Ctrl+G: Mode | Ctrl+C: Quit")
+    // Context left until auto-compact indicator (like Claude Code)
+    let context_left = app.sidebar_state.token_usage.context_left_until_compact();
+    let context_text = format!("Context left until auto-compact: {}%", context_left);
+    let context_indicator = Paragraph::new(context_text)
         .style(Style::default().fg(theme.colors.secondary))
         .alignment(Alignment::Right);
-    f.render_widget(shortcuts, footer_layout[1]);
+    f.render_widget(context_indicator, footer_layout[1]);
 }
 
 fn draw_help_modal(f: &mut Frame, theme: &Theme) {

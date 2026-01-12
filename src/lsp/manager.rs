@@ -452,6 +452,34 @@ impl LspManager {
         diags.get(&uri).cloned().unwrap_or_default()
     }
 
+    /// Get diagnostic counts (errors, warnings) for all files
+    pub async fn get_diagnostic_counts(&self) -> (usize, usize) {
+        let all_diags = self.get_all_diagnostics().await;
+        let errors = all_diags
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .count();
+        let warnings = all_diags
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Warning)
+            .count();
+        (errors, warnings)
+    }
+
+    /// Get diagnostic counts for a specific file
+    pub async fn get_file_diagnostic_counts(&self, path: &Path) -> (usize, usize) {
+        let diags = self.get_file_diagnostics(path).await;
+        let errors = diags
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Error)
+            .count();
+        let warnings = diags
+            .iter()
+            .filter(|d| d.severity == DiagnosticSeverity::Warning)
+            .count();
+        (errors, warnings)
+    }
+
     /// Get diagnostics summary for AI context
     pub async fn get_diagnostics_summary(&self) -> String {
         let all_diags = self.get_all_diagnostics().await;

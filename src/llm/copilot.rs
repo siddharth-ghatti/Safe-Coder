@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::openai_compat::{self, OpenAiCompatMessage};
 use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 /// Information about a single Copilot model
@@ -113,11 +114,32 @@ struct CopilotRequest {
     max_tokens: Option<usize>,
 }
 
+/// Content can be either a simple string or an array of content parts (for multimodal)
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CopilotContent {
+    Text(String),
+    Parts(Vec<CopilotContentPart>),
+}
+
+/// Content part for multimodal messages
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CopilotContentPart {
+    Text { text: String },
+    ImageUrl { image_url: CopilotImageUrlData },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CopilotImageUrlData {
+    url: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CopilotMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<CopilotContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<CopilotToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,140 +210,55 @@ impl CopilotClient {
         }
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<CopilotMessage> {
-        let mut result = Vec::new();
-
-        for msg in messages {
-            let role = match msg.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-            };
-
-            // Collect all tool calls and text from this message
-            let mut tool_calls = Vec::new();
-            let mut text_content = String::new();
-            let mut tool_results = Vec::new();
-
-            for block in &msg.content {
-                match block {
-                    ContentBlock::Text { text } => {
-                        if !text_content.is_empty() {
-                            text_content.push('\n');
-                        }
-                        text_content.push_str(text);
-                    }
-                    ContentBlock::ToolUse { id, name, input } => {
-                        tool_calls.push(CopilotToolCall {
-                            id: id.clone(),
-                            call_type: "function".to_string(),
-                            function: CopilotFunction {
-                                name: name.clone(),
-                                arguments: serde_json::to_string(input).unwrap_or_default(),
-                            },
-                        });
-                    }
-                    ContentBlock::ToolResult { tool_use_id, content } => {
-                        tool_results.push((tool_use_id.clone(), content.clone()));
-                    }
-                }
-            }
-
-            // Handle assistant messages with tool calls
-            if !tool_calls.is_empty() {
-                // OpenAI requires all tool_calls in one assistant message
-                result.push(CopilotMessage {
-                    role: "assistant".to_string(),
-                    content: if text_content.is_empty() { None } else { Some(text_content.clone()) },
-                    tool_calls: Some(tool_calls),
-                    tool_call_id: None,
-                });
-            } else if !text_content.is_empty() {
-                // Regular text message
-                result.push(CopilotMessage {
-                    role: role.to_string(),
-                    content: Some(text_content),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-
-            // Tool results must be separate messages with role "tool"
-            for (tool_use_id, content) in tool_results {
-                result.push(CopilotMessage {
-                    role: "tool".to_string(),
-                    content: Some(content),
-                    tool_calls: None,
-                    tool_call_id: Some(tool_use_id),
-                });
-            }
-        }
-
-        result
+    /// Convert and validate messages using shared OpenAI-compatible logic
+    fn prepare_messages(&self, messages: &[Message]) -> Vec<CopilotMessage> {
+        // Use shared conversion logic
+        let compat_messages = openai_compat::convert_messages(messages);
+        // Validate tool call/result pairs
+        let validated = openai_compat::validate_tool_pairs(compat_messages);
+        // Convert to Copilot-specific format
+        validated.into_iter().map(Self::from_compat_message).collect()
     }
 
-    /// Validate that all tool_calls have matching tool results and fix any issues
-    /// OpenAI API requires: assistant message with tool_calls must be immediately
-    /// followed by tool messages with matching tool_call_ids
-    fn validate_tool_pairs(&self, messages: Vec<CopilotMessage>) -> Vec<CopilotMessage> {
-        use std::collections::HashSet;
-
-        // First pass: collect all tool_call_ids and tool_call_id responses
-        let mut expected_tool_ids: HashSet<String> = HashSet::new();
-        let mut found_tool_ids: HashSet<String> = HashSet::new();
-
-        for msg in &messages {
-            if let Some(ref tool_calls) = msg.tool_calls {
-                for tc in tool_calls {
-                    expected_tool_ids.insert(tc.id.clone());
-                }
-            }
-            if msg.role == "tool" {
-                if let Some(ref id) = msg.tool_call_id {
-                    found_tool_ids.insert(id.clone());
-                }
-            }
-        }
-
-        // Find missing tool responses
-        let missing: HashSet<_> = expected_tool_ids.difference(&found_tool_ids).collect();
-
-        if missing.is_empty() {
-            return messages;
-        }
-
-        // Log the issue
-        tracing::warn!(
-            "Found {} tool_calls without responses, removing them: {:?}",
-            missing.len(),
-            missing
-        );
-
-        // Second pass: filter out messages with broken tool_calls
-        let mut result = Vec::new();
-        for msg in messages {
-            if let Some(ref tool_calls) = msg.tool_calls {
-                // Check if all tool_calls in this message have responses
-                let has_all_responses = tool_calls.iter().all(|tc| found_tool_ids.contains(&tc.id));
-
-                if !has_all_responses {
-                    // This message has tool_calls without responses
-                    // Convert it to a regular assistant message with just the text content
-                    if msg.content.is_some() {
-                        result.push(CopilotMessage {
-                            role: msg.role,
-                            content: msg.content,
-                            tool_calls: None,  // Remove the problematic tool_calls
-                            tool_call_id: None,
-                        });
+    /// Convert from shared format to Copilot-specific format
+    fn from_compat_message(msg: OpenAiCompatMessage) -> CopilotMessage {
+        // Handle multimodal content (images) vs simple text
+        let content = if let Some(parts) = msg.content_parts {
+            // Multimodal: convert to content parts array
+            let copilot_parts: Vec<CopilotContentPart> = parts
+                .into_iter()
+                .map(|part| match part {
+                    openai_compat::OpenAiContentPart::Text { text } => {
+                        CopilotContentPart::Text { text }
                     }
-                    // Skip this message entirely if it has no text content
-                    continue;
-                }
-            }
-            result.push(msg);
-        }
+                    openai_compat::OpenAiContentPart::ImageUrl { url } => {
+                        CopilotContentPart::ImageUrl {
+                            image_url: CopilotImageUrlData { url },
+                        }
+                    }
+                })
+                .collect();
+            Some(CopilotContent::Parts(copilot_parts))
+        } else {
+            // Simple text content
+            msg.content.map(CopilotContent::Text)
+        };
 
-        result
+        CopilotMessage {
+            role: msg.role,
+            content,
+            tool_calls: msg.tool_calls.map(|calls| {
+                calls.into_iter().map(|tc| CopilotToolCall {
+                    id: tc.id,
+                    call_type: tc.call_type,
+                    function: CopilotFunction {
+                        name: tc.function_name,
+                        arguments: tc.function_arguments,
+                    },
+                }).collect()
+            }),
+            tool_call_id: msg.tool_call_id,
+        }
     }
 }
 
@@ -339,16 +276,13 @@ impl LlmClient for CopilotClient {
         if let Some(system) = system_prompt {
             copilot_messages.push(CopilotMessage {
                 role: "system".to_string(),
-                content: Some(system.to_string()),
+                content: Some(CopilotContent::Text(system.to_string())),
                 tool_calls: None,
                 tool_call_id: None,
             });
         }
 
-        copilot_messages.extend(self.convert_messages(messages));
-
-        // Validate and fix tool call/result pairs
-        copilot_messages = self.validate_tool_pairs(copilot_messages);
+        copilot_messages.extend(self.prepare_messages(messages));
 
         let copilot_tools: Vec<CopilotTool> = tools
             .iter()
@@ -369,10 +303,15 @@ impl LlmClient for CopilotClient {
             max_tokens: Some(self.max_tokens),
         };
 
+        // Check if any messages contain images (need vision header)
+        let has_images = messages.iter().any(|msg| {
+            msg.content.iter().any(|block| matches!(block, ContentBlock::Image { .. }))
+        });
+
         // GitHub Copilot uses the same endpoint structure as OpenAI
         let url = "https://api.githubcopilot.com/chat/completions";
 
-        let response = self
+        let mut req_builder = self
             .client
             .post(url)
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -380,7 +319,15 @@ impl LlmClient for CopilotClient {
             .header("Editor-Version", "vscode/1.85.0")
             .header("Editor-Plugin-Version", "copilot-chat/0.12.0")
             .header("Copilot-Integration-Id", "vscode-chat")
-            .header("User-Agent", "GitHubCopilotChat/0.12.0")
+            .header("User-Agent", "GitHubCopilotChat/0.12.0");
+
+        // Add vision header if images are present
+        if has_images {
+            tracing::info!("Adding Copilot-Vision-Request header for image request");
+            req_builder = req_builder.header("Copilot-Vision-Request", "true");
+        }
+
+        let response = req_builder
             .json(&request)
             .send()
             .await

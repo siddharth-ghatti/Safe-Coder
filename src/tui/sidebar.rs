@@ -50,6 +50,14 @@ impl SidebarState {
         Self::default()
     }
 
+    /// Create with a specific context window size (from config)
+    pub fn with_context_window(context_window: usize) -> Self {
+        Self {
+            token_usage: TokenUsage::with_context_window(context_window),
+            ..Default::default()
+        }
+    }
+
     /// Toggle sidebar visibility
     pub fn toggle(&mut self) {
         self.visible = !self.visible;
@@ -79,6 +87,37 @@ impl SidebarState {
     /// Clear todo plan
     pub fn clear_todos(&mut self) {
         self.todo_plan = None;
+    }
+
+    /// Update diagnostic counts from LSP
+    pub fn update_diagnostics(&mut self, errors: usize, warnings: usize) {
+        self.connections.diagnostic_counts = (errors, warnings);
+    }
+
+    /// Get the current task text for shimmer display
+    /// Priority: in_progress todo active_form > todo content > current_task (user query)
+    pub fn current_task_active_form(&self) -> Option<String> {
+        // First try to get in_progress todo item's active form
+        if let Some(plan) = &self.todo_plan {
+            if let Some(item) = plan.items.iter().find(|item| item.status == "in_progress") {
+                if !item.active_form.is_empty() {
+                    return Some(item.active_form.clone());
+                } else if !item.content.is_empty() {
+                    return Some(format!("Working on: {}", item.content));
+                }
+            }
+        }
+
+        // Fall back to current_task (the user's original query)
+        // Truncate long queries and add "Working on:" prefix
+        self.current_task.as_ref().map(|task| {
+            let truncated = if task.len() > 40 {
+                format!("{}...", &task[..37])
+            } else {
+                task.clone()
+            };
+            format!("Working on: {}", truncated)
+        })
     }
 
     /// Update from a plan event
@@ -535,6 +574,8 @@ pub struct TokenUsage {
     pub total_tokens: usize,
     /// Context window size (model dependent)
     pub context_window: usize,
+    /// Compaction threshold percentage (default 60%)
+    pub compact_threshold_pct: usize,
     /// Tokens that have been compressed/summarized (to show history)
     pub compressed_tokens: usize,
     /// Tokens read from provider cache (Anthropic/OpenAI)
@@ -557,12 +598,24 @@ impl TokenUsage {
             output_tokens: 0,
             total_tokens: 0,
             context_window,
+            compact_threshold_pct: 60, // Default to 60%
             compressed_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             cache_hits: 0,
             cache_misses: 0,
             estimated_savings: 0.0,
+        }
+    }
+
+    /// Calculate context left until auto-compact (as percentage points)
+    /// Returns how many percentage points of context remain before compaction triggers
+    pub fn context_left_until_compact(&self) -> usize {
+        let current_pct = self.usage_percent() as usize;
+        if current_pct >= self.compact_threshold_pct {
+            0
+        } else {
+            self.compact_threshold_pct - current_pct
         }
     }
 
@@ -689,6 +742,8 @@ fn format_number(n: usize) -> String {
 pub struct ConnectionStatus {
     /// LSP servers (name, connected)
     pub lsp_servers: Vec<(String, bool)>,
+    /// Current diagnostic counts (errors, warnings)
+    pub diagnostic_counts: (usize, usize),
 }
 
 /// A file that was modified during the session
@@ -746,6 +801,7 @@ mod tests {
             output_tokens: 500,
             total_tokens: 2000,
             context_window: 200_000,
+            compact_threshold_pct: 60,
             compressed_tokens: 0,
             cache_read_tokens: 0,
             cache_write_tokens: 0,

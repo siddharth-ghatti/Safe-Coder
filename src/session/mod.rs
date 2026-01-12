@@ -29,8 +29,10 @@ use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
-    /// AI is thinking/processing
+    /// AI is thinking/processing (status message)
     Thinking(String),
+    /// AI reasoning text before/between tool calls (the LLM's explanation of what it's doing)
+    Reasoning(String),
     /// Tool execution started
     ToolStart { name: String, description: String },
     /// Tool produced output
@@ -39,6 +41,11 @@ pub enum SessionEvent {
     BashOutputLine { name: String, line: String },
     /// Tool execution completed
     ToolComplete { name: String, success: bool },
+    /// Diagnostic update after file write/edit
+    DiagnosticUpdate {
+        errors: usize,
+        warnings: usize,
+    },
     /// File was edited - includes diff info
     FileDiff {
         path: String,
@@ -83,6 +90,11 @@ pub enum SessionEvent {
     },
     /// Context was compressed - tokens_compressed is the estimated tokens that were compressed
     ContextCompressed { tokens_compressed: usize },
+    /// Warning about potential accuracy degradation after multiple compactions
+    CompactionWarning {
+        message: String,
+        compaction_count: usize,
+    },
 }
 
 pub struct Session {
@@ -190,6 +202,9 @@ impl Session {
             }
         }
 
+        // Create context manager with config settings before moving config into struct
+        let context_manager = ContextManager::with_config(config.context.to_context_config());
+
         Ok(Self {
             config,
             llm_client,
@@ -199,7 +214,7 @@ impl Session {
 
             git_manager,
             loop_detector: LoopDetector::new(),
-            context_manager: ContextManager::new(),
+            context_manager,
             permission_manager: PermissionManager::new(),
 
             persistence,
@@ -279,6 +294,17 @@ impl Session {
     /// Get plan history
     pub fn get_plan_history(&self) -> &[crate::unified_planning::UnifiedPlan] {
         &self.plan_history
+    }
+
+    /// Restore messages from a previous session (for session resumption)
+    pub fn restore_messages(&mut self, messages: Vec<Message>) {
+        self.messages = messages;
+        tracing::info!("Restored {} messages from previous session", self.messages.len());
+    }
+
+    /// Get current messages
+    pub fn get_messages(&self) -> &[Message] {
+        &self.messages
     }
 
     /// Set the current plan
@@ -767,12 +793,12 @@ impl Session {
 
         // Check if context compaction is needed
         if self.context_manager.needs_compaction(&self.messages) {
-            let (compacted, summary) = self
+            let (compacted, result) = self
                 .context_manager
                 .compact(std::mem::take(&mut self.messages));
             self.messages = compacted;
-            if !summary.is_empty() {
-                tracing::info!("Context compacted: {}", summary);
+            if result.did_compact() {
+                tracing::info!("Context compacted: {}", result.summary);
             }
         }
 
@@ -808,6 +834,18 @@ impl Session {
             // Track stats from actual token usage if available
             if let Some(usage) = &llm_response.usage {
                 self.stats.total_tokens_sent += usage.input_tokens;
+                // Record actual tokens for better compaction decisions
+                self.context_manager.record_actual_tokens(usage.input_tokens);
+                // Check if we need to compact based on actual token usage
+                if self.context_manager.needs_compaction_by_actual() {
+                    let (compacted, result) = self
+                        .context_manager
+                        .compact(std::mem::take(&mut self.messages));
+                    self.messages = compacted;
+                    if result.did_compact() {
+                        tracing::info!("Context compacted based on actual tokens: {}", result.summary);
+                    }
+                }
             } else {
                 // Fall back to approximate token counting
                 self.stats.total_tokens_sent += user_message.len() / 4;
@@ -1046,6 +1084,19 @@ impl Session {
         user_message: String,
         event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Result<String> {
+        self.send_message_with_images_and_progress(user_message, vec![], event_tx)
+            .await
+    }
+
+    /// Send a message with images and real-time progress updates via channel
+    /// This allows the UI to show tool executions as they happen
+    /// Images are provided as (base64_data, media_type) tuples
+    pub async fn send_message_with_images_and_progress(
+        &mut self,
+        user_message: String,
+        images: Vec<(String, String)>,
+        event_tx: mpsc::UnboundedSender<SessionEvent>,
+    ) -> Result<String> {
         // Create checkpoint before processing user task (git-agnostic safety)
         if self.dir_checkpoints.is_enabled() {
             let label = user_message.chars().take(100).collect::<String>();
@@ -1061,30 +1112,32 @@ impl Session {
         // Track stats
         self.stats.total_messages += 1;
 
-        // Add user message to history
-        self.messages.push(Message::user(user_message.clone()));
+        // Add user message to history (with images if present)
+        if images.is_empty() {
+            self.messages.push(Message::user(user_message.clone()));
+        } else {
+            tracing::info!("Sending message with {} image(s)", images.len());
+            self.messages
+                .push(Message::user_with_images(user_message.clone(), images));
+        }
 
         // Check if context compaction is needed
         if self.context_manager.needs_compaction(&self.messages) {
-            // Get stats before compaction to calculate tokens compressed
-            let stats_before = self.context_manager.analyze(&self.messages);
-            let (compacted, summary) = self
+            let (compacted, result) = self
                 .context_manager
                 .compact(std::mem::take(&mut self.messages));
-            let stats_after = self.context_manager.analyze(&compacted);
-            let tokens_compressed = stats_before
-                .estimated_tokens
-                .saturating_sub(stats_after.estimated_tokens);
 
             self.messages = compacted;
-            if !summary.is_empty() {
-                tracing::info!("Context compacted: {}", summary);
+            if result.did_compact() {
+                tracing::info!("Context compacted: {}", result.summary);
                 let _ = event_tx.send(SessionEvent::TextChunk(format!(
                     "\n📦 Context compacted: {}\n",
-                    summary
+                    result.summary
                 )));
                 // Send compression event for sidebar token tracking
-                let _ = event_tx.send(SessionEvent::ContextCompressed { tokens_compressed });
+                let _ = event_tx.send(SessionEvent::ContextCompressed {
+                    tokens_compressed: result.tokens_saved(),
+                });
             }
         }
 
@@ -1267,6 +1320,8 @@ impl Session {
             // Track stats and emit token usage event
             if let Some(usage) = &llm_response.usage {
                 self.stats.total_tokens_sent += usage.input_tokens;
+                // Record actual tokens for better compaction decisions
+                self.context_manager.record_actual_tokens(usage.input_tokens);
                 // Emit token usage event for sidebar (including cache stats)
                 let _ = event_tx.send(SessionEvent::TokenUsage {
                     input_tokens: usage.input_tokens,
@@ -1274,6 +1329,20 @@ impl Session {
                     cache_read_tokens: usage.cache_read_tokens,
                     cache_creation_tokens: usage.cache_creation_tokens,
                 });
+                // Check if we need to compact based on actual token usage
+                if self.context_manager.needs_compaction_by_actual() {
+                    let (compacted, result) = self
+                        .context_manager
+                        .compact(std::mem::take(&mut self.messages));
+                    self.messages = compacted;
+                    if result.did_compact() {
+                        tracing::info!("Context compacted based on actual tokens: {}", result.summary);
+                        let _ = event_tx.send(SessionEvent::TextChunk(format!(
+                            "\n📦 Context compacted (actual tokens exceeded threshold): {}\n",
+                            result.summary
+                        )));
+                    }
+                }
             } else {
                 // Fall back to approximate token counting
                 self.stats.total_tokens_sent += user_message.len() / 4;
@@ -1287,11 +1356,18 @@ impl Session {
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
             // Extract text from response and send as chunks
+            // If there are tool calls, text is reasoning (explaining what it's about to do)
+            // If no tool calls, text is the final response
             for block in &assistant_message.content {
                 if let ContentBlock::Text { text } = block {
                     response_text.push_str(text);
                     response_text.push('\n');
-                    let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                    if has_tool_calls && !text.trim().is_empty() {
+                        // This is the LLM's reasoning before executing tools
+                        let _ = event_tx.send(SessionEvent::Reasoning(text.clone()));
+                    } else {
+                        let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                    }
                 }
             }
 
@@ -1558,6 +1634,11 @@ impl Session {
                             if let Err(e) = self.lsp_manager.notify_file_changed(&full_path).await {
                                 tracing::debug!("LSP file change notification failed: {}", e);
                             }
+
+                            // Give LSP a moment to process and send diagnostic update
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            let (errors, warnings) = self.lsp_manager.get_diagnostic_counts().await;
+                            let _ = event_tx.send(SessionEvent::DiagnosticUpdate { errors, warnings });
                         }
                     }
 
@@ -2347,32 +2428,29 @@ impl Session {
         let stats_before = self.context_manager.analyze(&self.messages);
 
         // Force compaction even if not at threshold
-        let (compacted, summary) = self
+        let (compacted, result) = self
             .context_manager
             .compact(std::mem::take(&mut self.messages));
 
-        let stats_after = self.context_manager.analyze(&compacted);
-        let tokens_saved = stats_before
-            .estimated_tokens
-            .saturating_sub(stats_after.estimated_tokens);
-
         self.messages = compacted;
+
+        let stats_after = self.context_manager.analyze(&self.messages);
 
         let mut output = String::new();
         output.push_str("📦 Context Compacted\n");
         output.push_str("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
         output.push_str(&format!(
             "Before: ~{} tokens ({} messages)\n",
-            stats_before.estimated_tokens, stats_before.message_count
+            result.tokens_before, stats_before.message_count
         ));
         output.push_str(&format!(
             "After:  ~{} tokens ({} messages)\n",
-            stats_after.estimated_tokens, stats_after.message_count
+            result.tokens_after, stats_after.message_count
         ));
-        output.push_str(&format!("Saved:  ~{} tokens\n", tokens_saved));
+        output.push_str(&format!("Saved:  ~{} tokens\n", result.tokens_saved()));
 
-        if !summary.is_empty() {
-            output.push_str(&format!("\nSummary: {}\n", summary));
+        if result.did_compact() {
+            output.push_str(&format!("\nSummary: {}\n", result.summary));
         }
 
         Ok(output)

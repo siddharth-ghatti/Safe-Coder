@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::openai_compat::{self, OpenAiCompatMessage};
 use super::{ContentBlock, LlmClient, LlmResponse, Message, Role, TokenUsage, ToolDefinition};
 
 pub struct OllamaClient {
@@ -109,47 +110,52 @@ impl OllamaClient {
         }
     }
 
-    fn convert_messages(&self, messages: &[Message]) -> Vec<OllamaMessage> {
-        messages
-            .iter()
-            .flat_map(|msg| {
-                let role = match msg.role {
-                    Role::User => "user",
-                    Role::Assistant => "assistant",
-                };
+    /// Convert and validate messages using shared OpenAI-compatible logic
+    fn prepare_messages(&self, messages: &[Message]) -> Vec<OllamaMessage> {
+        // Use shared conversion logic
+        let compat_messages = openai_compat::convert_messages(messages);
+        // Validate tool call/result pairs
+        let validated = openai_compat::validate_tool_pairs(compat_messages);
+        // Convert to Ollama-specific format
+        validated.into_iter().map(Self::from_compat_message).collect()
+    }
 
-                msg.content.iter().map(move |block| match block {
-                    ContentBlock::Text { text } => OllamaMessage {
-                        role: role.to_string(),
-                        content: text.clone(),
-                        tool_calls: None,
-                        tool_call_id: None,
-                    },
-                    ContentBlock::ToolUse { id, name, input } => OllamaMessage {
-                        role: "assistant".to_string(),
-                        content: String::new(),
-                        tool_calls: Some(vec![OllamaToolCall {
-                            id: id.clone(),
-                            call_type: "function".to_string(),
-                            function: OllamaFunction {
-                                name: name.clone(),
-                                arguments: serde_json::to_string(input).unwrap_or_default(),
-                            },
-                        }]),
-                        tool_call_id: None,
-                    },
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                    } => OllamaMessage {
-                        role: "tool".to_string(),
-                        content: content.clone(),
-                        tool_calls: None,
-                        tool_call_id: Some(tool_use_id.clone()),
-                    },
+    /// Convert from shared format to Ollama-specific format
+    /// Note: Ollama local models generally don't support images, so we extract text only
+    fn from_compat_message(msg: OpenAiCompatMessage) -> OllamaMessage {
+        // For multimodal content, extract just the text parts (Ollama doesn't support images)
+        let content = if let Some(parts) = msg.content_parts {
+            parts
+                .into_iter()
+                .filter_map(|part| match part {
+                    openai_compat::OpenAiContentPart::Text { text } => Some(text),
+                    openai_compat::OpenAiContentPart::ImageUrl { .. } => {
+                        // Log that we're skipping an image
+                        tracing::debug!("Skipping image in Ollama message (not supported by local models)");
+                        None
+                    }
                 })
-            })
-            .collect()
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            msg.content.unwrap_or_default()
+        };
+
+        OllamaMessage {
+            role: msg.role,
+            content,
+            tool_calls: msg.tool_calls.map(|calls| {
+                calls.into_iter().map(|tc| OllamaToolCall {
+                    id: tc.id,
+                    call_type: tc.call_type,
+                    function: OllamaFunction {
+                        name: tc.function_name,
+                        arguments: tc.function_arguments,
+                    },
+                }).collect()
+            }),
+            tool_call_id: msg.tool_call_id,
+        }
     }
 }
 
@@ -173,7 +179,7 @@ impl LlmClient for OllamaClient {
             });
         }
 
-        ollama_messages.extend(self.convert_messages(messages));
+        ollama_messages.extend(self.prepare_messages(messages));
 
         let ollama_tools = if !tools.is_empty() {
             Some(

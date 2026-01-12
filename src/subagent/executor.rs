@@ -87,10 +87,12 @@ impl SubagentExecutor {
         // Create context manager with smaller limits for subagents
         // Subagents should be more aggressive about compaction since they're focused tasks
         let context_config = ContextConfig {
-            max_tokens: 80_000,           // Smaller window for subagents
-            compact_threshold_pct: 40,    // Compact earlier (at 40%)
-            preserve_recent_messages: 10, // Keep fewer messages
-            preserve_tool_results: 5,     // Keep fewer tool results
+            max_tokens: 80_000,             // Smaller window for subagents
+            compact_threshold_pct: 40,      // Compact earlier (at 40%)
+            preserve_recent_tokens: 10_000, // Keep ~10k tokens (less than main session)
+            min_preserve_messages: 3,       // Keep at least 3 messages
+            max_tool_result_chars: 1500,    // Truncate tool results more aggressively
+            compaction_warning_threshold: 2, // Warn earlier for subagents
             chars_per_token: 4,
         };
         let context_manager = ContextManager::with_config(context_config);
@@ -158,15 +160,15 @@ impl SubagentExecutor {
                     message: "Compacting context...".to_string(),
                 });
 
-                let (compacted, summary) = self
+                let (compacted, result) = self
                     .context_manager
                     .compact(std::mem::take(&mut self.messages));
                 self.messages = compacted;
 
-                if !summary.is_empty() {
+                if result.did_compact() {
                     let _ = self.event_tx.send(SubagentEvent::Thinking {
                         id: self.id.clone(),
-                        message: format!("Context compacted: {}", summary),
+                        message: format!("Context compacted: {}", result.summary),
                     });
                 }
             }
