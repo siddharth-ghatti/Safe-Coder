@@ -28,7 +28,7 @@ pub async fn get_messages(
             let dtos: Vec<MessageDto> = messages
                 .iter()
                 .enumerate()
-                .map(|(i, msg)| {
+                .filter_map(|(i, msg)| {
                     // Extract text content
                     let content = msg
                         .content
@@ -43,13 +43,18 @@ pub async fn get_messages(
                         .collect::<Vec<_>>()
                         .join("\n");
 
-                    MessageDto {
+                    // Skip messages with no text content
+                    if content.trim().is_empty() {
+                        return None;
+                    }
+
+                    Some(MessageDto {
                         id: format!("msg_{}", i),
                         role: format!("{:?}", msg.role).to_lowercase(),
                         content,
                         timestamp: chrono::Utc::now().to_rfc3339(), // TODO: store timestamps
                         tool_calls: None, // TODO: extract tool calls
-                    }
+                    })
                 })
                 .collect();
 
@@ -160,6 +165,12 @@ pub async fn send_message(
                 ).await;
             }
 
+            // Handle doom loop prompts - register response channel with state
+            if let SessionEvent::DoomLoopPrompt { ref prompt_id, ref response_tx, .. } = event {
+                tracing::info!("DoomLoopPrompt event received, registering response channel: {}", prompt_id);
+                state_clone.register_doom_loop_response(prompt_id.clone(), response_tx.clone()).await;
+            }
+
             // Convert and broadcast
             let server_event: ServerEvent = event.into();
             let _ = event_sender_clone.send(server_event);
@@ -170,6 +181,7 @@ pub async fn send_message(
     let handle_clone = handle.clone();
     let message = request.content.clone();
     let session_id_for_log = session_id.clone();
+    let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
         tracing::info!("Processing message for session {}", session_id_for_log);
 
@@ -182,6 +194,16 @@ pub async fn send_message(
         match session.send_message_with_progress(message, session_tx).await {
             Ok(response) => {
                 tracing::info!("Message processed successfully, response length: {}", response.len());
+
+                // Save messages to persistent storage
+                if let Some(persistence) = state_clone.persistence() {
+                    let messages = session.get_messages();
+                    if let Err(e) = persistence.update_session(&session_id_for_log, &messages).await {
+                        tracing::warn!("Failed to persist messages: {}", e);
+                    } else {
+                        tracing::debug!("Messages persisted to SQLite");
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!("Failed to process message: {}", e);

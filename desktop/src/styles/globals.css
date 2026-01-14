@@ -141,67 +141,114 @@ pre, code {
   position: relative;
 }
 
-.streaming-content > * {
-  animation: fadeInUp 0.15s ease-out;
+/* Subtle fade for new content blocks - reduced to prevent flicker */
+.streaming-content > *:last-child {
+  animation: contentFadeIn 0.2s ease-out;
 }
 
-.streaming-content::after {
-  content: "";
+/* Separate cursor element for better positioning */
+.streaming-cursor {
   display: inline-block;
   width: 2px;
-  height: 1.2em;
-  background: #22c55e;
+  height: 1.1em;
+  background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
   margin-left: 2px;
   vertical-align: text-bottom;
-  animation: blink 0.8s step-end infinite;
+  border-radius: 1px;
+  animation: cursorPulse 1s ease-in-out infinite;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.5);
 }
 
-@keyframes fadeInUp {
+@keyframes contentFadeIn {
   from {
-    opacity: 0.5;
-    transform: translateY(4px);
+    opacity: 0.7;
   }
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 
-@keyframes blink {
+@keyframes cursorPulse {
   0%, 100% {
     opacity: 1;
+    transform: scaleY(1);
   }
   50% {
-    opacity: 0;
+    opacity: 0.4;
+    transform: scaleY(0.95);
   }
 }
 
 /* Tool execution animations */
 .tool-execution {
-  animation: slideInLeft 0.2s ease-out;
+  animation: toolSlideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-@keyframes slideInLeft {
+@keyframes toolSlideIn {
   from {
     opacity: 0;
-    transform: translateX(-8px);
+    transform: translateY(8px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: translateX(0);
+    transform: translateY(0) scale(1);
   }
 }
 
-/* Text chunk animation for streaming */
-.text-chunk-new {
-  animation: textAppear 0.1s ease-out;
+/* Subtle pulse for running tools */
+.animate-pulse-subtle {
+  animation: pulseSlight 2s ease-in-out infinite;
 }
 
-@keyframes textAppear {
+@keyframes pulseSlight {
+  0%, 100% {
+    opacity: 1;
+    border-color: rgba(34, 197, 94, 0.3);
+  }
+  50% {
+    opacity: 0.9;
+    border-color: rgba(34, 197, 94, 0.5);
+  }
+}
+
+/* Smooth scroll behavior for message container */
+.scroll-smooth {
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Better scroll momentum on macOS/iOS */
+@supports (-webkit-touch-callout: none) {
+  .scroll-smooth {
+    scroll-behavior: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* Scroll button entrance animation */
+@keyframes scrollButtonIn {
   from {
-    opacity: 0.3;
+    opacity: 0;
+    transform: translate(-50%, 16px);
   }
   to {
     opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* Message list smooth transitions */
+.message-appear {
+  animation: messageSlideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes messageSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

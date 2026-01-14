@@ -95,6 +95,13 @@ pub enum SessionEvent {
         message: String,
         compaction_count: usize,
     },
+    /// Doom loop detected - asking user whether to continue
+    /// The sender is used to receive the user's response (true = continue, false = stop)
+    DoomLoopPrompt {
+        prompt_id: String,
+        message: String,
+        response_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    },
 }
 
 pub struct Session {
@@ -263,6 +270,12 @@ impl Session {
     pub fn cycle_agent_mode(&mut self) {
         self.agent_mode = self.agent_mode.next();
         tracing::info!("Agent mode cycled to: {}", self.agent_mode);
+    }
+
+    /// Reset the loop detector (used when user chooses to continue after doom loop detection)
+    pub fn reset_loop_detector(&mut self) {
+        self.loop_detector.reset();
+        tracing::info!("Loop detector reset by user");
     }
 
     /// Apply a permission preset (safe, dev, full, yolo)
@@ -1011,8 +1024,13 @@ impl Session {
                             });
                             continue;
                         }
-                        DoomLoopAction::Warn { message } | DoomLoopAction::AskUser { message } => {
+                        DoomLoopAction::Warn { message } => {
                             tracing::warn!("{}", message);
+                        }
+                        DoomLoopAction::AskUser { message } => {
+                            // In non-streaming mode, just warn and continue
+                            // (blocking behavior is in send_message_with_progress)
+                            tracing::warn!("Doom loop detected: {}", message);
                         }
                         DoomLoopAction::Continue => {}
                     }
@@ -1024,7 +1042,9 @@ impl Session {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
                             Ok(output) => {
                                 tools_executed.push(name.clone());
-                                (output, true)
+                                // Check if bash command failed (has non-zero exit status)
+                                let cmd_success = !output.contains("[Exit status:");
+                                (output, cmd_success)
                             }
                             Err(e) => (format!("Error: {}", e), false),
                         },
@@ -1073,7 +1093,7 @@ impl Session {
                     if let Some(build_errors) = self.verify_build().await {
                         final_results.push(ContentBlock::Text {
                             text: format!(
-                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
+                                "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
                                 build_errors
                             ),
                         });
@@ -1084,7 +1104,7 @@ impl Session {
                     if !diagnostics_summary.is_empty() {
                         final_results.push(ContentBlock::Text {
                             text: format!(
-                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                "\n\n[LSP ERRORS - FIX NOW]\n{}\n\nFix these issues immediately. Continue working until all errors are resolved.",
                                 diagnostics_summary
                             ),
                         });
@@ -1256,7 +1276,11 @@ impl Session {
                         let tool_context = ToolContext::new(&self.project_path, &self.config.tools);
                         let (result, success) = if let Some(tool) = self.tool_registry.get_tool(name) {
                             match tool.execute(input.clone(), &tool_context).await {
-                                Ok(r) => (r, true),
+                                Ok(r) => {
+                                    // Check if bash command failed (has non-zero exit status)
+                                    let cmd_success = !r.contains("[Exit status:");
+                                    (r, cmd_success)
+                                }
                                 Err(e) => (format!("Error: {}", e), false),
                             }
                         } else {
@@ -1540,10 +1564,37 @@ impl Session {
                                 event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
                         }
                         DoomLoopAction::AskUser { message } => {
-                            // For now, treat as warning (full approval would require UI changes)
-                            tracing::warn!("{}", message);
-                            let _ =
-                                event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
+                            tracing::warn!("Doom loop detected, asking user: {}", message);
+
+                            // Create channel for user response
+                            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+                            let prompt_id = uuid::Uuid::new_v4().to_string();
+
+                            // Send prompt to UI
+                            let _ = event_tx.send(SessionEvent::DoomLoopPrompt {
+                                prompt_id: prompt_id.clone(),
+                                message: message.clone(),
+                                response_tx,
+                            });
+
+                            // Wait for user response (with timeout)
+                            let should_continue = tokio::time::timeout(
+                                std::time::Duration::from_secs(300), // 5 minute timeout
+                                response_rx.recv()
+                            ).await.ok().flatten().unwrap_or(false);
+
+                            if !should_continue {
+                                tracing::info!("User chose to stop due to doom loop (prompt_id={})", prompt_id);
+                                tool_results.push(ContentBlock::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: "Operation stopped by user due to detected loop pattern.".to_string(),
+                                });
+                                continue;
+                            }
+
+                            // User chose to continue - reset loop detector
+                            self.loop_detector.reset();
+                            tracing::info!("User chose to continue past doom loop (prompt_id={})", prompt_id);
                         }
                         DoomLoopAction::Continue => {}
                     }
@@ -1615,7 +1666,9 @@ impl Session {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
                             Ok(output) => {
                                 tools_executed.push(name.clone());
-                                (output, true)
+                                // Check if bash command failed (has non-zero exit status)
+                                let cmd_success = !output.contains("[Exit status:");
+                                (output, cmd_success)
                             }
                             Err(e) => (format!("Error: {}", e), false),
                         },
@@ -1632,8 +1685,34 @@ impl Session {
                         if let Some(DoomLoopAction::AskUser { message }) =
                             self.loop_detector.check_failure_loop()
                         {
-                            let _ =
-                                event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
+                            tracing::warn!("Failure loop detected, asking user: {}", message);
+
+                            // Create channel for user response
+                            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+                            let prompt_id = uuid::Uuid::new_v4().to_string();
+
+                            // Send prompt to UI
+                            let _ = event_tx.send(SessionEvent::DoomLoopPrompt {
+                                prompt_id: prompt_id.clone(),
+                                message: message.clone(),
+                                response_tx,
+                            });
+
+                            // Wait for user response (with timeout)
+                            let should_continue = tokio::time::timeout(
+                                std::time::Duration::from_secs(300),
+                                response_rx.recv()
+                            ).await.ok().flatten().unwrap_or(false);
+
+                            if !should_continue {
+                                tracing::info!("User chose to stop due to failure loop (prompt_id={})", prompt_id);
+                                // Break out of the loop - session will end
+                                break;
+                            }
+
+                            // User chose to continue - reset loop detector
+                            self.loop_detector.reset();
+                            tracing::info!("User chose to continue past failure loop (prompt_id={})", prompt_id);
                         }
                     }
 
@@ -1647,14 +1726,18 @@ impl Session {
                         };
                         if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
                             let full_path = self.project_path.join(path);
+                            tracing::info!("Sending FileDiff event for: {}", path);
 
                             // Send diff event - use empty string for old_content if file is new
                             if let Ok(new_content) = std::fs::read_to_string(&full_path) {
+                                tracing::info!("FileDiff: old_len={}, new_len={}", old_content.as_ref().map(|s| s.len()).unwrap_or(0), new_content.len());
                                 let _ = event_tx.send(SessionEvent::FileDiff {
                                     path: path.to_string(),
                                     old_content: old_content.unwrap_or_default(),
                                     new_content: new_content.clone(),
                                 });
+                            } else {
+                                tracing::warn!("Could not read file for FileDiff: {}", full_path.display());
                             }
 
                             // Notify LSP of file change for diagnostics
@@ -1744,13 +1827,13 @@ impl Session {
                         has_issues = true;
                         final_results.push(ContentBlock::Text {
                             text: format!(
-                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
+                                "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
                                 build_errors
                             ),
                         });
 
                         let _ = event_tx.send(SessionEvent::TextChunk(
-                            "\n❌ Build failed - errors detected\n".to_string(),
+                            "\n⚙️ Build errors detected - fixing...\n".to_string(),
                         ));
                     }
 
@@ -1760,13 +1843,13 @@ impl Session {
                         has_issues = true;
                         final_results.push(ContentBlock::Text {
                             text: format!(
-                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                "\n\n[LSP ERRORS - FIX NOW]\n{}\n\nFix these issues immediately. Continue working until all errors are resolved.",
                                 diagnostics_summary
                             ),
                         });
 
                         let _ = event_tx.send(SessionEvent::TextChunk(
-                            "\n⚠️ LSP detected issues - see diagnostics above\n".to_string(),
+                            "\n⚙️ LSP issues detected - fixing...\n".to_string(),
                         ));
                     }
 

@@ -27,6 +27,8 @@ export interface Message {
   content: string;
   timestamp: string;
   tool_calls?: ToolCall[];
+  // For displaying tool executions in chat history
+  toolExecutions?: ToolExecution[];
 }
 
 export interface ToolCall {
@@ -69,6 +71,7 @@ export type ServerEvent =
   | { type: "PlanRejected"; plan_id: string }
   | { type: "TokenUsage"; input_tokens: number; output_tokens: number; cache_read_tokens?: number; cache_creation_tokens?: number }
   | { type: "ContextCompressed"; tokens_compressed: number }
+  | { type: "DoomLoopPrompt"; prompt_id: string; message: string }
   | { type: "Error"; message: string }
   | { type: "Completed" };
 
@@ -96,6 +99,8 @@ export interface ToolExecution {
   success?: boolean;
   startTime: number;
   endTime?: number;
+  // Input parameters for the tool (for showing file content, etc.)
+  input?: Record<string, unknown>;
 }
 
 export interface StreamingMessage {
@@ -103,4 +108,9 @@ export interface StreamingMessage {
   content: string;
   isStreaming: boolean;
   toolExecutions: ToolExecution[];
+}
+
+export interface DoomLoopPrompt {
+  id: string;
+  message: string;
 }

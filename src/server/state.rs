@@ -7,9 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 
 use crate::config::Config;
+use crate::persistence::SessionPersistence;
 use crate::session::Session;
 
 use super::types::ServerEvent;
@@ -24,6 +25,12 @@ pub struct AppState {
 
     /// Event broadcast channels per session
     pub event_channels: RwLock<HashMap<String, broadcast::Sender<ServerEvent>>>,
+
+    /// Session persistence layer (SQLite)
+    pub persistence: Option<Arc<SessionPersistence>>,
+
+    /// Pending doom loop response channels (prompt_id -> response sender)
+    pub doom_loop_responses: RwLock<HashMap<String, mpsc::UnboundedSender<bool>>>,
 }
 
 /// Handle to a managed session
@@ -72,7 +79,42 @@ impl AppState {
             config: RwLock::new(config),
             sessions: RwLock::new(HashMap::new()),
             event_channels: RwLock::new(HashMap::new()),
+            persistence: None,
+            doom_loop_responses: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Create new application state with persistence
+    pub async fn new_with_persistence(config: Config) -> anyhow::Result<Self> {
+        let persistence = SessionPersistence::new().await?;
+        Ok(Self {
+            config: RwLock::new(config),
+            sessions: RwLock::new(HashMap::new()),
+            event_channels: RwLock::new(HashMap::new()),
+            persistence: Some(Arc::new(persistence)),
+            doom_loop_responses: RwLock::new(HashMap::new()),
+        })
+    }
+
+    /// Register a doom loop response channel
+    pub async fn register_doom_loop_response(&self, prompt_id: String, response_tx: mpsc::UnboundedSender<bool>) {
+        let mut responses = self.doom_loop_responses.write().await;
+        responses.insert(prompt_id, response_tx);
+    }
+
+    /// Send a doom loop response
+    pub async fn send_doom_loop_response(&self, prompt_id: &str, continue_anyway: bool) -> bool {
+        let mut responses = self.doom_loop_responses.write().await;
+        if let Some(tx) = responses.remove(prompt_id) {
+            tx.send(continue_anyway).is_ok()
+        } else {
+            false
+        }
+    }
+
+    /// Get the persistence layer
+    pub fn persistence(&self) -> Option<&Arc<SessionPersistence>> {
+        self.persistence.as_ref()
     }
 
     /// Get or create an event channel for a session

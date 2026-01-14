@@ -14,7 +14,8 @@ use crate::llm::Message;
 
 /// Session persistence manager
 pub struct SessionPersistence {
-    db: SessionDatabase,
+    /// Database connection (exposed for direct access when needed)
+    pub db: SessionDatabase,
 }
 
 impl SessionPersistence {

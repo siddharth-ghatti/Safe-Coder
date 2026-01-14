@@ -57,6 +57,7 @@ pub async fn session_events(
                 ServerEvent::PlanRejected { .. } => "PlanRejected",
                 ServerEvent::TokenUsage { .. } => "TokenUsage",
                 ServerEvent::ContextCompressed { .. } => "ContextCompressed",
+                ServerEvent::DoomLoopPrompt { .. } => "DoomLoopPrompt",
                 ServerEvent::Error { .. } => "Error",
                 ServerEvent::Completed => "Completed",
             };

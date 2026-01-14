@@ -8,7 +8,7 @@ use crate::session::SessionEvent;
 use crate::planning::types::PlanEvent;
 
 /// Server-sent event types for real-time updates
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
     /// Connection established
@@ -83,6 +83,9 @@ pub enum ServerEvent {
 
     /// Context was compressed
     ContextCompressed { tokens_compressed: usize },
+
+    /// Doom loop detected - user needs to approve continuation
+    DoomLoopPrompt { prompt_id: String, message: String },
 
     /// Error occurred
     Error { message: String },
@@ -222,6 +225,10 @@ impl From<SessionEvent> for ServerEvent {
                 ServerEvent::Error { message }
             }
 
+            SessionEvent::DoomLoopPrompt { prompt_id, message, .. } => {
+                ServerEvent::DoomLoopPrompt { prompt_id, message }
+            }
+
             // Handle the approval sender - we don't forward this directly
             SessionEvent::PlanApprovalSender(_) => {
                 ServerEvent::Thinking { message: "Awaiting approval...".to_string() }
@@ -243,7 +250,7 @@ impl From<SessionEvent> for ServerEvent {
 // ============================================================================
 
 /// Request to create a new session
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     pub project_path: String,
     #[serde(default)]
@@ -257,7 +264,7 @@ pub struct SetModeRequest {
 }
 
 /// Response for session creation
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionResponse {
     pub id: String,
     pub project_path: String,
@@ -266,7 +273,7 @@ pub struct SessionResponse {
 }
 
 /// Request to send a message
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SendMessageRequest {
     pub content: String,
     #[serde(default)]
@@ -274,7 +281,7 @@ pub struct SendMessageRequest {
 }
 
 /// Attachment DTO
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AttachmentDto {
     pub path: String,
     #[serde(default)]
@@ -366,4 +373,11 @@ pub struct FileChangeDto {
 pub struct ErrorResponse {
     pub error: String,
     pub code: String,
+}
+
+/// Doom loop response request
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DoomLoopResponseRequest {
+    pub prompt_id: String,
+    pub continue_anyway: bool,
 }

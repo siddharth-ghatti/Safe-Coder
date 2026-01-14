@@ -5,6 +5,7 @@ pub mod approval;
 pub mod auth;
 pub mod cache;
 pub mod checkpoint;
+pub mod client;
 pub mod commands;
 pub mod config;
 pub mod context;

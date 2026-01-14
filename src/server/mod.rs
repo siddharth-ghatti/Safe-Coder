@@ -46,8 +46,17 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
     // Load safe-coder config
     let app_config = Config::load().unwrap_or_default();
 
-    // Create shared state
-    let state = Arc::new(AppState::new(app_config));
+    // Create shared state with persistence
+    let state = match AppState::new_with_persistence(app_config.clone()).await {
+        Ok(state) => {
+            tracing::info!("Session persistence enabled (SQLite)");
+            Arc::new(state)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to enable persistence: {}. Using in-memory storage.", e);
+            Arc::new(AppState::new(app_config))
+        }
+    };
 
     // Build router
     let mut app = Router::new()
@@ -66,6 +75,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route("/api/sessions/:id/messages", get(routes::messages::get_messages))
         .route("/api/sessions/:id/messages", post(routes::messages::send_message))
         .route("/api/sessions/:id/cancel", post(routes::messages::cancel_operation))
+        .route("/api/sessions/:id/doom-loop-response", post(routes::sessions::respond_to_doom_loop))
 
         // File changes
         .route("/api/sessions/:id/changes", get(routes::files::get_session_changes))

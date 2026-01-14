@@ -113,6 +113,17 @@ export async function cancelOperation(sessionId: string): Promise<{ status: stri
   return apiFetch(`/api/sessions/${sessionId}/cancel`, { method: "POST" });
 }
 
+export async function respondToDoomLoop(
+  sessionId: string,
+  promptId: string,
+  continueAnyway: boolean
+): Promise<{ status: string }> {
+  return apiFetch(`/api/sessions/${sessionId}/doom-loop-response`, {
+    method: "POST",
+    body: JSON.stringify({ prompt_id: promptId, continue_anyway: continueAnyway }),
+  });
+}
+
 // Project files (for @ mentions)
 export async function listProjectFiles(
   sessionId: string,
@@ -173,6 +184,7 @@ export function subscribeToEvents(
     "PlanRejected",
     "TokenUsage",
     "ContextCompressed",
+    "DoomLoopPrompt",
     "Error",
     "Completed",
   ];
@@ -181,22 +193,14 @@ export function subscribeToEvents(
     eventSource.addEventListener(type, (event) => {
       try {
         const data = JSON.parse(event.data);
-        console.log(`SSE event received: ${type}`, data);
         onEvent({ type, data });
       } catch {
-        console.log(`SSE event received (raw): ${type}`, event.data);
         onEvent({ type, data: event.data });
       }
     });
   });
 
-  // Log connection state
-  eventSource.onopen = () => {
-    console.log("SSE connection opened");
-  };
-
-  eventSource.onerror = (event) => {
-    console.error("SSE error:", event);
+  eventSource.onerror = () => {
     onError?.(new Error("SSE connection error"));
   };
 

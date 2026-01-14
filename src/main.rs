@@ -2,6 +2,7 @@ mod approval;
 mod auth;
 mod cache;
 mod checkpoint;
+pub mod client;
 mod commands;
 mod config;
 mod context;
@@ -191,7 +192,7 @@ enum Commands {
     /// The server can be used by the desktop app or other clients.
     Serve {
         /// Port to listen on
-        #[arg(short, long, default_value = "9876")]
+        #[arg(long, default_value = "9876")]
         port: u16,
         /// Host to bind to
         #[arg(long, default_value = "127.0.0.1")]

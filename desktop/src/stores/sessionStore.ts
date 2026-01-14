@@ -8,8 +8,15 @@ import type {
   ToolExecution,
   AgentMode,
   ServerEvent,
+  DoomLoopPrompt,
 } from "../types";
 import * as api from "../api/client";
+
+// Text chunk batching for smoother streaming
+let textBuffer = "";
+let flushTimeout: ReturnType<typeof setTimeout> | null = null;
+let isFirstChunk = true;
+const FLUSH_INTERVAL_MS = 16; // ~60fps for smooth updates
 
 interface SessionState {
   // Session data
@@ -36,6 +43,9 @@ interface SessionState {
   // Mode
   agentMode: AgentMode;
 
+  // Doom loop
+  doomLoopPrompt: DoomLoopPrompt | null;
+
   // Actions
   loadSessions: () => Promise<void>;
   createSession: (projectPath: string) => Promise<Session>;
@@ -46,6 +56,7 @@ interface SessionState {
   sendMessage: (content: string) => Promise<void>;
   cancelOperation: () => Promise<void>;
   setAgentMode: (mode: AgentMode) => void;
+  respondToDoomLoop: (continueAnyway: boolean) => Promise<void>;
 
   // Event handlers
   handleServerEvent: (event: ServerEvent) => void;
@@ -71,6 +82,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     cacheCreationTokens: 0,
   },
   agentMode: "build",
+  doomLoopPrompt: null,
 
   // Load all sessions
   loadSessions: async () => {
@@ -92,8 +104,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
   // Select and load a session
   selectSession: async (sessionId: string) => {
+    console.log("[DEBUG] selectSession called with:", sessionId, "current:", get().activeSessionId);
+    // Skip if already selected - don't clear state
+    if (get().activeSessionId === sessionId) {
+      console.log("[DEBUG] selectSession - already selected, skipping");
+      return;
+    }
+
     try {
       const session = await api.getSession(sessionId);
+      console.log("[DEBUG] selectSession - clearing state for new session");
+
+      // Clear state for new session
       set({
         activeSessionId: sessionId,
         activeSession: session,
@@ -108,8 +130,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           cacheCreationTokens: 0,
         },
       });
+
+      // Load messages and file changes from backend
       await get().loadMessages();
       await get().loadFileChanges();
+      console.log("[DEBUG] selectSession - loaded messages:", get().messages.length);
     } catch (error) {
       console.error("Failed to select session:", error);
     }
@@ -195,19 +220,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }));
 
     try {
-      console.log("Sending message to session:", sessionId);
       await api.sendMessage(sessionId, content);
-      console.log("Message sent, waiting for events...");
 
-      // Set a timeout to reset processing state if no Completed event received
-      // This is a safety fallback in case SSE drops the event
+      // Safety timeout in case SSE drops the Completed event
       setTimeout(() => {
         const state = get();
         if (state.isProcessing && state.activeSessionId === sessionId) {
-          console.warn("Processing timeout - checking if still active");
           // Only reset if there's been no activity (no streaming content)
           if (state.streamingMessage && state.streamingMessage.content === "") {
-            console.warn("No response received after timeout, resetting state");
             set({
               isProcessing: false,
               streamingMessage: null,
@@ -215,7 +235,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             });
           }
         }
-      }, 120000); // 2 minute timeout for initial response
+      }, 120000);
     } catch (error) {
       console.error("Failed to send message:", error);
       set({ isProcessing: false, streamingMessage: null });
@@ -244,55 +264,96 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     if (sessionId) {
       try {
         await api.setSessionMode(sessionId, mode);
-        console.log(`Session mode updated to: ${mode}`);
       } catch (error) {
         console.error("Failed to update session mode:", error);
       }
     }
   },
 
+  // Respond to doom loop prompt
+  respondToDoomLoop: async (continueAnyway: boolean) => {
+    const sessionId = get().activeSessionId;
+    const prompt = get().doomLoopPrompt;
+    if (!sessionId || !prompt) return;
+
+    try {
+      await api.respondToDoomLoop(sessionId, prompt.id, continueAnyway);
+      set({ doomLoopPrompt: null });
+    } catch (error) {
+      console.error("Failed to respond to doom loop:", error);
+    }
+  },
+
   // Handle server events
   handleServerEvent: (event: ServerEvent) => {
-    console.log("[SSE Event]", event.type, event);
-
+    const currentMessages = get().messages;
+    console.log("[DEBUG] Event:", event.type, "| Messages count:", currentMessages.length, "| Streaming:", !!get().streamingMessage);
     switch (event.type) {
       case "Connected":
-        console.log("[SSE] Connected to server");
         set({ isConnected: true });
         break;
 
       case "Thinking":
-        console.log("[SSE] Thinking:", event.message);
         set({ thinkingMessage: event.message });
         break;
 
       case "Reasoning":
-        console.log("[SSE] Reasoning:", event.text);
         set({ thinkingMessage: event.text });
         break;
 
       case "TextChunk":
-        console.log("[SSE] TextChunk received, length:", event.text?.length);
-        set((state) => {
-          // If no streaming message exists, create one
-          const streaming = state.streamingMessage || {
-            role: "assistant" as const,
-            content: "",
-            isStreaming: true,
-            toolExecutions: [],
-          };
-          return {
-            thinkingMessage: null,
-            streamingMessage: {
-              ...streaming,
-              content: streaming.content + event.text,
-            },
-          };
-        });
+        // Batch text chunks for smoother rendering
+        textBuffer += event.text;
+
+        // Flush immediately on first chunk for responsiveness, then batch
+        if (isFirstChunk) {
+          isFirstChunk = false;
+          const bufferedText = textBuffer;
+          textBuffer = "";
+          set((state) => {
+            const streaming = state.streamingMessage || {
+              role: "assistant" as const,
+              content: "",
+              isStreaming: true,
+              toolExecutions: [],
+            };
+            return {
+              thinkingMessage: null,
+              streamingMessage: {
+                ...streaming,
+                content: streaming.content + bufferedText,
+              },
+            };
+          });
+        } else if (!flushTimeout) {
+          // Schedule flush for subsequent chunks
+          flushTimeout = setTimeout(() => {
+            const bufferedText = textBuffer;
+            textBuffer = "";
+            flushTimeout = null;
+
+            if (bufferedText) {
+              set((state) => {
+                const streaming = state.streamingMessage || {
+                  role: "assistant" as const,
+                  content: "",
+                  isStreaming: true,
+                  toolExecutions: [],
+                };
+                return {
+                  thinkingMessage: null,
+                  streamingMessage: {
+                    ...streaming,
+                    content: streaming.content + bufferedText,
+                  },
+                };
+              });
+            }
+          }, FLUSH_INTERVAL_MS);
+        }
         break;
 
       case "ToolStart":
-        console.log("[SSE] ToolStart:", event.name);
         set((state) => {
           // If no streaming message exists, create one
           const streaming = state.streamingMessage || {
@@ -319,14 +380,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
 
       case "ToolOutput":
-        console.log("[SSE] ToolOutput for:", event.name);
         set((state) => {
-          if (!state.streamingMessage) {
-            console.warn("[SSE] ToolOutput received but no streaming message!");
-            return state;
-          }
-          const tools = state.streamingMessage.toolExecutions.map((t) =>
-            t.name === event.name ? { ...t, output: t.output + event.output } : t
+          if (!state.streamingMessage) return state;
+          // Find the last tool with this name (handles race conditions with ToolComplete)
+          const toolIndex = state.streamingMessage.toolExecutions
+            .map((t, i) => ({ t, i }))
+            .filter(({ t }) => t.name === event.name)
+            .pop()?.i;
+
+          if (toolIndex === undefined) return state;
+
+          const tools = state.streamingMessage.toolExecutions.map((t, i) =>
+            i === toolIndex ? { ...t, output: t.output + event.output } : t
           );
           return {
             streamingMessage: {
@@ -338,11 +403,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
 
       case "BashOutputLine":
-        console.log("[SSE] BashOutputLine for:", event.name);
         set((state) => {
           if (!state.streamingMessage) return state;
-          const tools = state.streamingMessage.toolExecutions.map((t) =>
-            t.name === event.name ? { ...t, output: t.output + event.line + "\n" } : t
+          // Find the last tool with this name (handles race conditions with ToolComplete)
+          const toolIndex = state.streamingMessage.toolExecutions
+            .map((t, i) => ({ t, i }))
+            .filter(({ t }) => t.name === event.name)
+            .pop()?.i;
+
+          if (toolIndex === undefined) return state;
+
+          const tools = state.streamingMessage.toolExecutions.map((t, i) =>
+            i === toolIndex ? { ...t, output: t.output + event.line + "\n" } : t
           );
           return {
             streamingMessage: {
@@ -354,13 +426,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
 
       case "ToolComplete":
-        console.log("[SSE] ToolComplete:", event.name, "success:", event.success);
         set((state) => {
           if (!state.streamingMessage) return state;
-          const tools = state.streamingMessage.toolExecutions.map((t) =>
-            t.name === event.name
-              ? { ...t, success: event.success, endTime: Date.now() }
-              : t
+          // Find the last running tool with this name (most recent)
+          const toolIndex = state.streamingMessage.toolExecutions
+            .map((t, i) => ({ t, i }))
+            .filter(({ t }) => t.name === event.name && t.success === undefined)
+            .pop()?.i;
+
+          if (toolIndex === undefined) return state;
+
+          const tools = state.streamingMessage.toolExecutions.map((t, i) =>
+            i === toolIndex ? { ...t, success: event.success, endTime: Date.now() } : t
           );
           return {
             streamingMessage: {
@@ -372,20 +449,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
 
       case "FileDiff":
-        console.log("FileDiff event received:", event);
-        set((state) => ({
-          fileChanges: [
-            ...state.fileChanges.filter((f) => f.path !== event.path),
-            {
-              path: event.path,
-              change_type: event.additions > 0 && event.deletions === 0 ? "created" : "modified",
-              additions: event.additions,
-              deletions: event.deletions,
-              timestamp: new Date().toISOString(),
-              diff: event.diff,
-            },
-          ],
-        }));
+        // Type guard for FileDiff event
+        if ('path' in event && typeof event.path === 'string') {
+          const fileDiffEvent = event as { type: "FileDiff"; path: string; additions: number; deletions: number; diff: string };
+          set((state) => ({
+            fileChanges: [
+              ...state.fileChanges.filter((f) => f.path !== fileDiffEvent.path),
+              {
+                path: fileDiffEvent.path,
+                change_type: fileDiffEvent.additions > 0 && fileDiffEvent.deletions === 0 ? "created" : "modified",
+                additions: fileDiffEvent.additions || 0,
+                deletions: fileDiffEvent.deletions || 0,
+                timestamp: new Date().toISOString(),
+                diff: fileDiffEvent.diff || "",
+              },
+            ],
+          }));
+        }
         break;
 
       case "TokenUsage":
@@ -400,34 +480,74 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }));
         break;
 
+      case "ContextCompressed":
+        // Context was compacted to reduce token usage
+        console.log("[Context] Compacted, tokens saved:", event.tokens_compressed);
+        // Reset token tracking since context was compressed
+        set((state) => ({
+          tokenUsage: {
+            ...state.tokenUsage,
+            // Reduce input tokens by compressed amount (approximate)
+            inputTokens: Math.max(0, state.tokenUsage.inputTokens - (event.tokens_compressed || 0)),
+          },
+        }));
+        break;
+
+      case "DoomLoopPrompt":
+        // Show doom loop prompt to user for approval
+        set({
+          doomLoopPrompt: {
+            id: event.prompt_id,
+            message: event.message,
+          },
+        });
+        break;
+
       case "Error":
+        // Flush pending text buffer on error
+        if (flushTimeout) {
+          clearTimeout(flushTimeout);
+          flushTimeout = null;
+        }
+        textBuffer = "";
+        isFirstChunk = true;
         console.error("Server error:", event.message);
         set({ isProcessing: false, streamingMessage: null, thinkingMessage: null });
         break;
 
       case "Completed":
-        console.log("[SSE] Completed event received");
-        set((state) => {
-          console.log("[SSE] Finalizing - streamingMessage:", {
-            hasContent: !!state.streamingMessage?.content,
-            contentLength: state.streamingMessage?.content?.length,
-            toolCount: state.streamingMessage?.toolExecutions?.length,
-          });
+        // Flush any pending text immediately
+        if (flushTimeout) {
+          clearTimeout(flushTimeout);
+          flushTimeout = null;
+        }
+        const pendingText = textBuffer;
+        textBuffer = "";
+        isFirstChunk = true;
 
+        set((state) => {
+          console.log("[DEBUG] Completed - streamingMessage:", !!state.streamingMessage, "pendingText:", pendingText.length, "existing messages:", state.messages.length);
           if (!state.streamingMessage) {
-            console.log("[SSE] No streaming message to finalize");
+            console.log("[DEBUG] Completed - no streaming message to finalize");
             return { thinkingMessage: null, isProcessing: false };
           }
 
-          // Only add message if there's actual content
-          if (state.streamingMessage.content || state.streamingMessage.toolExecutions.length > 0) {
+          // Append any remaining buffered text
+          const finalContent = state.streamingMessage.content + pendingText;
+          console.log("[DEBUG] Completed - finalContent length:", finalContent.length, "tools:", state.streamingMessage.toolExecutions.length);
+
+          // Only add message if there's actual content or tool executions
+          if (finalContent || state.streamingMessage.toolExecutions.length > 0) {
             const finalMessage: Message = {
               id: `assistant_${Date.now()}`,
               role: "assistant",
-              content: state.streamingMessage.content || "[Tools executed]",
+              content: finalContent || "",
               timestamp: new Date().toISOString(),
+              toolExecutions: state.streamingMessage.toolExecutions.length > 0
+                ? [...state.streamingMessage.toolExecutions]
+                : undefined,
             };
-            console.log("[SSE] Adding final message, total messages will be:", state.messages.length + 1);
+            console.log("[DEBUG] Completed - adding message, new total:", state.messages.length + 1);
             return {
               messages: [...state.messages, finalMessage],
               streamingMessage: null,
@@ -436,7 +556,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             };
           }
 
-          console.log("[SSE] No content to finalize, just resetting state");
+          console.log("[DEBUG] Completed - no content to add");
           return {
             streamingMessage: null,
             thinkingMessage: null,
@@ -446,7 +566,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
 
       default:
-        console.log("Unknown event type:", event.type);
+        // Ignore unhandled event types
+        break;
     }
   },
 

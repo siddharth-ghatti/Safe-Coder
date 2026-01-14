@@ -12,11 +12,12 @@ use tokio::sync::RwLock;
 
 use crate::approval::UserMode;
 use crate::config::Config;
+use crate::persistence::models::SavedSession;
 use crate::tools::AgentMode;
 use crate::server::state::{AppState, SessionHandle};
 use crate::server::types::{
-    CreateSessionRequest, ErrorResponse, FileChangeStats, SessionListResponse,
-    SessionResponse, SessionSummary, SetModeRequest,
+    CreateSessionRequest, DoomLoopResponseRequest, ErrorResponse, FileChangeStats,
+    SessionListResponse, SessionResponse, SessionSummary, SetModeRequest,
 };
 use crate::session::Session;
 
@@ -108,7 +109,7 @@ pub async fn create_session(
         file_changes: Arc::new(RwLock::new(Vec::new())),
     };
 
-    // Store session
+    // Store session in memory
     {
         let mut sessions = state.sessions.write().await;
         sessions.insert(session_id.clone(), handle);
@@ -116,6 +117,23 @@ pub async fn create_session(
 
     // Create event channel for this session
     let _ = state.get_event_sender(&session_id).await;
+
+    // Save to persistent storage if available
+    if let Some(persistence) = state.persistence() {
+        let saved_session = SavedSession {
+            id: session_id.clone(),
+            name: None,
+            project_path: canonical_path.display().to_string(),
+            messages: "[]".to_string(), // Empty messages initially
+            created_at,
+            updated_at: created_at,
+        };
+        if let Err(e) = persistence.db.save_session(&saved_session).await {
+            tracing::warn!("Failed to persist session: {}", e);
+        } else {
+            tracing::info!("Session {} persisted to SQLite", session_id);
+        }
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -202,13 +220,71 @@ pub async fn delete_session(
         let mut channels = state.event_channels.write().await;
         channels.remove(&session_id);
 
+        // Delete from persistent storage
+        if let Some(persistence) = state.persistence() {
+            if let Err(e) = persistence.db.delete_session(&session_id).await {
+                tracing::warn!("Failed to delete session from persistence: {}", e);
+            }
+        }
+
         Ok(StatusCode::NO_CONTENT)
     } else {
+        // Try to delete from persistence even if not in memory
+        if let Some(persistence) = state.persistence() {
+            if let Err(e) = persistence.db.delete_session(&session_id).await {
+                tracing::warn!("Failed to delete session from persistence: {}", e);
+            }
+        }
+
         Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: format!("Session not found: {}", session_id),
                 code: "SESSION_NOT_FOUND".to_string(),
+            }),
+        ))
+    }
+}
+
+/// POST /api/sessions/:id/doom-loop-response - Respond to a doom loop prompt
+pub async fn respond_to_doom_loop(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(request): Json<DoomLoopResponseRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    // Check if session exists
+    let sessions = state.sessions.read().await;
+    if !sessions.contains_key(&session_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Session not found: {}", session_id),
+                code: "SESSION_NOT_FOUND".to_string(),
+            }),
+        ));
+    }
+    drop(sessions);
+
+    // Send response through the registered channel
+    let sent = state.send_doom_loop_response(&request.prompt_id, request.continue_anyway).await;
+
+    if sent {
+        tracing::info!(
+            "Doom loop response sent: {} (prompt_id={})",
+            if request.continue_anyway { "continue" } else { "stop" },
+            request.prompt_id
+        );
+        Ok(Json(serde_json::json!({
+            "status": "ok",
+            "action": if request.continue_anyway { "continue" } else { "stop" }
+        })))
+    } else {
+        tracing::warn!("Doom loop prompt not found or already responded: {}", request.prompt_id);
+        Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Doom loop prompt not found or already responded: {}", request.prompt_id),
+                code: "PROMPT_NOT_FOUND".to_string(),
             }),
         ))
     }

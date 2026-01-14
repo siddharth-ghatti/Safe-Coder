@@ -15,9 +15,9 @@ use super::autocomplete::Autocomplete;
 use super::file_picker::FilePicker;
 use super::sidebar::SidebarState;
 use super::spinner::Spinner;
+use crate::client::SafeCoderClient;
 use crate::config::Config;
 use crate::planning::PlanEvent;
-use crate::session::Session;
 use crate::tools::AgentMode;
 
 /// Permission mode for tool execution
@@ -985,8 +985,8 @@ pub struct ShellTuiApp {
     pub history_pos: usize,
 
     // === AI State ===
-    /// AI session for coding assistance
-    pub session: Option<Arc<Mutex<Session>>>,
+    /// HTTP client for AI service communication
+    pub client: Option<Arc<Mutex<SafeCoderClient>>>,
     /// Whether AI is connected
     pub ai_connected: bool,
     /// Whether AI is currently processing
@@ -1068,6 +1068,16 @@ pub struct ShellTuiApp {
     /// Pending tool approval request
     pub pending_tool_approval: Option<PendingToolApproval>,
 
+    // === Doom Loop State ===
+    /// Whether doom loop prompt is visible
+    pub doom_loop_visible: bool,
+    /// Doom loop prompt ID
+    pub doom_loop_prompt_id: Option<String>,
+    /// Doom loop message to display
+    pub doom_loop_message: Option<String>,
+    /// Sender to respond to doom loop prompt
+    pub doom_loop_tx: Option<tokio::sync::mpsc::UnboundedSender<bool>>,
+
     // === Render Cache ===
     /// Cached render width (invalidate cache if width changes)
     pub cached_render_width: usize,
@@ -1117,7 +1127,7 @@ impl ShellTuiApp {
             command_history: VecDeque::with_capacity(MAX_HISTORY_SIZE),
             history_pos: 0,
 
-            session: None,
+            client: None,
             ai_connected: false,
             ai_thinking: false,
             ai_context_commands: DEFAULT_AI_CONTEXT_COMMANDS,
@@ -1158,6 +1168,11 @@ impl ShellTuiApp {
             plan_executing: false,
 
             pending_tool_approval: None,
+
+            doom_loop_visible: false,
+            doom_loop_prompt_id: None,
+            doom_loop_message: None,
+            doom_loop_tx: None,
 
             cached_render_width: 0,
             cached_total_lines: 0,
@@ -1705,6 +1720,16 @@ impl ShellTuiApp {
         self.plan_approval_tx = Some(tx);
     }
 
+    /// Set pending plan ID for HTTP-based approval
+    pub fn set_pending_plan_id(&mut self, plan_id: String) {
+        // Store plan_id so we can call HTTP API to approve/reject
+        // For now just show the approval UI
+        self.plan_approval_visible = true;
+        // We could store plan_id in a new field if needed
+        self.needs_redraw = true;
+        tracing::info!("Plan awaiting approval: {}", plan_id);
+    }
+
     /// Check if plan approval popup is visible
     pub fn is_plan_approval_visible(&self) -> bool {
         self.plan_approval_visible
@@ -1737,6 +1762,67 @@ impl ShellTuiApp {
     /// Check if tool approval is pending
     pub fn has_pending_tool_approval(&self) -> bool {
         self.pending_tool_approval.is_some()
+    }
+
+    // === Doom Loop Methods ===
+
+    /// Set doom loop prompt (called when doom loop is detected) - direct channel version
+    pub fn set_doom_loop_prompt(
+        &mut self,
+        prompt_id: String,
+        message: String,
+        response_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    ) {
+        self.doom_loop_prompt_id = Some(prompt_id);
+        self.doom_loop_message = Some(message);
+        self.doom_loop_tx = Some(response_tx);
+        self.doom_loop_visible = true;
+        self.needs_redraw = true;
+    }
+
+    /// Set doom loop prompt for HTTP-based response
+    pub fn set_doom_loop_prompt_http(&mut self, prompt_id: String, message: String) {
+        self.doom_loop_prompt_id = Some(prompt_id);
+        self.doom_loop_message = Some(message);
+        self.doom_loop_tx = None; // No direct channel, use HTTP
+        self.doom_loop_visible = true;
+        self.needs_redraw = true;
+    }
+
+    /// Continue past doom loop (user chose to continue)
+    pub fn continue_doom_loop(&mut self) {
+        if let Some(tx) = self.doom_loop_tx.take() {
+            let _ = tx.send(true);
+        }
+        self.doom_loop_visible = false;
+        self.doom_loop_prompt_id = None;
+        self.doom_loop_message = None;
+        self.needs_redraw = true;
+    }
+
+    /// Stop due to doom loop (user chose to stop)
+    pub fn stop_doom_loop(&mut self) {
+        if let Some(tx) = self.doom_loop_tx.take() {
+            let _ = tx.send(false);
+        }
+        self.doom_loop_visible = false;
+        self.doom_loop_prompt_id = None;
+        self.doom_loop_message = None;
+        self.needs_redraw = true;
+    }
+
+    /// Check if doom loop prompt is active
+    pub fn has_doom_loop_prompt(&self) -> bool {
+        self.doom_loop_visible && self.doom_loop_prompt_id.is_some()
+    }
+
+    /// Clear doom loop state (after responding via HTTP)
+    pub fn clear_doom_loop(&mut self) {
+        self.doom_loop_visible = false;
+        self.doom_loop_prompt_id = None;
+        self.doom_loop_message = None;
+        self.doom_loop_tx = None;
+        self.needs_redraw = true;
     }
 
     /// Update token usage in sidebar

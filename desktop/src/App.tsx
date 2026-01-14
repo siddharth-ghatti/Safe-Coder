@@ -4,6 +4,7 @@ import { AppLayout } from "./components/layout/AppLayout";
 import { Sidebar } from "./components/layout/Sidebar";
 import { ChatPanel } from "./components/layout/ChatPanel";
 import { ChangesPanel } from "./components/layout/ChangesPanel";
+import { DoomLoopModal } from "./components/chat/DoomLoopModal";
 import { useSessionStore } from "./stores/sessionStore";
 import { useSessionEvents } from "./hooks/useSSE";
 import * as api from "./api/client";
@@ -103,11 +104,14 @@ function App() {
   }
 
   return (
-    <AppLayout
-      sidebar={<Sidebar />}
-      main={<ChatPanel />}
-      changes={<ChangesPanel />}
-    />
+    <>
+      <AppLayout
+        sidebar={<Sidebar />}
+        main={<ChatPanel />}
+        changes={<ChangesPanel />}
+      />
+      <DoomLoopModal />
+    </>
   );
 }
 

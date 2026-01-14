@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, Plus, Settings, MessageSquare, Plug, Folder } from "lucide-react";
+import { Settings, MessageSquare, Folder } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { SessionList } from "../sidebar/SessionList";
 import { cn } from "../../lib/utils";

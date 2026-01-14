@@ -155,15 +155,10 @@ export function ChatInput() {
     if ((!input.trim() && attachments.length === 0) || isProcessing) return;
 
     const message = input.trim();
-    const fileAttachments = attachments.map((a) => ({
-      path: a.path,
-      content: a.content,
-    }));
-
     setInput("");
     setAttachments([]);
 
-    // Send message with attachments
+    // Send message (attachments to be implemented later)
     await sendMessage(message);
   };
 

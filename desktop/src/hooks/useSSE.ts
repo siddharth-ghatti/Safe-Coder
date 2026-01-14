@@ -28,8 +28,6 @@ export function useSessionEvents(sessionId: string | null) {
       return;
     }
 
-    console.log("Subscribing to SSE events for session:", sessionId);
-
     // Subscribe to events
     const cleanup = subscribeToEvents(
       sessionId,
@@ -38,8 +36,7 @@ export function useSessionEvents(sessionId: string | null) {
         const serverEvent = { type: event.type, ...data } as ServerEvent;
         handleServerEventRef.current(serverEvent);
       },
-      (error) => {
-        console.error("SSE error:", error);
+      () => {
         setIsConnectedRef.current(false);
       }
     );
@@ -47,7 +44,6 @@ export function useSessionEvents(sessionId: string | null) {
     cleanupRef.current = cleanup;
 
     return () => {
-      console.log("Cleaning up SSE subscription for session:", sessionId);
       if (cleanupRef.current) {
         cleanupRef.current();
         cleanupRef.current = null;
