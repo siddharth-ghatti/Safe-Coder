@@ -7,8 +7,8 @@ pub use event_log::{EventLogger, SessionInfo, SessionLogEvent};
 pub use models::{SavedSession, SessionStats, ToolUsage};
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
+
 use std::path::PathBuf;
 use crate::llm::Message;
 

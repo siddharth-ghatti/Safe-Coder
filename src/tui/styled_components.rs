@@ -2,12 +2,12 @@ use super::theme::{Theme, TailwindColors};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
+    text::{Line, Span},
     widgets::{
         block::{Position, Title},
-        Block, BorderType, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap,
+        Block, BorderType, Borders, Gauge, ListItem, Paragraph, Wrap
     },
-    Frame,
+
 };
 
 /// Enhanced styling utilities for the TUI

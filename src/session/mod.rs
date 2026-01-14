@@ -18,7 +18,8 @@ use crate::mcp::McpManager;
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
-use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan};
+use crate::unified_planning::create_runner;
+use crate::planning::{PlanEvent, PlanStatus, PlanStep, TaskPlan};
 use crate::prompts;
 use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
@@ -482,7 +483,7 @@ impl Session {
     /// 4. Return summary
     pub async fn send_message_with_planning(&mut self, request: String) -> Result<String> {
         use crate::unified_planning::{
-            integration::{create_runner, create_runner_with_approval},
+
             ExecutionMode as UnifiedExecutionMode, UnifiedPlanner,
         };
 
@@ -561,7 +562,7 @@ impl Session {
         // Execute plan and get events
         let (initial_plan, mut events) = runner.execute(plan).await?;
         let mut final_summary = initial_plan.summary();
-        let mut final_success = false;
+        let mut _final_success = false;
 
         // Forward plan events to session events and await completion
         while let Some(event) = events.recv().await {
@@ -572,7 +573,7 @@ impl Session {
             match &event {
                 UPEvent::PlanCompleted { summary, success, .. } => {
                     final_summary = summary.clone();
-                    final_success = *success;
+                    _final_success = *success;
                     // Update the stored plan's status
                     if let Some(ref mut plan) = self.current_plan {
                         plan.status = if *success {

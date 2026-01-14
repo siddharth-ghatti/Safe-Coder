@@ -54,7 +54,7 @@ pub struct SessionStatus {
 
 impl App {
     pub fn new(project_path: String) -> Self {
-        let mut theme_manager = ThemeManager::new(
+        let theme_manager = ThemeManager::new(
             dirs::config_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("safe-coder")

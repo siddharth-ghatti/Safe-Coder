@@ -89,7 +89,7 @@ impl PlanRunner {
     /// Note: Takes `mut self` to allow taking the approval receiver.
     pub async fn execute(
         mut self,
-        mut plan: UnifiedPlan,
+        plan: UnifiedPlan,
     ) -> Result<(UnifiedPlan, UnboundedReceiver<PlanEvent>)> {
         // Create event channel
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -394,7 +394,7 @@ impl PlanRunnerBuilder {
 
 /// Create a default executor registry with all built-in executors
 pub fn create_default_registry() -> ExecutorRegistry {
-    let mut registry = ExecutorRegistry::new();
+    let registry = ExecutorRegistry::new();
 
     // Note: Actual executor implementations will be added in Phase 5
     // For now, we just create an empty registry

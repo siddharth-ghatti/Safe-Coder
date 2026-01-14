@@ -151,7 +151,7 @@ impl DirectExecutor {
             .map_err(|e| anyhow::anyhow!("LLM batch request failed: {}", e))?;
 
         let mut batch_output = String::new();
-        let mut all_files_modified = Vec::new();
+        let all_files_modified = Vec::new();
         let mut batch_had_error = false;
         let mut batch_error_message = None;
 
@@ -178,7 +178,7 @@ impl DirectExecutor {
             );
 
             // Execute all tool calls for the batch
-            for (call_id, tool_name, tool_input) in tool_uses {
+            for (_call_id, tool_name, tool_input) in tool_uses {
                 ctx.emit_step_progress(&steps[0].id, &format!("Using tool: {}", tool_name));
 
                 if let Some(tool) = ctx.tool_registry.get_tool(&tool_name) {

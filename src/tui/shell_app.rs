@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::autocomplete::Autocomplete;
 use super::file_picker::FilePicker;
+use super::model_picker::ModelPicker;
 use super::sidebar::SidebarState;
 use super::spinner::Spinner;
 use crate::client::SafeCoderClient;
@@ -239,7 +240,7 @@ impl CommandAutocomplete {
             CommandSuggestion {
                 command: "/model".to_string(),
                 description: "Switch AI model".to_string(),
-                usage: Some("/model [name] - Switch model or show current".to_string()),
+                usage: Some("/model [name|list] - Switch model, list, or show current model".to_string()),
             },
             CommandSuggestion {
                 command: "/models".to_string(),
@@ -1025,6 +1026,8 @@ pub struct ShellTuiApp {
     pub autocomplete: Autocomplete,
     /// File picker for @mentions
     pub file_picker: FilePicker,
+    /// Model picker for /model command
+    pub model_picker: ModelPicker,
     /// Command autocomplete for slash commands
     pub command_autocomplete: CommandAutocomplete,
     /// Commands modal visibility
@@ -1147,6 +1150,7 @@ impl ShellTuiApp {
             search_result_pos: 0,
             autocomplete: Autocomplete::new(),
             file_picker: FilePicker::new(),
+            model_picker: ModelPicker::new(),
             command_autocomplete: CommandAutocomplete::new(),
             commands_modal_visible: false,
 

@@ -159,6 +159,9 @@ enum Commands {
         /// Set model
         #[arg(long)]
         model: Option<String>,
+        /// Show model picker
+        #[arg(long, visible_alias = "models")]
+        pick_model: bool,
     },
     /// Login to a provider using device flow authentication
     Login {
@@ -224,6 +227,26 @@ async fn main() -> Result<()> {
             )
             .with(tracing_subscriber::fmt::layer())
             .init();
+    } else {
+        // TUI mode: log to a file so we don't interfere with the terminal
+        // Set SAFE_CODER_LOG=debug to enable debug logging
+        let log_level = std::env::var("SAFE_CODER_LOG").unwrap_or_else(|_| "warn".to_string());
+        let log_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("safe-coder");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_file = log_dir.join("tui.log");
+
+        if let Ok(file) = std::fs::File::create(&log_file) {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| format!("safe_coder={}", log_level).into()),
+                )
+                .with(tracing_subscriber::fmt::layer().with_writer(std::sync::Mutex::new(file)).with_ansi(false))
+                .init();
+            // Note: TUI log file is at ~/.cache/safe-coder/tui.log
+        }
     }
 
     match cli.command.unwrap_or(Commands::Shell {
@@ -276,6 +299,7 @@ async fn main() -> Result<()> {
             show,
             api_key,
             model,
+            pick_model: _, // Model picker is only for TUI, ignore here
         } => {
             handle_config(show, api_key, model)?;
         }

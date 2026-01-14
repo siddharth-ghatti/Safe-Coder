@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 
-use super::types::{PlanEvent, PlanStatus, PlanStepStatus, StepAssignment, TaskPlan};
+use super::types::{PlanEvent, PlanStatus, PlanStepStatus, TaskPlan};
 
 /// Executes a task plan step-by-step
 pub struct PlanExecutor {

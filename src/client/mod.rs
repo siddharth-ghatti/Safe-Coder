@@ -21,20 +21,28 @@ pub const DEFAULT_PORT: u16 = 9876;
 pub struct SafeCoderClient {
     base_url: String,
     client: Client,
+    sse_client: Client, // Separate client for SSE with no timeout
     session_id: Option<String>,
 }
 
 impl SafeCoderClient {
     /// Create a new client
     pub fn new(port: u16) -> Self {
+        // Regular client with timeout for API calls
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
 
+        // SSE client without timeout for long-running streams
+        let sse_client = Client::builder()
+            .build()
+            .expect("Failed to create SSE client");
+
         Self {
             base_url: format!("http://127.0.0.1:{}", port),
             client,
+            sse_client,
             session_id: None,
         }
     }
@@ -46,7 +54,7 @@ impl SafeCoderClient {
 
     /// Check if the server is healthy
     pub async fn health_check(&self) -> Result<bool> {
-        let url = format!("{}/health", self.base_url);
+        let url = format!("{}/api/health", self.base_url);
         match self.client.get(&url).send().await {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(_) => Ok(false),
@@ -241,15 +249,22 @@ impl SafeCoderClient {
             .clone();
 
         let url = format!("{}/api/sessions/{}/events", self.base_url, session_id);
+        tracing::debug!("Subscribing to SSE at: {}", url);
+
         let (tx, rx) = mpsc::unbounded_channel();
 
-        // Spawn SSE listener task
-        let client = self.client.clone();
+        // Spawn SSE listener task using the SSE client (no timeout)
+        let client = self.sse_client.clone();
         tokio::spawn(async move {
+            tracing::debug!("SSE listener task starting");
             if let Err(e) = sse_listener(client, url, tx).await {
                 tracing::error!("SSE listener error: {}", e);
             }
+            tracing::debug!("SSE listener task ended");
         });
+
+        // Give the SSE connection time to establish
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         Ok(rx)
     }
@@ -273,6 +288,8 @@ async fn sse_listener(
     url: String,
     tx: mpsc::UnboundedSender<ServerEvent>,
 ) -> Result<()> {
+    tracing::debug!("SSE: Connecting to {}", url);
+
     let resp = client
         .get(&url)
         .header("Accept", "text/event-stream")
@@ -281,8 +298,11 @@ async fn sse_listener(
         .context("Failed to connect to SSE endpoint")?;
 
     if !resp.status().is_success() {
+        tracing::error!("SSE: Connection failed with status {}", resp.status());
         anyhow::bail!("SSE connection failed: {}", resp.status());
     }
+
+    tracing::debug!("SSE: Connected successfully");
 
     let mut buffer = String::new();
     let mut bytes_stream = resp.bytes_stream();
@@ -300,14 +320,19 @@ async fn sse_listener(
 
             // Parse SSE message
             if let Some(event) = parse_sse_message(&message) {
+                tracing::trace!("SSE: Received event: {:?}", event);
                 if tx.send(event).is_err() {
                     // Receiver dropped, stop listening
+                    tracing::debug!("SSE: Receiver dropped, stopping");
                     return Ok(());
                 }
+            } else {
+                tracing::warn!("SSE: Failed to parse message: {}", message);
             }
         }
     }
 
+    tracing::debug!("SSE: Stream ended");
     Ok(())
 }
 
@@ -324,17 +349,26 @@ fn parse_sse_message(message: &str) -> Option<ServerEvent> {
         }
     }
 
+    tracing::trace!("SSE parse: event_type={:?}, data={:?}", event_type, data);
+
     // If we have data, try to parse it based on event type
     let data = data?;
 
     // For most events, the data is JSON that includes the type
     // Try parsing directly as ServerEvent first
-    if let Ok(event) = serde_json::from_str::<ServerEvent>(&data) {
-        return Some(event);
+    match serde_json::from_str::<ServerEvent>(&data) {
+        Ok(event) => {
+            tracing::trace!("SSE parse: Successfully parsed as ServerEvent");
+            return Some(event);
+        }
+        Err(e) => {
+            tracing::trace!("SSE parse: Failed to parse as ServerEvent: {}", e);
+        }
     }
 
-    // Fallback: handle simple events
-    match event_type.as_deref() {
+    // Fallback: handle simple events (case-insensitive)
+    let event_type_lower = event_type.as_deref().map(|s| s.to_lowercase());
+    match event_type_lower.as_deref() {
         Some("connected") => Some(ServerEvent::Connected),
         Some("completed") => Some(ServerEvent::Completed),
         Some("error") => {
@@ -344,7 +378,10 @@ fn parse_sse_message(message: &str) -> Option<ServerEvent> {
                 .unwrap_or_else(|| data);
             Some(ServerEvent::Error { message })
         }
-        _ => None,
+        _ => {
+            tracing::warn!("SSE parse: Unknown event type: {:?}", event_type);
+            None
+        }
     }
 }
 
@@ -382,22 +419,48 @@ impl ServerManager {
 
         // Get the current executable path
         let exe_path = std::env::current_exe().context("Failed to get current executable")?;
+        tracing::info!("Executable path: {:?}", exe_path);
+
+        // Create a log file for server output
+        let log_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("safe-coder");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_path = log_dir.join("server.log");
+
+        let log_file = std::fs::File::create(&log_path)
+            .context("Failed to create server log file")?;
+        let stderr_file = log_file.try_clone()
+            .context("Failed to clone log file handle")?;
+
+        tracing::info!("Server log file: {:?}", log_path);
 
         let child = Command::new(&exe_path)
             .args(["serve", "--port", &self.port.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(stderr_file))
             .spawn()
             .context("Failed to start server process")?;
 
         self.process = Some(child);
 
-        // Wait for server to be ready
+        // Wait for server to be ready with better error reporting
         let client = SafeCoderClient::new(self.port);
-        client.wait_for_server(30).await?;
-
-        tracing::info!("Server started successfully");
-        Ok(())
+        match client.wait_for_server(30).await {
+            Ok(()) => {
+                tracing::info!("Server started successfully");
+                Ok(())
+            }
+            Err(e) => {
+                // Try to read the log file to see what went wrong
+                if let Ok(log_content) = std::fs::read_to_string(&log_path) {
+                    if !log_content.is_empty() {
+                        tracing::error!("Server log output:\n{}", log_content);
+                    }
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Stop the server if we started it

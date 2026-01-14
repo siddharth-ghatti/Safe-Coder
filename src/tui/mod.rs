@@ -20,6 +20,7 @@ mod banner;
 mod enhanced_ui;
 mod file_picker;
 mod messages;
+mod model_picker;
 mod sidebar;
 mod spinner;
 mod styled_components;

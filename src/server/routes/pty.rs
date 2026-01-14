@@ -11,7 +11,7 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 
 use crate::server::state::AppState;
 
@@ -90,7 +90,7 @@ async fn handle_pty_connection(socket: WebSocket, state: Arc<AppState>, session_
 
     // Spawn task to read from PTY and send to WebSocket
     let read_task = tokio::spawn(async move {
-        let mut buf = [0u8; 4096];
+        let _buf = [0u8; 4096];
         loop {
             // Use blocking read in spawn_blocking for portable_pty
             let reader_clone = unsafe {

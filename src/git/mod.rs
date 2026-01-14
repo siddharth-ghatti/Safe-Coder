@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::Path;
+
 use tokio::process::Command;
 
 pub struct GitManager {

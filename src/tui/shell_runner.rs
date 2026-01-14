@@ -13,7 +13,7 @@ use crossterm::{
 };
 use futures::FutureExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -27,7 +27,8 @@ use super::shell_ui;
 use crate::client::{SafeCoderClient, ServerManager, DEFAULT_PORT};
 use crate::config::Config;
 use crate::llm::create_client;
-use crate::lsp::{default_lsp_configs, LspClient, LspManager};
+use crate::lsp::{LspManager, default_lsp_configs};
+use crate::auth::run_device_flow;
 use crate::orchestrator::TaskPlan;
 use crate::planning::PlanEvent;
 use crate::server::types::ServerEvent;
@@ -1216,8 +1217,12 @@ impl ShellTuiRunner {
 
             // Regular character input
             KeyCode::Char(c) => {
+                // Check if model picker is visible - send input there
+                if self.app.model_picker.visible {
+                    self.app.model_picker.add_filter_char(c);
+                    self.app.mark_dirty();
                 // Check if file picker is visible - send input there
-                if self.app.file_picker.visible {
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.filter_push(c);
                     self.app.mark_dirty();
                 } else {
@@ -1233,7 +1238,15 @@ impl ShellTuiRunner {
 
             // Backspace
             KeyCode::Backspace => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    if self.app.model_picker.filter.is_empty() {
+                        // Close picker
+                        self.app.model_picker.close();
+                    } else {
+                        self.app.model_picker.backspace_filter();
+                    }
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     if self.app.file_picker.filter.is_empty() {
                         // Close picker and remove the @ from input
                         self.app.file_picker.close();
@@ -1290,7 +1303,10 @@ impl ShellTuiRunner {
                 }
             }
             KeyCode::Up => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    self.app.model_picker.move_up();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.select_up();
                     self.app.mark_dirty();
                 } else if modifiers.contains(KeyModifiers::ALT) {
@@ -1309,7 +1325,10 @@ impl ShellTuiRunner {
                 }
             }
             KeyCode::Down => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    self.app.model_picker.move_down();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.select_down();
                     self.app.mark_dirty();
                 } else if modifiers.contains(KeyModifiers::ALT) {
@@ -1344,9 +1363,36 @@ impl ShellTuiRunner {
                 self.app.scroll_page_down();
             }
 
-            // Enter - submit command or apply autocomplete/file picker
+            // Enter - submit command or apply autocomplete/file picker/model picker
             KeyCode::Enter => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    // Select model from picker
+                    if let Some(model_id) = self.app.model_picker.get_selected_id() {
+                        self.config.llm.model = model_id.clone();
+
+                        // Save config
+                        if let Err(e) = self.config.save() {
+                            let prompt = self.app.current_prompt();
+                            let block = CommandBlock::system(
+                                format!("Warning: Failed to save config: {}", e),
+                                prompt,
+                            );
+                            self.app.add_block(block);
+                        }
+
+                        let prompt = self.app.current_prompt();
+                        let block = CommandBlock::system(
+                            format!("✓ Switched to model: {}\n\nUse /connect to reconnect.", model_id),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+
+                        // Disconnect so reconnect uses new model
+                        self.disconnect_ai();
+                    }
+                    self.app.model_picker.close();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     // Select file from picker
                     let cwd = self.app.cwd.clone();
                     if let Some(selected_path) = self.app.file_picker.select_current(&cwd) {
@@ -1371,9 +1417,12 @@ impl ShellTuiRunner {
                 }
             }
 
-            // Escape - cancel file picker, autocomplete, or clear input
+            // Escape - cancel model picker, file picker, autocomplete, or clear input
             KeyCode::Esc => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    self.app.model_picker.close();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.close();
                     // Also remove the @ that triggered the picker
                     if self.app.input.ends_with('@') {
@@ -2013,11 +2062,11 @@ Keyboard:
                         self.disconnect_ai();
                     }
                     None => {
-                        let block = CommandBlock::system(
-                            format!("Current model: {}\n\nUse /model <name> to switch.\nUse /models to see available models.", self.config.llm.model),
-                            prompt,
+                        // Show model picker modal
+                        self.app.model_picker.open(
+                            self.config.llm.provider.clone(),
+                            &self.config.llm.model,
                         );
-                        self.app.add_block(block);
                     }
                 }
             }
@@ -2099,7 +2148,7 @@ Keyboard:
     /// Login to GitHub Copilot using device flow
     async fn login_github_copilot(&mut self) -> Result<()> {
         use crate::auth::github_copilot::GitHubCopilotAuth;
-        use crate::auth::{run_device_flow, StoredToken};
+
         use crate::config::LlmProvider;
 
         let auth = GitHubCopilotAuth::new();
@@ -2793,13 +2842,22 @@ Keyboard:
             let ai_tx = tx.clone();
             let block_id_clone = block_id.clone();
 
+            // Send immediate "thinking" feedback
+            let _ = ai_tx.send(AiUpdate::Thinking {
+                block_id: block_id.clone(),
+                message: "Connecting to AI...".to_string(),
+            });
+
             tokio::spawn(async move {
+                tracing::debug!("AI query: Acquiring client lock");
                 let client_guard = client.lock().await;
 
                 // Subscribe to SSE events first
+                tracing::debug!("AI query: Subscribing to SSE events");
                 let event_rx = match client_guard.subscribe_events().await {
                     Ok(rx) => rx,
                     Err(e) => {
+                        tracing::error!("AI query: Failed to subscribe to events: {}", e);
                         let _ = ai_tx.send(AiUpdate::Error {
                             block_id: block_id_clone,
                             message: format!("Failed to subscribe to events: {}", e),
@@ -2808,8 +2866,16 @@ Keyboard:
                     }
                 };
 
+                // Send "sending" feedback
+                let _ = ai_tx.send(AiUpdate::Thinking {
+                    block_id: block_id_clone.clone(),
+                    message: "Sending to AI...".to_string(),
+                });
+
                 // Send message via HTTP
+                tracing::debug!("AI query: Sending message to server");
                 if let Err(e) = client_guard.send_message(&full_query).await {
+                    tracing::error!("AI query: Failed to send message: {}", e);
                     let _ = ai_tx.send(AiUpdate::Error {
                         block_id: block_id_clone,
                         message: format!("Failed to send message: {}", e),
@@ -2817,18 +2883,34 @@ Keyboard:
                     return;
                 }
 
+                tracing::debug!("AI query: Message sent, waiting for response");
+
+                // Send "processing" feedback
+                let _ = ai_tx.send(AiUpdate::Thinking {
+                    block_id: block_id_clone.clone(),
+                    message: "AI is thinking...".to_string(),
+                });
+
                 // Drop the lock so we can process events
                 drop(client_guard);
 
-                // Spawn a task to forward ServerEvents to AiUpdates
+                // Forward ServerEvents to AiUpdates
                 let block_id_inner = block_id_clone.clone();
                 let ai_tx_inner = ai_tx.clone();
                 forward_server_events_to_ai_updates(event_rx, block_id_inner, ai_tx_inner).await;
+
+                tracing::debug!("AI query: Event stream completed");
 
                 // Signal completion
                 let _ = ai_tx.send(AiUpdate::Complete {
                     block_id: block_id_clone,
                 });
+            });
+        } else {
+            tracing::warn!("AI query: No client connected");
+            let _ = tx.send(AiUpdate::Error {
+                block_id: block_id.clone(),
+                message: "Not connected to AI. Run /connect first.".to_string(),
             });
         }
 
@@ -2925,12 +3007,23 @@ async fn forward_server_events_to_ai_updates(
     block_id: String,
     ai_tx: mpsc::UnboundedSender<AiUpdate>,
 ) {
+    tracing::debug!("Event forwarder: Starting to receive events for block {}", block_id);
     let mut response_text = String::new();
+    let mut event_count = 0;
 
     while let Some(event) = event_rx.recv().await {
+        event_count += 1;
+        tracing::trace!("Event forwarder: Received event #{}: {:?}", event_count, event);
+
         let update = match event {
-            ServerEvent::Connected => continue, // Skip connection event
-            ServerEvent::Completed => break,    // End of stream
+            ServerEvent::Connected => {
+                tracing::debug!("Event forwarder: Connected event received");
+                continue; // Skip connection event
+            }
+            ServerEvent::Completed => {
+                tracing::debug!("Event forwarder: Completed event received, ending stream");
+                break; // End of stream
+            }
             ServerEvent::Thinking { message } => AiUpdate::Thinking {
                 block_id: block_id.clone(),
                 message,
@@ -3075,6 +3168,8 @@ async fn forward_server_events_to_ai_updates(
         };
         let _ = ai_tx.send(update);
     }
+
+    tracing::debug!("Event forwarder: Finished after {} events", event_count);
 
     // Send final response if we accumulated text
     if !response_text.is_empty() {

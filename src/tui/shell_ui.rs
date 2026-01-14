@@ -22,7 +22,7 @@ use textwrap::wrap;
 
 use super::markdown::{has_markdown, render_markdown_lines};
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp};
-use super::shimmer;
+
 use super::sidebar::{PlanStepDisplay, ToolStepStatus};
 use crate::planning::PlanStepStatus;
 
@@ -105,6 +105,10 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
     }
 
     // Popups on top
+    if app.model_picker.visible {
+        draw_model_picker_popup(f, app, size);
+    }
+
     if app.file_picker.visible {
         draw_file_picker_popup(f, app, size);
     }
@@ -2136,6 +2140,124 @@ fn draw_sidebar_lsp(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 // ============================================================================
 // Popups
 // ============================================================================
+
+fn draw_model_picker_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    let filtered = app.model_picker.filtered_models();
+    if filtered.is_empty() && app.model_picker.filter.is_empty() {
+        return;
+    }
+
+    let max_entries = 12;
+    let height = (filtered.len().min(max_entries) + 4) as u16;
+    let width = 55.min(area.width.saturating_sub(10));
+
+    let popup_area = Rect {
+        x: (area.width.saturating_sub(width)) / 2,
+        y: (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, popup_area);
+
+    let provider_name = match app.model_picker.provider {
+        crate::config::LlmProvider::Anthropic => "Anthropic",
+        crate::config::LlmProvider::OpenAI => "OpenAI",
+        crate::config::LlmProvider::GitHubCopilot => "GitHub Copilot",
+        crate::config::LlmProvider::OpenRouter => "OpenRouter",
+        crate::config::LlmProvider::Ollama => "Ollama",
+    };
+
+    let block = Block::default()
+        .title(format!(" Select Model ({}) ", provider_name))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_MAGENTA))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Filter input
+    let filter_area = Rect { height: 1, ..inner };
+    let filter_text = if app.model_picker.filter.is_empty() {
+        "Type to filter...".to_string()
+    } else {
+        app.model_picker.filter.clone()
+    };
+
+    let filter_para = Paragraph::new(Line::from(vec![
+        Span::styled("🔍 ", Style::default().fg(ACCENT_CYAN)),
+        Span::styled(
+            filter_text,
+            if app.model_picker.filter.is_empty() {
+                Style::default().fg(TEXT_MUTED)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            },
+        ),
+    ]));
+    f.render_widget(filter_para, filter_area);
+
+    // Model list
+    let list_area = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
+
+    if filtered.is_empty() {
+        let no_match = Paragraph::new("No matching models").style(Style::default().fg(TEXT_MUTED));
+        f.render_widget(no_match, list_area);
+        return;
+    }
+
+    let items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .take(max_entries)
+        .map(|(i, model)| {
+            let is_active = model.is_active;
+            let style = if i == app.model_picker.selected {
+                Style::default()
+                    .fg(BG_PRIMARY)
+                    .bg(ACCENT_MAGENTA)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_active {
+                Style::default().fg(ACCENT_GREEN)
+            } else {
+                Style::default().fg(TEXT_PRIMARY)
+            };
+
+            let active_marker = if is_active { "✓ " } else { "  " };
+            let desc = model.description.as_deref().unwrap_or("");
+            let text = if desc.is_empty() {
+                format!("{}{}", active_marker, model.name)
+            } else {
+                format!("{}{} - {}", active_marker, model.name, desc)
+            };
+            ListItem::new(text).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    f.render_widget(list, list_area);
+
+    // Help text at bottom
+    let help_area = Rect {
+        y: inner.y + inner.height - 1,
+        height: 1,
+        ..inner
+    };
+    let help = Paragraph::new(Line::from(vec![
+        Span::styled("↑↓", Style::default().fg(ACCENT_CYAN)),
+        Span::styled(" navigate  ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Enter", Style::default().fg(ACCENT_CYAN)),
+        Span::styled(" select  ", Style::default().fg(TEXT_MUTED)),
+        Span::styled("Esc", Style::default().fg(ACCENT_CYAN)),
+        Span::styled(" cancel", Style::default().fg(TEXT_MUTED)),
+    ]));
+    f.render_widget(help, help_area);
+}
 
 fn draw_file_picker_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let filtered = app.file_picker.filtered_entries();
