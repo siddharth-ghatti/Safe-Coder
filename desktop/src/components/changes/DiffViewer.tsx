@@ -14,7 +14,7 @@ interface DiffLine {
   newLineNumber?: number;
 }
 
-export function DiffViewer({ diff, showLineNumbers = false }: DiffViewerProps) {
+export function DiffViewer({ diff, showLineNumbers = true }: DiffViewerProps) {
   const lines = useMemo(() => {
     const result: DiffLine[] = [];
     let oldLine = 0;
@@ -70,13 +70,13 @@ export function DiffViewer({ diff, showLineNumbers = false }: DiffViewerProps) {
   }, [diff]);
 
   return (
-    <div className="font-mono text-xs overflow-x-auto bg-background rounded">
+    <div className="font-mono text-xs overflow-x-auto bg-[#1e1e2e] rounded-b-lg">
       {lines.map((line, index) => {
         if (line.type === "header") {
           return (
             <div
               key={index}
-              className="px-3 py-1 bg-accent/10 text-accent border-y border-border"
+              className="px-3 py-1.5 bg-accent/10 text-accent border-b border-border/50 text-xs"
             >
               {line.content}
             </div>
@@ -87,42 +87,57 @@ export function DiffViewer({ diff, showLineNumbers = false }: DiffViewerProps) {
           <div
             key={index}
             className={cn(
-              "flex",
+              "flex group hover:bg-white/5 transition-colors",
               line.type === "add" && "bg-diff-add-bg",
               line.type === "remove" && "bg-diff-remove-bg"
             )}
           >
             {showLineNumbers && (
-              <>
-                <span className="diff-line-number w-10 px-2 py-0.5 text-right select-none border-r border-border">
+              <div className="flex flex-shrink-0 select-none border-r border-border/30">
+                <span
+                  className={cn(
+                    "w-12 px-2 py-0.5 text-right text-muted-foreground/50",
+                    line.type === "add" && "bg-diff-add-bg/50",
+                    line.type === "remove" && "bg-diff-remove-bg/50"
+                  )}
+                >
                   {line.type === "remove" || line.type === "context"
                     ? line.oldLineNumber
                     : ""}
                 </span>
-                <span className="diff-line-number w-10 px-2 py-0.5 text-right select-none border-r border-border">
+                <span
+                  className={cn(
+                    "w-12 px-2 py-0.5 text-right text-muted-foreground/50 border-r border-border/30",
+                    line.type === "add" && "bg-diff-add-bg/50",
+                    line.type === "remove" && "bg-diff-remove-bg/50"
+                  )}
+                >
                   {line.type === "add" || line.type === "context"
                     ? line.newLineNumber
                     : ""}
                 </span>
-              </>
+              </div>
             )}
 
+            {/* Change indicator */}
             <span
               className={cn(
-                "w-5 px-1 py-0.5 text-center select-none",
-                line.type === "add" && "text-diff-add",
-                line.type === "remove" && "text-diff-remove"
+                "w-6 px-1.5 py-0.5 text-center select-none flex-shrink-0",
+                line.type === "add" && "text-diff-add bg-diff-add-bg/30",
+                line.type === "remove" && "text-diff-remove bg-diff-remove-bg/30",
+                line.type === "context" && "text-muted-foreground/30"
               )}
             >
               {line.type === "add" ? "+" : line.type === "remove" ? "-" : " "}
             </span>
 
+            {/* Code content */}
             <span
               className={cn(
-                "flex-1 px-2 py-0.5 whitespace-pre",
+                "flex-1 px-3 py-0.5 whitespace-pre overflow-x-auto",
                 line.type === "add" && "text-diff-add",
                 line.type === "remove" && "text-diff-remove",
-                line.type === "context" && "text-muted-foreground"
+                line.type === "context" && "text-muted-foreground/80"
               )}
             >
               {line.content || " "}

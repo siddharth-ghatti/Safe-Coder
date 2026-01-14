@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef } from "react";
 import { subscribeToEvents } from "../api/client";
 import { useSessionStore } from "../stores/sessionStore";
 import type { ServerEvent } from "../types";
@@ -34,7 +34,8 @@ export function useSessionEvents(sessionId: string | null) {
     const cleanup = subscribeToEvents(
       sessionId,
       (event) => {
-        const serverEvent = { type: event.type, ...event.data } as ServerEvent;
+        const data = event.data as Record<string, unknown> || {};
+        const serverEvent = { type: event.type, ...data } as ServerEvent;
         handleServerEventRef.current(serverEvent);
       },
       (error) => {

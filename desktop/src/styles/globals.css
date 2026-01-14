@@ -105,6 +105,26 @@ pre, code {
   animation: pulse-dot 1.5s ease-in-out infinite;
 }
 
+/* Progress bar animation */
+@keyframes progress {
+  0% {
+    width: 0%;
+    margin-left: 0%;
+  }
+  50% {
+    width: 60%;
+    margin-left: 20%;
+  }
+  100% {
+    width: 0%;
+    margin-left: 100%;
+  }
+}
+
+.animate-progress {
+  animation: progress 2s ease-in-out infinite;
+}
+
 /* Smooth transitions */
 .transition-sidebar {
   transition: width 200ms ease-in-out;
@@ -114,4 +134,74 @@ pre, code {
 *:focus-visible {
   outline: 2px solid #22c55e;
   outline-offset: 2px;
+}
+
+/* Streaming content animation */
+.streaming-content {
+  position: relative;
+}
+
+.streaming-content > * {
+  animation: fadeInUp 0.15s ease-out;
+}
+
+.streaming-content::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 1.2em;
+  background: #22c55e;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: blink 0.8s step-end infinite;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0.5;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes blink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Tool execution animations */
+.tool-execution {
+  animation: slideInLeft 0.2s ease-out;
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Text chunk animation for streaming */
+.text-chunk-new {
+  animation: textAppear 0.1s ease-out;
+}
+
+@keyframes textAppear {
+  from {
+    opacity: 0.3;
+  }
+  to {
+    opacity: 1;
+  }
 }

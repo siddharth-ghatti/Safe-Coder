@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    routing::{get, post, delete},
+    routing::{delete, get, post, put},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
@@ -60,6 +60,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
         .route("/api/sessions", post(routes::sessions::create_session))
         .route("/api/sessions/:id", get(routes::sessions::get_session))
         .route("/api/sessions/:id", delete(routes::sessions::delete_session))
+        .route("/api/sessions/:id/mode", put(routes::sessions::set_session_mode))
 
         // Messages
         .route("/api/sessions/:id/messages", get(routes::messages::get_messages))
@@ -68,6 +69,7 @@ pub async fn start_server(config: ServerConfig) -> anyhow::Result<()> {
 
         // File changes
         .route("/api/sessions/:id/changes", get(routes::files::get_session_changes))
+        .route("/api/sessions/:id/files", get(routes::files::list_project_files))
 
         // Real-time events (SSE)
         .route("/api/sessions/:id/events", get(routes::events::session_events))

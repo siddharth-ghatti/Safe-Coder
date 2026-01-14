@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, Plus, Settings, MessageSquare, Terminal } from "lucide-react";
+import { FolderOpen, Plus, Settings, MessageSquare, Plug, Folder } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
-import { useUIStore } from "../../stores/uiStore";
 import { SessionList } from "../sidebar/SessionList";
 import { cn } from "../../lib/utils";
 
@@ -12,8 +11,6 @@ export function Sidebar() {
   const createSession = useSessionStore((s) => s.createSession);
   const agentMode = useSessionStore((s) => s.agentMode);
   const setAgentMode = useSessionStore((s) => s.setAgentMode);
-  const toggleTerminal = useUIStore((s) => s.toggleTerminal);
-  const terminalOpen = useUIStore((s) => s.terminalOpen);
 
   const handleCreateSession = async (path?: string) => {
     const targetPath = path || projectPath.trim();
@@ -40,7 +37,6 @@ export function Sidebar() {
       });
 
       if (selected) {
-        // Directly create session with selected path
         await handleCreateSession(selected);
       }
     } catch (error) {
@@ -49,115 +45,85 @@ export function Sidebar() {
   };
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
+    <div className="h-full flex flex-col bg-card">
+      {/* Logo/Brand header */}
       <div className="p-4 border-b border-border">
-        <div className="flex items-center gap-2 mb-4">
-          <div className="w-8 h-8 rounded bg-primary/20 flex items-center justify-center">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center">
             <MessageSquare className="w-4 h-4 text-primary" />
           </div>
-          <span className="font-semibold text-foreground">Safe Coder</span>
-        </div>
-
-        {/* New session input */}
-        <div className="space-y-2">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={projectPath}
-              onChange={(e) => setProjectPath(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleCreateSession()}
-              placeholder="Project path..."
-              className="flex-1 px-3 py-2 bg-muted border border-border rounded text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary"
-            />
-            <button
-              onClick={() => handleCreateSession()}
-              disabled={!projectPath.trim() || isCreating}
-              className={cn(
-                "p-2 bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors",
-                (!projectPath.trim() || isCreating) && "opacity-50 cursor-not-allowed"
-              )}
-              title="New session"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
+          <div>
+            <span className="font-semibold text-foreground text-sm">Safe Coder</span>
+            <p className="text-[10px] text-muted-foreground">AI Coding Assistant</p>
           </div>
-
-          {/* Open folder button */}
-          <button
-            onClick={handleOpenProject}
-            disabled={isCreating}
-            className="w-full flex items-center justify-center gap-2 p-2 bg-muted hover:bg-muted/80 text-foreground rounded transition-colors"
-          >
-            <FolderOpen className="w-4 h-4" />
-            <span className="text-sm">Open Project Folder</span>
-          </button>
         </div>
       </div>
 
       {/* Sessions list */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto">
         <SessionList />
       </div>
 
-      {/* Footer with mode toggle and settings */}
-      <div className="p-4 border-t border-border space-y-3">
-        {/* Mode toggle */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">Mode:</span>
-          <div className="flex-1 flex bg-muted rounded p-0.5">
+      {/* Getting Started section - OpenCode style */}
+      <div className="border-t border-border">
+        <div className="p-4">
+          <p className="text-sm font-medium mb-2">Getting started</p>
+          <p className="text-xs text-muted-foreground mb-4">
+            Safe Coder uses GitHub Copilot so you can start immediately.
+          </p>
+
+          {/* Quick action buttons */}
+          <div className="space-y-2">
             <button
-              onClick={() => setAgentMode("build")}
-              className={cn(
-                "flex-1 px-3 py-1 text-xs rounded transition-colors",
-                agentMode === "build"
-                  ? "bg-primary text-primary-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
+              onClick={handleOpenProject}
+              disabled={isCreating}
+              className="w-full flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
             >
-              Build
-            </button>
-            <button
-              onClick={() => setAgentMode("plan")}
-              className={cn(
-                "flex-1 px-3 py-1 text-xs rounded transition-colors",
-                agentMode === "plan"
-                  ? "bg-accent text-accent-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              Plan
+              <Folder className="w-4 h-4" />
+              <span>Open project</span>
             </button>
           </div>
         </div>
 
-        {/* Quick actions */}
-        <div className="flex items-center gap-2">
+        {/* Mode toggle & settings footer */}
+        <div className="px-4 pb-4 space-y-3">
+          {/* Mode toggle */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">Mode:</span>
+            <div className="flex-1 flex bg-muted rounded-md p-0.5">
+              <button
+                onClick={() => setAgentMode("build")}
+                className={cn(
+                  "flex-1 px-3 py-1.5 text-xs rounded-md transition-all",
+                  agentMode === "build"
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Build
+              </button>
+              <button
+                onClick={() => setAgentMode("plan")}
+                className={cn(
+                  "flex-1 px-3 py-1.5 text-xs rounded-md transition-all",
+                  agentMode === "plan"
+                    ? "bg-amber-500 text-white shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Plan
+              </button>
+            </div>
+          </div>
+
+          {/* Settings button */}
           <button
-            onClick={toggleTerminal}
-            className={cn(
-              "flex items-center gap-2 p-2 text-sm rounded transition-colors",
-              terminalOpen
-                ? "bg-primary/20 text-primary"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted"
-            )}
-            title="Toggle terminal"
-          >
-            <Terminal className="w-4 h-4" />
-            <span>Terminal</span>
-          </button>
-          <button
-            className="ml-auto p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded transition-colors"
+            className="w-full flex items-center justify-center gap-2 p-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
             title="Settings"
           >
             <Settings className="w-4 h-4" />
+            <span>Settings</span>
           </button>
-        </div>
-
-        {/* Getting started hint */}
-        <div className="p-3 bg-muted/50 rounded text-xs text-muted-foreground">
-          <p className="font-medium mb-1">Getting started</p>
-          <p>Click "Open Project Folder" to start a new session, or select an existing session.</p>
         </div>
       </div>
     </div>

@@ -12,10 +12,11 @@ use tokio::sync::RwLock;
 
 use crate::approval::UserMode;
 use crate::config::Config;
+use crate::tools::AgentMode;
 use crate::server::state::{AppState, SessionHandle};
 use crate::server::types::{
     CreateSessionRequest, ErrorResponse, FileChangeStats, SessionListResponse,
-    SessionResponse, SessionSummary,
+    SessionResponse, SessionSummary, SetModeRequest,
 };
 use crate::session::Session;
 
@@ -66,8 +67,10 @@ pub async fn create_session(
     })?;
 
     // Load config and disable git auto-commit (user can use bash for git operations)
+    // Also disable checkpointing as it can interfere with some build systems (e.g., nx)
     let mut config = Config::load().unwrap_or_default();
     config.git.auto_commit = false;
+    config.checkpoint.enabled = false;
 
     // Create session
     let mut session = Session::new(config, canonical_path.clone())
@@ -82,13 +85,15 @@ pub async fn create_session(
             )
         })?;
 
-    // Set user mode based on request (defaults to Build mode)
+    // Set user mode and agent mode based on request (defaults to Build mode)
     let mode_str = request.mode.as_deref().unwrap_or("build");
-    let user_mode = match mode_str.to_lowercase().as_str() {
-        "plan" => UserMode::Plan,
-        _ => UserMode::Build,
+    let (user_mode, agent_mode) = match mode_str.to_lowercase().as_str() {
+        "plan" => (UserMode::Plan, AgentMode::Plan),
+        _ => (UserMode::Build, AgentMode::Build),
     };
     session.set_user_mode(user_mode);
+    session.set_agent_mode(agent_mode);
+    tracing::info!("Session created with mode: {} (user_mode={:?}, agent_mode={:?})", mode_str, user_mode, agent_mode);
 
     // Generate session ID
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -137,6 +142,44 @@ pub async fn get_session(
             created_at: handle.created_at.to_rfc3339(),
             mode: "build".to_string(),
         })),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Session not found: {}", session_id),
+                code: "SESSION_NOT_FOUND".to_string(),
+            }),
+        )),
+    }
+}
+
+/// PUT /api/sessions/:id/mode - Change session mode
+pub async fn set_session_mode(
+    State(state): State<Arc<AppState>>,
+    Path(session_id): Path<String>,
+    Json(request): Json<SetModeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let sessions = state.sessions.read().await;
+
+    match sessions.get(&session_id) {
+        Some(handle) => {
+            let mut session = handle.session.write().await;
+
+            let mode_str = request.mode.to_lowercase();
+            let (user_mode, agent_mode) = match mode_str.as_str() {
+                "plan" => (UserMode::Plan, AgentMode::Plan),
+                _ => (UserMode::Build, AgentMode::Build),
+            };
+
+            session.set_user_mode(user_mode);
+            session.set_agent_mode(agent_mode);
+            tracing::info!("Session {} mode changed to: {} (user_mode={:?}, agent_mode={:?})",
+                session_id, mode_str, user_mode, agent_mode);
+
+            Ok(Json(serde_json::json!({
+                "status": "ok",
+                "mode": mode_str
+            })))
+        }
         None => Err((
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {

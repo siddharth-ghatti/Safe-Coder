@@ -80,6 +80,13 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await fetch(`${baseUrl}/api/sessions/${sessionId}`, { method: "DELETE" });
 }
 
+export async function setSessionMode(sessionId: string, mode: string): Promise<{ status: string; mode: string }> {
+  return apiFetch(`/api/sessions/${sessionId}/mode`, {
+    method: "PUT",
+    body: JSON.stringify({ mode }),
+  });
+}
+
 // Messages
 export async function getMessages(sessionId: string): Promise<Array<{
   id: string;
@@ -104,6 +111,18 @@ export async function sendMessage(
 
 export async function cancelOperation(sessionId: string): Promise<{ status: string }> {
   return apiFetch(`/api/sessions/${sessionId}/cancel`, { method: "POST" });
+}
+
+// Project files (for @ mentions)
+export async function listProjectFiles(
+  sessionId: string,
+  query?: string,
+  limit: number = 50
+): Promise<{ files: Array<{ path: string; name: string; is_dir: boolean }> }> {
+  const params = new URLSearchParams();
+  if (query) params.set("query", query);
+  params.set("limit", limit.toString());
+  return apiFetch(`/api/sessions/${sessionId}/files?${params.toString()}`);
 }
 
 // File changes

@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -11,16 +12,41 @@ interface AssistantMessageProps {
 }
 
 export function AssistantMessage({ message, isStreaming }: AssistantMessageProps) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  const prevLengthRef = useRef(0);
+
+  // Add smooth scroll and highlight effect for new content
+  useEffect(() => {
+    if (isStreaming && contentRef.current) {
+      const newLength = message.content.length;
+      if (newLength > prevLengthRef.current) {
+        // Scroll the last element into view smoothly
+        const lastChild = contentRef.current.lastElementChild;
+        if (lastChild) {
+          lastChild.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      }
+      prevLengthRef.current = newLength;
+    }
+  }, [message.content, isStreaming]);
+
   return (
-    <div className="flex gap-3 animate-in fade-in-0 duration-200">
-      <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
-        <Bot className="w-4 h-4 text-primary" />
+    <div className="flex gap-3 animate-in fade-in-0 slide-in-from-bottom-2 duration-300">
+      <div className={cn(
+        "w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0 transition-all duration-300",
+        isStreaming && "ring-2 ring-primary/30 ring-offset-2 ring-offset-background"
+      )}>
+        <Bot className={cn(
+          "w-4 h-4 text-primary transition-transform duration-300",
+          isStreaming && "animate-pulse"
+        )} />
       </div>
       <div className="flex-1 min-w-0">
         <div
+          ref={contentRef}
           className={cn(
-            "prose prose-invert prose-sm max-w-none transition-all duration-100",
-            isStreaming && "relative"
+            "prose prose-invert prose-sm max-w-none",
+            isStreaming && "streaming-content"
           )}
         >
           <ReactMarkdown
@@ -42,7 +68,7 @@ export function AssistantMessage({ message, isStreaming }: AssistantMessageProps
 
                 return (
                   <SyntaxHighlighter
-                    style={oneDark}
+                    style={oneDark as { [key: string]: React.CSSProperties }}
                     language={match[1]}
                     PreTag="div"
                     customStyle={{
@@ -50,7 +76,6 @@ export function AssistantMessage({ message, isStreaming }: AssistantMessageProps
                       borderRadius: "0.5rem",
                       fontSize: "0.875rem",
                     }}
-                    {...props}
                   >
                     {String(children).replace(/\n$/, "")}
                   </SyntaxHighlighter>
@@ -88,11 +113,6 @@ export function AssistantMessage({ message, isStreaming }: AssistantMessageProps
           >
             {message.content}
           </ReactMarkdown>
-
-          {/* Streaming cursor */}
-          {isStreaming && (
-            <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-0.5" />
-          )}
         </div>
       </div>
     </div>

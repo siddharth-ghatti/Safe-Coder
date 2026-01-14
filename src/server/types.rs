@@ -250,6 +250,12 @@ pub struct CreateSessionRequest {
     pub mode: Option<String>,
 }
 
+/// Request for changing session mode
+#[derive(Debug, Deserialize)]
+pub struct SetModeRequest {
+    pub mode: String,
+}
+
 /// Response for session creation
 #[derive(Debug, Serialize)]
 pub struct SessionResponse {
