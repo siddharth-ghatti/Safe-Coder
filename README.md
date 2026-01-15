@@ -10,7 +10,8 @@
 - **Visual Steps/Tasks Sidebar**—Sidebar displays plans/steps with real-time color-coded status: completed (green), running (cyan, animated), failed (red). Tracks both planning and execution phases; details in AGENT_MODE_SUMMARY.md and STEPS_VISUAL_GUIDE.md.
 - **Improved Multi-Agent Orchestration**—Parallelizes up to 3 agents, supports dependency-aware decomposition, and merges code across isolated worktrees.
 - **Expanded UI/UX**—Modern, themeable TUI based on Ratatui with rich context panes, context-aware autocomplete, file pickers, and more.
-- **Direct LSP (Language Server Protocol) Support**—Auto-managed language servers, inline diagnostic/error highlighting, and code intelligence for multiple languages.
+- **Direct LSP (Language Server Protocol) Support**—Auto-managed language servers, inline diagnostic/error highlighting, automatic LSP downloads and configuration, and code intelligence for multiple languages.
+- **Desktop App & HTTP Server**—Built-in HTTP/WebSocket server (default: 127.0.0.1:9876) for Tauri-based desktop integration and third-party clients; includes REST APIs, SSE events, and a PTY WebSocket for terminal access.
 - **Skill System, Hooks, and Fine-Grained Permissions**—Isolate knowledge, enforce workflow policies, and control exactly how/when AI touches your code.
 
 ---
@@ -31,6 +32,7 @@
 - [Interactive TUI Features](#interactive-tui-features)
 - [Agent/Planning Modes](#agentplanning-modes)
 - [Advanced Orchestration & Subagents](#advanced-orchestration--subagents)
+- [Desktop App & HTTP Server](#desktop-app--http-server)
 - [Configuration, Customization, and Safety](#configuration-customization-and-safety)
 - [Project Structure](#project-structure)
 - [Contributing & License](#contributing--license)
@@ -150,6 +152,10 @@ export ANTHROPIC_API_KEY="sk-ant-..."     # Claude directly
 cd your-project
 safe-coder                  # Starts interactive shell
 safe-coder --ai             # Starts with AI connected
+
+# Start the HTTP server for desktop integration (optional)
+# Default: 127.0.0.1:9876
+safe-coder serve
 ```
 
 **Key Commands in Shell:**
@@ -844,6 +850,31 @@ safe-coder chat --demo
 - `default` - Ask before each tool (recommended)
 - `auto-edit` - Auto-approve file operations only  
 - `yolo` - Auto-approve everything (use with caution)
+
+### Desktop App & HTTP Server
+
+Safe Coder includes an HTTP/WebSocket server to integrate with a desktop application (Tauri-based) or other clients. The server exposes REST endpoints and real-time event streams (SSE) for sessions, messages, file changes, and a PTY WebSocket for terminal access.
+
+Start the server with:
+
+```bash
+# Start the HTTP server (default: 127.0.0.1:9876)
+safe-coder serve
+
+# Custom host/port and enable CORS for development
+safe-coder serve --host 0.0.0.0 --port 9876 --cors
+```
+
+Endpoints include (examples):
+- GET /api/health - health check
+- GET /api/config - current config
+- GET/POST /api/sessions - list/create sessions
+- GET/POST /api/sessions/:id/messages - send/receive messages
+- GET /api/sessions/:id/events - Server-Sent Events (SSE) stream for real-time updates
+- GET /api/sessions/:id/pty - PTY WebSocket for terminal access
+
+This server is used by the desktop frontend in the `desktop/` folder. By default the server binds to 127.0.0.1 and CORS is disabled; enable --cors for local development if the frontend is served from a different origin.
+
 
 ### Orchestrate Mode (Multi-Agent)
 
