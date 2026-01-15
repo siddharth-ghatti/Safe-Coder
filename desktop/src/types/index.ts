@@ -113,6 +113,11 @@ export interface ToolExecution {
   reasoning?: string;
 }
 
+// Item in the streaming sequence - can be text or a tool reference
+export type StreamItem =
+  | { type: 'text'; text: string }
+  | { type: 'tool'; toolId: string };
+
 export interface StreamingMessage {
   role: "assistant";
   content: string;
@@ -120,6 +125,8 @@ export interface StreamingMessage {
   toolExecutions: ToolExecution[];
   // Buffer for reasoning that hasn't been attached to a tool yet
   pendingReasoning?: string;
+  // Ordered list of items as they stream in (for interleaved display)
+  streamItems: StreamItem[];
 }
 
 export interface DoomLoopPrompt {

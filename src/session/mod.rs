@@ -1439,12 +1439,41 @@ impl Session {
                     .iter()
                     .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
-                // Stream text to UI
+                // Collect reasoning sentences to send interleaved with tool calls
+                let mut reasoning_sentences: Vec<String> = Vec::new();
                 for block in &assistant_message.content {
                     if let ContentBlock::Text { text } = block {
                         response_text.push_str(text);
                         response_text.push('\n');
-                        let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                        if has_tool_calls && !text.trim().is_empty() {
+                            // Split reasoning by sentences for interleaved display
+                            for line in text.split('\n') {
+                                if line.trim().is_empty() {
+                                    continue;
+                                }
+                                // Split by sentence boundaries (". " followed by capital letter)
+                                let mut current = String::new();
+                                let chars: Vec<char> = line.chars().collect();
+                                for i in 0..chars.len() {
+                                    current.push(chars[i]);
+                                    if chars[i] == '.' && i + 2 < chars.len()
+                                       && chars[i + 1] == ' '
+                                       && chars[i + 2].is_uppercase() {
+                                        let sentence = current.trim().to_string();
+                                        if !sentence.is_empty() {
+                                            reasoning_sentences.push(sentence);
+                                        }
+                                        current = String::new();
+                                    }
+                                }
+                                let sentence = current.trim().to_string();
+                                if !sentence.is_empty() {
+                                    reasoning_sentences.push(sentence);
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                        }
                     }
                 }
 
@@ -1457,9 +1486,18 @@ impl Session {
 
                 // Execute read-only tool calls
                 let mut tool_results = Vec::new();
+                let mut step_index = 0usize;
                 for block in &assistant_message.content {
                     if let ContentBlock::ToolUse { id, name, input } = block {
                         let description = self.describe_tool_action(name, input);
+
+                        // Send reasoning for this tool (if available)
+                        if step_index < reasoning_sentences.len() {
+                            let _ = event_tx.send(SessionEvent::Reasoning(
+                                reasoning_sentences[step_index].clone()
+                            ));
+                        }
+                        step_index += 1;
 
                         // Send proper tool events for vertical rendering
                         let _ = event_tx.send(SessionEvent::ToolStart {
@@ -1641,16 +1679,42 @@ impl Session {
                 .iter()
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
-            // Extract text from response and send as chunks
-            // If there are tool calls, text is reasoning (explaining what it's about to do)
-            // If no tool calls, text is the final response
+            // Extract text from response
+            // Collect reasoning sentences to send interleaved with tool calls
+            let mut reasoning_sentences: Vec<String> = Vec::new();
             for block in &assistant_message.content {
                 if let ContentBlock::Text { text } = block {
                     response_text.push_str(text);
                     response_text.push('\n');
                     if has_tool_calls && !text.trim().is_empty() {
-                        // This is the LLM's reasoning before executing tools
-                        let _ = event_tx.send(SessionEvent::Reasoning(text.clone()));
+                        // Split reasoning by sentences for interleaved display
+                        // Split on newlines first, then by sentence boundaries
+                        for line in text.split('\n') {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            // Split by sentence boundaries (". " followed by capital letter)
+                            let mut current = String::new();
+                            let chars: Vec<char> = line.chars().collect();
+                            for i in 0..chars.len() {
+                                current.push(chars[i]);
+                                // Check for sentence end: ". " followed by capital letter
+                                if chars[i] == '.' && i + 2 < chars.len()
+                                   && chars[i + 1] == ' '
+                                   && chars[i + 2].is_uppercase() {
+                                    let sentence = current.trim().to_string();
+                                    if !sentence.is_empty() {
+                                        reasoning_sentences.push(sentence);
+                                    }
+                                    current = String::new();
+                                }
+                            }
+                            // Add remaining text as final sentence
+                            let sentence = current.trim().to_string();
+                            if !sentence.is_empty() {
+                                reasoning_sentences.push(sentence);
+                            }
+                        }
                     } else {
                         let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
                     }
@@ -1836,6 +1900,14 @@ impl Session {
 
                     // Generate description for the tool action
                     let description = self.describe_tool_action(name, input);
+
+                    // Send reasoning for this tool (if available)
+                    // Each tool gets one reasoning sentence for interleaved display
+                    if step_index < reasoning_sentences.len() {
+                        let _ = event_tx.send(SessionEvent::Reasoning(
+                            reasoning_sentences[step_index].clone()
+                        ));
+                    }
 
                     // Notify UI that tool is starting
                     let _ = event_tx.send(SessionEvent::ToolStart {

@@ -221,6 +221,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         content: "",
         isStreaming: true,
         toolExecutions: [],
+        streamItems: [],
       },
     }));
 
@@ -303,8 +304,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
 
       case "Reasoning":
-        // Buffer reasoning to attach to the next tool execution
-        // This ensures reasoning appears ABOVE the tool it relates to
+        // Buffer reasoning to attach to the next tool (shown before tool in ToolExecutionCard)
+        // Don't add to streamItems - the tool card will display it
         if (event.text.trim()) {
           set((state) => {
             const streaming = state.streamingMessage || {
@@ -312,14 +313,15 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               content: "",
               isStreaming: true,
               toolExecutions: [],
+              streamItems: [],
             };
-            // Accumulate reasoning in the pending buffer
+            // Accumulate in pending buffer for tool attachment
             const existingReasoning = streaming.pendingReasoning || "";
             const newReasoning = existingReasoning
               ? `${existingReasoning}\n${event.text}`
               : event.text;
             return {
-              thinkingMessage: event.text, // Also show in thinking indicator for visual feedback
+              thinkingMessage: event.text, // Show in thinking indicator for visual feedback
               streamingMessage: {
                 ...streaming,
                 pendingReasoning: newReasoning,
@@ -331,9 +333,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
 
       case "TextChunk":
         // Batch text chunks for smoother rendering
+        // Add newline if current buffer ends with punctuation and new text starts with capital
+        if (textBuffer.length > 0 && event.text.length > 0) {
+          const lastChar = textBuffer[textBuffer.length - 1];
+          const firstChar = event.text[0];
+          if (/[.!?]/.test(lastChar) && /[A-Z]/.test(firstChar)) {
+            textBuffer += '\n\n'; // Add markdown paragraph break
+          }
+        }
         textBuffer += event.text;
 
         // Flush immediately on first chunk for responsiveness, then batch
+        // Text chunks are accumulated in content (shown at end), not in streamItems
         if (isFirstChunk) {
           isFirstChunk = false;
           const bufferedText = textBuffer;
@@ -344,6 +355,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
               content: "",
               isStreaming: true,
               toolExecutions: [],
+              streamItems: [],
             };
             return {
               thinkingMessage: null,
@@ -367,6 +379,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                   content: "",
                   isStreaming: true,
                   toolExecutions: [],
+                  streamItems: [],
                 };
                 return {
                   thinkingMessage: null,
@@ -389,22 +402,28 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             content: "",
             isStreaming: true,
             toolExecutions: [],
+            streamItems: [],
           };
+          // Create unique ID for this tool
+          const toolId = `tool_${Date.now()}`;
           // Attach any pending reasoning to this tool
           const newTool: ToolExecution = {
-            id: `tool_${Date.now()}`,
+            id: toolId,
             name: event.name,
             description: event.description,
             output: "",
             startTime: Date.now(),
             reasoning: streaming.pendingReasoning || undefined,
           };
+          // Add tool reference to stream items for interleaved display
+          const newStreamItems = [...(streaming.streamItems || []), { type: 'tool' as const, toolId }];
           return {
             thinkingMessage: null,
             streamingMessage: {
               ...streaming,
               toolExecutions: [...streaming.toolExecutions, newTool],
               pendingReasoning: undefined, // Clear the buffer
+              streamItems: newStreamItems,
             },
           };
         });

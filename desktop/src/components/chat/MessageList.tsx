@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Check, X, Loader2, ArrowDown, ChevronDown, ChevronRight, Circle } from "lucide-react";
+import { Check, X, Loader2, ArrowDown, ChevronDown, ChevronRight, Circle, Bot } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
@@ -78,93 +78,111 @@ function getToolSummary(toolName: string, output: string | undefined): string {
 function ToolExecutionCard({ tool }: { tool: ToolExecution }) {
   const [expanded, setExpanded] = useState(false);
 
-  // Extract target from description (file path, pattern, etc.)
-  const targetMatch = tool.description?.match(/`([^`]+)`/);
-  const target = targetMatch?.[1] || "";
+  // The description IS the target (file path, pattern, command, etc.)
+  // It may or may not have backticks depending on source
+  const target = tool.description?.replace(/`/g, '') || "";
 
   // Get summary and preview
   const summary = getToolSummary(tool.name, tool.output);
-  const outputLines = tool.output?.split('\n') || [];
-  const previewLines = outputLines.slice(0, 4);
-  const hiddenCount = Math.max(0, outputLines.length - 4);
+  const outputLines = tool.output?.split('\n').filter(l => l.trim()) || [];
+  const previewLines = outputLines.slice(0, 3);
+  const hasMoreLines = outputLines.length > 3;
+
+  // Format tool name for display
+  const displayName = tool.name.replace(/_/g, ' ');
 
   return (
-    <>
-      {/* Reasoning before tool call */}
+    <div className="mb-2">
+      {/* Reasoning before tool call - with bot icon */}
       {tool.reasoning && (
-        <div className="text-xs text-muted-foreground/70 pl-1 mb-0.5">
-          {tool.reasoning}
+        <div className="flex gap-3 mb-2">
+          <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center flex-shrink-0">
+            <Bot className="w-4 h-4 text-primary" />
+          </div>
+          <div className="flex-1 py-1">
+            <p className="text-sm text-foreground leading-relaxed">
+              {tool.reasoning}
+            </p>
+          </div>
         </div>
       )}
 
-      {/* Tool header: status + name(target) */}
-      <div
-        className="flex items-center gap-1.5 cursor-pointer hover:opacity-80"
-        onClick={() => tool.output && setExpanded(!expanded)}
-      >
-        {tool.success === undefined ? (
-          <Loader2 className="w-3 h-3 text-primary animate-spin flex-shrink-0" />
-        ) : tool.success ? (
-          <span className="text-primary text-sm">●</span>
-        ) : (
-          <X className="w-3 h-3 text-destructive flex-shrink-0" />
-        )}
+      {/* Tool card with border */}
+      <div className="border border-border/40 rounded-md overflow-hidden bg-muted/10">
+        {/* Tool header: status + name + target */}
+        <div
+          className="flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-muted/20 transition-colors"
+          onClick={() => tool.output && setExpanded(!expanded)}
+        >
+          {tool.success === undefined ? (
+            <Loader2 className="w-3.5 h-3.5 text-primary animate-spin flex-shrink-0" />
+          ) : tool.success ? (
+            <Check className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+          ) : (
+            <X className="w-3.5 h-3.5 text-destructive flex-shrink-0" />
+          )}
 
-        <span className="text-xs font-medium text-primary">
-          {tool.name}
-        </span>
-
-        {target && (
-          <code className="text-xs text-muted-foreground font-mono truncate" title={target}>
-            ({target})
-          </code>
-        )}
-
-        {tool.success === undefined && (
-          <span className="text-[10px] text-muted-foreground ml-auto">
-            Running...
+          <span className="text-xs font-medium text-foreground">
+            {displayName}
           </span>
-        )}
 
-        {tool.output && (
-          <span className="ml-auto text-muted-foreground">
-            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-          </span>
-        )}
-      </div>
+          {target && (
+            <code className="text-xs text-muted-foreground font-mono truncate max-w-[300px]" title={target}>
+              {target}
+            </code>
+          )}
 
-      {/* Summary line */}
-      {tool.success !== undefined && summary && (
-        <div className="text-xs text-muted-foreground/60 pl-4">
-          └ {summary}
-        </div>
-      )}
+          {tool.success === undefined && (
+            <span className="text-[10px] text-muted-foreground ml-auto">
+              Running...
+            </span>
+          )}
 
-      {/* Preview lines (collapsed) */}
-      {tool.output && !expanded && previewLines.length > 0 && (
-        <div className="pl-4 mt-0.5">
-          {previewLines.slice(0, 2).map((line, i) => (
-            <div key={i} className="text-[10px] text-muted-foreground/50 font-mono truncate">
-              {line.slice(0, 80)}
-            </div>
-          ))}
-          {hiddenCount > 2 && (
-            <div className="text-[10px] text-muted-foreground/40">
-              ... +{hiddenCount} lines (click to expand)
-            </div>
+          {tool.output && (
+            <span className="ml-auto text-muted-foreground flex items-center gap-1">
+              {summary && <span className="text-[10px]">{summary}</span>}
+              {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            </span>
           )}
         </div>
-      )}
 
-      {/* Expanded output */}
-      {tool.output && expanded && (
-        <div className="pl-4 mt-1 border-l border-border/30 ml-1">
-          <pre className="text-xs font-mono overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto text-muted-foreground/80">
-            {tool.output}
-          </pre>
-        </div>
-      )}
-    </>
+        {/* Preview lines (collapsed) - always show when there's output */}
+        {tool.output && !expanded && previewLines.length > 0 && (
+          <div className="px-2 py-1.5 border-t border-border/30 bg-background/50">
+            {previewLines.map((line, i) => (
+              <div key={i} className="text-[11px] text-muted-foreground/70 font-mono truncate">
+                {line.slice(0, 100)}
+              </div>
+            ))}
+            {hasMoreLines && (
+              <div className="text-[10px] text-muted-foreground/50 mt-0.5">
+                ... +{outputLines.length - 3} more lines
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Expanded output */}
+        {tool.output && expanded && (
+          <div className="px-2 py-1.5 border-t border-border/30 bg-background/50">
+            <pre className="text-[11px] font-mono overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto text-muted-foreground/80">
+              {tool.output}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Render tools in order (reasoning is attached to each tool via tool.reasoning)
+function ToolsDisplay({ toolExecutions }: { toolExecutions: ToolExecution[] }) {
+  return (
+    <div className="space-y-1">
+      {toolExecutions.map((tool) => (
+        <ToolExecutionCard key={tool.id} tool={tool} />
+      ))}
+    </div>
   );
 }
 
@@ -287,20 +305,16 @@ export function MessageList() {
 
         {/* Streaming message with tool executions */}
         {streamingMessage && (
-          <div className="space-y-3">
-            {/* Tool executions - each shown in a card */}
+          <div className="space-y-2">
+            {/* Render tools with their reasoning (interleaved) */}
             {streamingMessage.toolExecutions.length > 0 && (
-              <div className="space-y-2">
-                {streamingMessage.toolExecutions.map((tool) => (
-                  <ToolExecutionCard key={tool.id} tool={tool} />
-                ))}
-              </div>
+              <ToolsDisplay toolExecutions={streamingMessage.toolExecutions} />
             )}
 
-            {/* Todo list display - shown below tool executions */}
+            {/* Todo list display */}
             {todoList.length > 0 && <TodoListDisplay todos={todoList} />}
 
-            {/* Streaming text content */}
+            {/* Final text content AFTER tools - pass toolExecutions so it can filter redundant reasoning */}
             {streamingMessage.content && (
               <AssistantMessage
                 message={{
@@ -308,6 +322,9 @@ export function MessageList() {
                   role: "assistant",
                   content: streamingMessage.content,
                   timestamp: new Date().toISOString(),
+                  toolExecutions: streamingMessage.toolExecutions.length > 0
+                    ? streamingMessage.toolExecutions
+                    : undefined,
                 }}
                 isStreaming
               />

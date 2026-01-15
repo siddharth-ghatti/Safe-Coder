@@ -133,11 +133,40 @@ function CodeBlock({ language, children }: { language: string; children: string 
   );
 }
 
+// Normalize content for better markdown rendering
+// Adds line breaks between sentences that appear run-together
+function normalizeContent(text: string): string {
+  // Add line breaks after sentences that end with punctuation followed immediately by a capital letter
+  // This handles cases like "First sentence.Second sentence" -> "First sentence.\n\nSecond sentence"
+  return text.replace(/([.!?])([A-Z])/g, '$1\n\n$2');
+}
+
 export function AssistantMessage({ message, isStreaming }: AssistantMessageProps) {
   const contentRef = useRef<HTMLDivElement>(null);
 
-  // Memoize content to prevent unnecessary re-renders
-  const content = useMemo(() => message.content, [message.content]);
+  // Check if tools have reasoning attached (means reasoning is already displayed inline)
+  const hasToolsWithReasoning = useMemo(() => {
+    return message.toolExecutions?.some(t => t.reasoning) ?? false;
+  }, [message.toolExecutions]);
+
+  // Filter content to remove redundant reasoning when tools already show it inline
+  // Keep only content that looks like actual response (has headers, lists, or plan text)
+  const content = useMemo(() => {
+    const normalized = normalizeContent(message.content);
+
+    // If there are tools with reasoning, the content might be redundant reasoning summaries
+    // Only show content that contains actual plan/response markers
+    if (hasToolsWithReasoning && normalized.trim()) {
+      // Check if content has meaningful non-reasoning text (headers, plans, etc.)
+      const hasPlanContent = /^##|^\d+\.|^-\s|^\*\s|Summary|Plan|Recommendation/m.test(normalized);
+      if (!hasPlanContent) {
+        // Content is just reasoning summary - don't show it
+        return "";
+      }
+    }
+
+    return normalized;
+  }, [message.content, hasToolsWithReasoning]);
 
   return (
     <div className={cn(
@@ -154,8 +183,8 @@ export function AssistantMessage({ message, isStreaming }: AssistantMessageProps
         )} />
       </div>
       <div className="flex-1 min-w-0">
-        {/* Show tool executions from message history */}
-        {message.toolExecutions && message.toolExecutions.length > 0 && (
+        {/* Show tool executions from message history (not during streaming - ToolsDisplay handles that) */}
+        {!isStreaming && message.toolExecutions && message.toolExecutions.length > 0 && (
           <ToolExecutionHistory executions={message.toolExecutions} />
         )}
         <div
@@ -194,7 +223,7 @@ export function AssistantMessage({ message, isStreaming }: AssistantMessageProps
               },
               p({ children }) {
                 return (
-                  <p className="text-sm text-foreground mb-3 last:mb-0 leading-relaxed">
+                  <p className="text-sm text-foreground mb-3 last:mb-0 leading-relaxed whitespace-pre-line">
                     {children}
                   </p>
                 );
