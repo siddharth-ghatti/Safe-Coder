@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::approval::{ApprovalMode, ExecutionPlan, PlannedTool, UserMode};
+use crate::utils::truncate_str;
 use crate::checkpoint::{CheckpointManager, DirectoryCheckpointManager};
 use crate::config::Config;
 use crate::context::ContextManager;
@@ -2358,8 +2359,8 @@ impl Session {
                 let cmd = params.get("command")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                if cmd.len() > 40 {
-                    format!("{}...", &cmd[..37])
+                if cmd.chars().count() > 40 {
+                    format!("{}...", truncate_str(cmd, 37))
                 } else {
                     cmd.to_string()
                 }
@@ -2368,8 +2369,8 @@ impl Session {
                 let url = params.get("url")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                if url.len() > 40 {
-                    format!("{}...", &url[..37])
+                if url.chars().count() > 40 {
+                    format!("{}...", truncate_str(url, 37))
                 } else {
                     url.to_string()
                 }

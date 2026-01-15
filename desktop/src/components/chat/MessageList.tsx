@@ -279,6 +279,8 @@ export function MessageList() {
                   {thinkingMessage}
                 </span>
               </div>
+              {/* Show todo list alongside thinking message */}
+              {todoList.length > 0 && <TodoListDisplay todos={todoList} />}
             </div>
           </div>
         )}
@@ -325,7 +327,16 @@ export function MessageList() {
 
         {/* Initial thinking indicator (when no content yet) */}
         {isProcessing && !streamingMessage?.content && !streamingMessage?.toolExecutions?.length && !thinkingMessage && (
-          <ThinkingIndicator />
+          <>
+            <ThinkingIndicator />
+            {/* Show todo list even during initial thinking state */}
+            {todoList.length > 0 && <TodoListDisplay todos={todoList} />}
+          </>
+        )}
+
+        {/* Persistent todo list display - shown when there are todos but no active streaming */}
+        {!isProcessing && !streamingMessage && todoList.length > 0 && (
+          <TodoListDisplay todos={todoList} />
         )}
       </div>
 

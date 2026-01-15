@@ -112,8 +112,8 @@ fn extract_tool_target(tool_name: &str, input: &str) -> String {
         "bash" => {
             // For bash, truncate long commands
             let cmd = input.trim();
-            if cmd.len() > 40 {
-                format!("{}...", &cmd[..37])
+            if cmd.chars().count() > 40 {
+                format!("{}...", truncate_str(cmd, 37))
             } else {
                 cmd.to_string()
             }
@@ -130,6 +130,9 @@ fn capitalize_first(s: &str) -> String {
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }
+
+// Use shared truncate_str from utils
+use crate::utils::truncate_str;
 
 // ============================================================================
 // Main Draw Function
@@ -297,7 +300,12 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
     let status_text = current_task.as_deref().unwrap_or_else(|| app.spinner.current());
 
     // Get todos for inline display during AI processing
-    let todos = app.sidebar.todo_plan.as_ref();
+    // Use inline_todos directly as the source of truth
+    let todos = if !app.inline_todos.is_empty() {
+        Some(&app.inline_todos)
+    } else {
+        None
+    };
 
     // Compute elapsed time for status line
     let elapsed_secs = chrono::Local::now()
@@ -592,8 +600,8 @@ impl MessageLine {
 
                 // Add target in parentheses if not empty (truncate long targets)
                 if !target.is_empty() {
-                    let display_target = if target.len() > 50 {
-                        format!("{}...", &target[..47])
+                    let display_target = if target.chars().count() > 50 {
+                        format!("{}...", truncate_str(&target, 47))
                     } else {
                         target.clone()
                     };
@@ -802,16 +810,29 @@ impl MessageLine {
             }
 
             MessageLine::TodoItem { text, status } => {
-                let (icon, style) = match status.as_str() {
-                    "completed" => ("☒", Style::default().fg(TEXT_DIM)),
-                    "in_progress" => ("☐", Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)),
-                    _ => ("☐", Style::default().fg(TEXT_SECONDARY)),
+                // Claude Code style: bullet point with status suffix
+                let (prefix, text_style, suffix) = match status.as_str() {
+                    "completed" => (
+                        "  [x] ",
+                        Style::default().fg(TEXT_DIM),
+                        " - completed",
+                    ),
+                    "in_progress" => (
+                        "  [>] ",
+                        Style::default().fg(TEXT_PRIMARY),
+                        "",
+                    ),
+                    _ => (
+                        "  [ ] ",
+                        Style::default().fg(TEXT_SECONDARY),
+                        "",
+                    ),
                 };
 
                 Line::from(vec![
-                    Span::styled("  ", Style::default()),
-                    Span::styled(format!("{} ", icon), style),
-                    Span::styled(text.clone(), style),
+                    Span::styled(prefix, text_style),
+                    Span::styled(text.clone(), text_style),
+                    Span::styled(suffix, Style::default().fg(TEXT_DIM)),
                 ])
             }
         }
@@ -829,9 +850,9 @@ fn render_block(
     frame: usize,
     model_display: &str,
     spinner_word: &str,
-    todos: Option<&TodoPlanDisplay>,
-    elapsed_str: &str,
-    total_tokens: usize,
+    todos: Option<&Vec<crate::tools::todo::TodoItem>>,
+    _elapsed_str: &str,
+    _total_tokens: usize,
 ) {
     match &block.block_type {
         BlockType::SystemMessage => {
@@ -876,36 +897,12 @@ fn render_block(
             let has_children = !block.children.is_empty();
             let has_output = !block.output.get_text().is_empty();
 
-            // Inline todo display when AI is processing (like Claude Code)
-            if is_running {
-                if let Some(todo_plan) = todos {
-                    if !todo_plan.items.is_empty() {
-                        lines.push(MessageLine::Empty);
-                        // Status line with current task, elapsed, tokens
-                        let current_task_text = spinner_word.to_string();
-                        lines.push(MessageLine::TodoStatusLine {
-                            current_task: current_task_text,
-                            elapsed: elapsed_str.to_string(),
-                            tokens: total_tokens,
-                        });
-                        // Todo items
-                        for item in &todo_plan.items {
-                            lines.push(MessageLine::TodoItem {
-                                text: item.content.clone(),
-                                status: item.status.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-
+            // Initial thinking state - show Running message with animation
             if is_running && !has_children && !has_output {
-                // Initial thinking state - show current task or rotating word
-                // Task text is already in present continuous form like "Adding feature"
                 let status = if spinner_word.contains(' ') {
-                    spinner_word.to_string() // Task text, no "..." needed
+                    spinner_word.to_string()
                 } else {
-                    format!("{}...", spinner_word) // Spinner word needs "..."
+                    format!("{}...", spinner_word)
                 };
                 lines.push(MessageLine::Running {
                     text: status,
@@ -914,7 +911,6 @@ fn render_block(
             }
 
             // Render children (tools, reasoning)
-            // Find the last running child to only show spinner for that one
             let last_running_idx = block.children.iter().rposition(|c| c.is_running());
             for (i, child) in block.children.iter().enumerate() {
                 let show_spinner = last_running_idx == Some(i);
@@ -922,7 +918,6 @@ fn render_block(
             }
 
             // Show status after tools complete but still processing
-            // This keeps feedback visible between tool calls
             if is_running && has_children && !has_output {
                 let all_children_done = block.children.iter().all(|c| !c.is_running());
                 if all_children_done {
@@ -935,6 +930,23 @@ fn render_block(
                         text: status,
                         spinner_frame: frame,
                     });
+                }
+            }
+
+            // Inline todo list display - shows persistently below the animated status
+            if let Some(todo_items) = todos {
+                if !todo_items.is_empty() {
+                    // Todo items with their status
+                    for item in todo_items {
+                        lines.push(MessageLine::TodoItem {
+                            text: if item.status == "in_progress" && !item.active_form.is_empty() {
+                                item.active_form.clone()
+                            } else {
+                                item.content.clone()
+                            },
+                            status: item.status.clone(),
+                        });
+                    }
                 }
             }
 
@@ -1085,8 +1097,19 @@ fn render_child_block(
 ) {
     match &block.block_type {
         BlockType::AiToolExecution { tool_name } => {
-            // Compact: just one empty line before tool
-            lines.push(MessageLine::Empty);
+            // Show reasoning BEFORE the tool (if any)
+            if let Some(reasoning) = &block.reasoning {
+                for line in reasoning.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        for wrapped in wrap(trimmed, width.saturating_sub(4)) {
+                            lines.push(MessageLine::ReasoningText {
+                                text: wrapped.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
 
             // Tool header - extract meaningful target from input
             let target = extract_tool_target(tool_name, &block.input);
@@ -1414,8 +1437,8 @@ fn render_tool_output_claude_style(
     // Show preview lines (first few lines)
     for (i, line) in output_lines.iter().take(preview_count).enumerate() {
         let line_num = i + 1;
-        let preview_text = if line.len() > 80 {
-            format!("{:>4}  {}...", line_num, &line[..77])
+        let preview_text = if line.chars().count() > 80 {
+            format!("{:>4}  {}...", line_num, truncate_str(line, 77))
         } else {
             format!("{:>4}  {}", line_num, line)
         };
@@ -1542,8 +1565,8 @@ fn shorten_model_name(model: &str) -> String {
         }
     }
     // Default: just return as-is, but limit length
-    if model.len() > 25 {
-        format!("{}...", &model[..22])
+    if model.chars().count() > 25 {
+        format!("{}...", truncate_str(model, 22))
     } else {
         model.to_string()
     }

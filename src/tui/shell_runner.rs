@@ -34,6 +34,9 @@ use crate::planning::PlanEvent;
 use crate::server::types::ServerEvent;
 use crate::unified_planning::{ExecutionMode, UnifiedPlanner};
 
+// Use shared truncate_str from utils
+use crate::utils::truncate_str;
+
 /// Message types for async command execution
 #[derive(Debug)]
 enum CommandUpdate {
@@ -422,37 +425,12 @@ impl ShellTuiRunner {
                             continue;
                         }
 
-                        // Show reasoning inline as streaming output
-                        if let Some(block) = self.app.get_block_mut(&block_id) {
-                            // Format reasoning with a simple prefix
-                            let formatted_lines: Vec<String> = text
-                                .lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .map(|l| format!("> {}", l))
-                                .collect();
-
-                            match &mut block.output {
-                                BlockOutput::Streaming { lines, .. } => {
-                                    // Add reasoning lines to streaming output
-                                    lines.extend(formatted_lines);
-                                }
-                                BlockOutput::Pending => {
-                                    block.output = BlockOutput::Streaming {
-                                        lines: formatted_lines,
-                                        complete: false,
-                                    };
-                                }
-                                _ => {
-                                    // If already has output, prepend reasoning
-                                    let existing = block.output.get_text();
-                                    let reasoning_text = formatted_lines.join("\n");
-                                    block.output = BlockOutput::Streaming {
-                                        lines: vec![reasoning_text, existing],
-                                        complete: false,
-                                    };
-                                }
-                            }
+                        // Buffer reasoning to attach to the next tool (using app state)
+                        let existing = self.app.pending_reasoning.entry(block_id.clone()).or_default();
+                        if !existing.is_empty() {
+                            existing.push('\n');
                         }
+                        existing.push_str(&text);
                         self.app.mark_dirty();
                     }
                     AiUpdate::TextChunk { block_id, text } => {
@@ -529,15 +507,21 @@ impl ShellTuiRunner {
                                 .add_tool_step(tool_name.clone(), description.clone());
                         }
 
+                        // Get pending reasoning for this block (consume it)
+                        let reasoning = self.app.pending_reasoning.remove(&block_id);
+
                         // Get prompt first before mutable borrow
                         let prompt = self.app.current_prompt();
-                        let child = CommandBlock::new(
+                        let mut child = CommandBlock::new(
                             description,
                             BlockType::AiToolExecution {
                                 tool_name: tool_name.clone(),
                             },
                             prompt,
                         );
+                        // Attach reasoning to the tool block
+                        child.reasoning = reasoning;
+
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             parent.add_child(child);
                         }
@@ -755,8 +739,9 @@ impl ShellTuiRunner {
                         self.app.set_doom_loop_prompt_http(prompt_id, message);
                     }
                     AiUpdate::TodoList { block_id, todos } => {
-                        // Update todo list in sidebar
+                        // Update todo list in sidebar AND inline display
                         self.app.sidebar.update_todos(&todos);
+                        self.app.inline_todos = todos;
                         self.app.mark_dirty();
                         let _ = block_id; // Suppress unused warning
                     }
@@ -910,8 +895,8 @@ impl ShellTuiRunner {
                                     if tool_name == &format!("task-{}", task_id))
                             }) {
                                 let status = if success { "✓" } else { "✗" };
-                                let truncated_output = if output.len() > 200 {
-                                    format!("{}...", &output[..200])
+                                let truncated_output = if output.chars().count() > 200 {
+                                    format!("{}...", truncate_str(&output, 200))
                                 } else {
                                     output
                                 };
@@ -2649,8 +2634,8 @@ Keyboard:
                                                 .and_then(|c| c.as_str())
                                                 .map(|cmd| {
                                                     // Truncate long commands
-                                                    if cmd.len() > 60 {
-                                                        format!(": {}...", &cmd[..57])
+                                                    if cmd.chars().count() > 60 {
+                                                        format!(": {}...", truncate_str(cmd, 57))
                                                     } else {
                                                         format!(": {}", cmd)
                                                     }
@@ -2700,8 +2685,8 @@ Keyboard:
                                             // Only show non-empty text that's not too long
                                             let trimmed = text.trim();
                                             if !trimmed.is_empty() {
-                                                let display = if trimmed.len() > 100 {
-                                                    format!("{}...", &trimmed[..97])
+                                                let display = if trimmed.chars().count() > 100 {
+                                                    format!("{}...", truncate_str(trimmed, 97))
                                                 } else {
                                                     trimmed.to_string()
                                                 };

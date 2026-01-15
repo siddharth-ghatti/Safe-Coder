@@ -5,6 +5,9 @@
 use crate::planning::{PlanEvent, PlanStatus, PlanStepStatus, TaskPlan};
 use crate::tools::todo::TodoItem;
 
+// Use shared truncate_str from utils
+use crate::utils::truncate_str;
+
 /// Sidebar visibility and content state
 #[derive(Debug, Clone)]
 pub struct SidebarState {
@@ -111,8 +114,8 @@ impl SidebarState {
         // Fall back to current_task (the user's original query)
         // Truncate long queries and add "Working on:" prefix
         self.current_task.as_ref().map(|task| {
-            let truncated = if task.len() > 40 {
-                format!("{}...", &task[..37])
+            let truncated = if task.chars().count() > 40 {
+                format!("{}...", truncate_str(task, 37))
             } else {
                 task.clone()
             };

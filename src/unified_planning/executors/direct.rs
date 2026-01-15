@@ -7,6 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::llm::{ContentBlock, Message, ToolDefinition};
+use crate::utils::truncate_str;
 use crate::tools::ToolContext;
 use crate::unified_planning::{
     ExecutorContext, PlanExecutor, StepResult, StepResultBuilder, StepTimer, UnifiedPlan,
@@ -509,7 +510,7 @@ IMPORTANT:
                     }
                     "bash" => {
                         let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("?");
-                        let short_cmd = if cmd.len() > 50 { &cmd[..50] } else { cmd };
+                        let short_cmd = if cmd.chars().count() > 50 { format!("{}...", truncate_str(cmd, 47)) } else { cmd.to_string() };
                         format!("💻 Running `{}`", short_cmd)
                     }
                     "list" => {

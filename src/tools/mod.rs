@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::ToolConfig;
+use crate::utils::truncate_str;
 
 /// Agent execution mode - controls which tools are available
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -308,8 +309,8 @@ impl ToolRegistry {
                             message: format!(
                                 "{}: {}",
                                 tool_name,
-                                if output.len() > 200 {
-                                    format!("{}...", &output[..200])
+                                if output.chars().count() > 200 {
+                                    format!("{}...", truncate_str(&output, 197))
                                 } else {
                                     output
                                 }
@@ -325,8 +326,8 @@ impl ToolRegistry {
                         },
                         SubagentEvent::TextChunk { id, text } => SessionEvent::SubagentProgress {
                             id,
-                            message: if text.len() > 300 {
-                                format!("{}...", &text[..300])
+                            message: if text.chars().count() > 300 {
+                                format!("{}...", truncate_str(&text, 297))
                             } else {
                                 text
                             },

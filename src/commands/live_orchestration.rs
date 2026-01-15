@@ -8,6 +8,7 @@ use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use tokio::time::Duration;
 
+use crate::utils::truncate_str;
 use crate::orchestrator::{
     live_orchestration::{LiveOrchestrationManager, OrchestratorEvent},
     streaming_worker::{StreamingConfig, WorkerKind},
@@ -103,7 +104,7 @@ pub enum LiveOrchestrationCommand {
         flush_interval_ms: Option<u64>,
         
         /// Enable/disable progress detection
-        #arg(long)]
+        #[arg(long)]
         progress_detection: Option<bool>,
         
         /// Save configuration
@@ -357,8 +358,8 @@ async fn monitor_live_orchestration(
 
                 for line in last_lines.iter().rev() {
                     if !line.trim().is_empty() {
-                        let truncated = if line.len() > 50 {
-                            format!("{}...", &line[..47])
+                        let truncated = if line.chars().count() > 50 {
+                            format!("{}...", truncate_str(line, 47))
                         } else {
                             line.to_string()
                         };

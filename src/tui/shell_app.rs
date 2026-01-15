@@ -825,6 +825,8 @@ pub struct CommandBlock {
     pub diagnostic_counts: Option<(usize, usize)>,
     /// Version counter for render cache invalidation (increments on content change)
     pub render_version: u32,
+    /// Reasoning text that led to this block (shown before tool calls)
+    pub reasoning: Option<String>,
 }
 
 impl CommandBlock {
@@ -844,6 +846,7 @@ impl CommandBlock {
             diff: None,
             diagnostic_counts: None,
             render_version: 0,
+            reasoning: None,
         }
     }
 
@@ -1055,6 +1058,12 @@ pub struct ShellTuiApp {
     /// Sidebar with plan progress, token usage, and connections
     pub sidebar: SidebarState,
 
+    // === Inline Todo Display ===
+    /// Current todo list for inline display (shown below active tool)
+    pub inline_todos: Vec<crate::tools::todo::TodoItem>,
+    /// Pending reasoning text to attach to next tool (per block_id)
+    pub pending_reasoning: std::collections::HashMap<String, String>,
+
     // === Plan Approval State ===
     /// Whether plan approval popup is visible
     pub plan_approval_visible: bool,
@@ -1164,6 +1173,9 @@ impl ShellTuiApp {
             lsp_initializing: true,
 
             sidebar: SidebarState::with_context_window(context_window),
+
+            inline_todos: Vec::new(),
+            pending_reasoning: std::collections::HashMap::new(),
 
             plan_approval_visible: false,
             pending_approval_plan: None,
