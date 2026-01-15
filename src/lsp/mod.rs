@@ -9,7 +9,7 @@
 mod client;
 mod config;
 mod download;
-mod manager;
+pub mod manager;
 mod protocol;
 
 pub use client::LspClient;

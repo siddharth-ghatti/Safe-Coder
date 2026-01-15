@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::utils::truncate_str;
 use crate::context::{ContextConfig, ContextManager};
 use crate::llm::{
     create_client, create_client_from_subagent_config, ContentBlock, LlmClient, Message,
@@ -456,8 +457,8 @@ impl SubagentExecutor {
                     .get("command")
                     .and_then(|v| v.as_str())
                     .unwrap_or("...");
-                let short_cmd = if cmd.len() > 50 {
-                    format!("{}...", &cmd[..50])
+                let short_cmd = if cmd.chars().count() > 50 {
+                    format!("{}...", truncate_str(cmd, 47))
                 } else {
                     cmd.to_string()
                 };

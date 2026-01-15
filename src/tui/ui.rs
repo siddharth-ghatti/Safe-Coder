@@ -12,7 +12,7 @@ use textwrap::wrap;
 use super::app::App;
 use super::enhanced_ui::draw_enhanced;
 use super::messages::MessageType;
-use super::theme::Theme;
+
 
 // Claude Code inspired color scheme - clean and minimal
 const ACCENT_BLUE: Color = Color::Rgb(100, 149, 237); // Cornflower blue for user

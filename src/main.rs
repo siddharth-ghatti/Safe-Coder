@@ -2,6 +2,7 @@ mod approval;
 mod auth;
 mod cache;
 mod checkpoint;
+pub mod client;
 mod commands;
 mod config;
 mod context;
@@ -17,12 +18,14 @@ mod permissions;
 mod persistence;
 mod planning;
 mod prompts;
+mod server;
 mod session;
 mod shell;
 mod subagent;
 mod tools;
 mod tui;
 mod unified_planning;
+mod utils;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -157,6 +160,9 @@ enum Commands {
         /// Set model
         #[arg(long)]
         model: Option<String>,
+        /// Show model picker
+        #[arg(long, visible_alias = "models")]
+        pick_model: bool,
     },
     /// Login to a provider using device flow authentication
     Login {
@@ -183,6 +189,22 @@ enum Commands {
         #[arg(long)]
         last: bool,
     },
+    /// Start HTTP server for desktop app integration
+    ///
+    /// This starts an HTTP/WebSocket server that exposes safe-coder's
+    /// functionality via REST APIs and real-time event streams.
+    /// The server can be used by the desktop app or other clients.
+    Serve {
+        /// Port to listen on
+        #[arg(long, default_value = "9876")]
+        port: u16,
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Enable CORS for cross-origin requests (for development)
+        #[arg(long)]
+        cors: bool,
+    },
 }
 
 #[tokio::main]
@@ -202,10 +224,31 @@ async fn main() -> Result<()> {
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "safe_coder=info".into()),
+                    .unwrap_or_else(|_| "safe_coder=info,tower_http=info".into()),
             )
             .with(tracing_subscriber::fmt::layer())
             .init();
+    } else {
+        // TUI mode: log to a file so we don't interfere with the terminal
+        // Set SAFE_CODER_LOG=debug to enable debug logging
+        // Default to "info" to capture tool/LLM debug messages
+        let log_level = std::env::var("SAFE_CODER_LOG").unwrap_or_else(|_| "info".to_string());
+        let log_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("safe-coder");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_file = log_dir.join("tui.log");
+
+        if let Ok(file) = std::fs::File::create(&log_file) {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| format!("safe_coder={}", log_level).into()),
+                )
+                .with(tracing_subscriber::fmt::layer().with_writer(std::sync::Mutex::new(file)).with_ansi(false))
+                .init();
+            // Note: TUI log file is at ~/.cache/safe-coder/tui.log
+        }
     }
 
     match cli.command.unwrap_or(Commands::Shell {
@@ -258,6 +301,7 @@ async fn main() -> Result<()> {
             show,
             api_key,
             model,
+            pick_model: _, // Model picker is only for TUI, ignore here
         } => {
             handle_config(show, api_key, model)?;
         }
@@ -273,9 +317,24 @@ async fn main() -> Result<()> {
         Commands::Resume { session_id, last } => {
             handle_resume(session_id, last).await?;
         }
+        Commands::Serve { port, host, cors } => {
+            run_server(port, host, cors).await?;
+        }
     }
 
     Ok(())
+}
+
+/// Run the HTTP server for desktop app integration
+async fn run_server(port: u16, host: String, cors: bool) -> Result<()> {
+    // Tracing is already initialized in main() for non-TUI modes
+    let config = server::ServerConfig {
+        port,
+        host,
+        cors_enabled: cors,
+    };
+
+    server::start_server(config).await
 }
 
 async fn run_chat(project_path: PathBuf, use_tui: bool, demo: bool, mode: String) -> Result<()> {

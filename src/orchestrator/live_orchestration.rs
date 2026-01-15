@@ -10,6 +10,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{Duration, Instant};
 
+use crate::utils::truncate_str;
+
 use crate::orchestrator::{
     streaming_worker::{StreamingWorker, WorkerStreamEvent, StreamingConfig, WorkerKind},
     Task, TaskPlan, WorkerStatus,
@@ -492,8 +494,8 @@ impl LiveDisplayManager {
 
             for line in recent_lines.iter().rev() {
                 if line.trim().len() > 0 {
-                    let truncated = if line.len() > 60 {
-                        format!("{}...", &line[..57])
+                    let truncated = if line.chars().count() > 60 {
+                        format!("{}...", truncate_str(line, 57))
                     } else {
                         line.to_string()
                     };

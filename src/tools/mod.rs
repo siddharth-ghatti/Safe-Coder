@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::config::ToolConfig;
+use crate::utils::truncate_str;
 
 /// Agent execution mode - controls which tools are available
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,13 +24,14 @@ impl AgentMode {
     pub fn enabled_tools(&self) -> &'static [&'static str] {
         match self {
             AgentMode::Plan => &[
-                "read_file", // Read files
-                "list_file", // List directories
-                "glob",      // Find files by pattern
-                "grep",      // Search file contents
-                "ast_grep",  // AST-based code search
-                "webfetch",  // Fetch web content
-                "todoread",  // Read task list
+                "read_file",   // Read files
+                "list_file",   // List directories
+                "glob",        // Find files by pattern
+                "grep",        // Search file contents
+                "ast_grep",    // AST-based code search
+                "code_search", // Advanced multi-pattern code search
+                "webfetch",    // Fetch web content
+                "todoread",    // Read task list
             ],
             AgentMode::Build => &[
                 "read_file",
@@ -39,6 +41,7 @@ impl AgentMode {
                 "glob",
                 "grep",
                 "ast_grep",
+                "code_search",
                 "bash",
                 "webfetch",
                 "todowrite",
@@ -90,6 +93,8 @@ impl fmt::Display for AgentMode {
 pub mod ast_grep;
 pub mod bash;
 pub mod build_config;
+pub mod code_search;
+
 pub mod edit;
 pub mod glob;
 pub mod grep;
@@ -104,6 +109,7 @@ pub mod git;
 pub use ast_grep::{patterns, search_file, AstGrepParams, AstGrepTool, AstLanguage, AstMatch};
 pub use bash::BashTool;
 pub use build_config::BuildConfigTool;
+pub use code_search::CodeSearchTool;
 pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
@@ -197,6 +203,7 @@ impl ToolRegistry {
         registry.register(Box::new(GlobTool));
         registry.register(Box::new(GrepTool));
         registry.register(Box::new(AstGrepTool));
+        registry.register(Box::new(CodeSearchTool));
         // Shell execution
         registry.register(Box::new(BashTool));
         // Web access
@@ -214,7 +221,7 @@ impl ToolRegistry {
     /// Initialize the registry with subagent support
     /// Optionally accepts a session event sender for live streaming of subagent output
     pub async fn with_subagent_support(
-        mut self,
+        self,
         config: crate::config::Config,
         project_path: std::path::PathBuf,
     ) -> Self {
@@ -251,6 +258,7 @@ impl ToolRegistry {
         self.register(Box::new(GlobTool));
         self.register(Box::new(GrepTool));
         self.register(Box::new(AstGrepTool));
+        self.register(Box::new(CodeSearchTool));
         // Shell execution
         self.register(Box::new(BashTool));
         // Web access
@@ -301,8 +309,8 @@ impl ToolRegistry {
                             message: format!(
                                 "{}: {}",
                                 tool_name,
-                                if output.len() > 200 {
-                                    format!("{}...", &output[..200])
+                                if output.chars().count() > 200 {
+                                    format!("{}...", truncate_str(&output, 197))
                                 } else {
                                     output
                                 }
@@ -318,8 +326,8 @@ impl ToolRegistry {
                         },
                         SubagentEvent::TextChunk { id, text } => SessionEvent::SubagentProgress {
                             id,
-                            message: if text.len() > 300 {
-                                format!("{}...", &text[..300])
+                            message: if text.chars().count() > 300 {
+                                format!("{}...", truncate_str(&text, 297))
                             } else {
                                 text
                             },

@@ -221,32 +221,21 @@ impl Tool for TodoReadTool {
         }
 
         let mut output = Vec::new();
-        output.push(format!("📋 Todo List ({} items):", todo_list.len()));
+        output.push(format!("Todo List ({} items):", todo_list.len()));
         output.push("".to_string());
 
         for (idx, todo) in todo_list.iter().enumerate() {
             let status_icon = match todo.status.as_str() {
-                "completed" => "✅",
-                "in_progress" => "🔄",
-                "pending" => "⬜",
-                _ => "❓",
-            };
-
-            let priority_str = match todo.priority {
-                1 => "🔴",
-                2 => "🟠",
-                3 => "🟡",
-                4 => "🟢",
-                5 => "⚪",
-                _ => "⚪",
+                "completed" => "[x]",
+                "in_progress" => "[>]",
+                "pending" => "[ ]",
+                _ => "[?]",
             };
 
             output.push(format!(
-                "{}. {} {} [P{}] {}",
+                "{}. {} {}",
                 idx + 1,
                 status_icon,
-                priority_str,
-                todo.priority,
                 todo.content
             ));
         }

@@ -17,7 +17,7 @@ path = "src/lib.rs"
 
 [dependencies]
 tokio = { version = "1.41", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -43,6 +43,7 @@ textwrap = "0.16"
 pulldown-cmark = "0.13"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 glob = "0.3"
+walkdir = "2.5"
 regex = "1.10"
 grep = "0.3"
 ignore = "0.4"
@@ -67,6 +68,16 @@ tree-sitter-go = "0.23"
 atty = "0.2"
 arboard = { version = "3.4", features = ["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
+# HTTP Server (for desktop app)
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
+utoipa = { version = "4", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }
+portable-pty = "0.8"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

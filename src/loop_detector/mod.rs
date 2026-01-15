@@ -2,9 +2,13 @@
 //!
 //! Detects when the AI is stuck in a loop, repeatedly calling the same tool
 //! with the same parameters. This prevents infinite retry loops and wasted tokens.
+//!
+//! Also tracks error TYPES - if the same error pattern keeps occurring even with
+//! different fix attempts, we detect that as a loop.
 
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
+use regex::Regex;
 
 /// Action to take when a doom loop is detected
 #[derive(Debug, Clone)]
@@ -74,12 +78,117 @@ pub struct LoopDetectorConfig {
 impl Default for LoopDetectorConfig {
     fn default() -> Self {
         Self {
-            max_history: 20,
-            warn_threshold: 2,  // Warn on 2nd repeat (3 total)
-            ask_threshold: 3,   // Ask on 3rd repeat (4 total)
-            block_threshold: 5, // Block on 5th repeat (6 total)
+            max_history: 15,     // Smaller window for faster detection
+            warn_threshold: 1,   // Warn on 1st repeat (2 total)
+            ask_threshold: 2,    // Ask on 2nd repeat (3 total) - more aggressive
+            block_threshold: 3,  // Block on 3rd repeat (4 total) - more aggressive
             detect_similar: true,
         }
+    }
+}
+
+/// Represents a build error with extracted type information
+#[derive(Debug, Clone)]
+pub struct ErrorPattern {
+    /// Error code like "E0433", "E0412", etc.
+    pub code: Option<String>,
+    /// Error category: "cannot_find", "type_mismatch", "borrow", "lifetime", etc.
+    pub category: String,
+    /// The specific symbol/type that's problematic (if extractable)
+    pub target: Option<String>,
+    /// Full error message (first line)
+    pub message: String,
+}
+
+impl ErrorPattern {
+    /// Extract error patterns from build output
+    pub fn extract_from_output(output: &str) -> Vec<ErrorPattern> {
+        let mut patterns = Vec::new();
+
+        // Rust error code pattern: error[E0433]
+        let code_re = Regex::new(r"error\[E(\d+)\]").ok();
+
+        // Common error patterns
+        for line in output.lines() {
+            let line_lower = line.to_lowercase();
+
+            // Skip non-error lines
+            if !line_lower.contains("error") {
+                continue;
+            }
+
+            // Extract error code if present
+            let code = code_re.as_ref().and_then(|re| {
+                re.captures(line).map(|c| format!("E{}", &c[1]))
+            });
+
+            // Categorize the error
+            let (category, target) = if line_lower.contains("cannot find") {
+                let target = Self::extract_target(line, &["type", "value", "module", "crate"]);
+                ("cannot_find".to_string(), target)
+            } else if line_lower.contains("not found") {
+                let target = Self::extract_target(line, &["type", "value", "module"]);
+                ("not_found".to_string(), target)
+            } else if line_lower.contains("expected") && line_lower.contains("found") {
+                ("type_mismatch".to_string(), None)
+            } else if line_lower.contains("borrow") {
+                ("borrow_error".to_string(), None)
+            } else if line_lower.contains("lifetime") {
+                ("lifetime_error".to_string(), None)
+            } else if line_lower.contains("missing") {
+                let target = Self::extract_target(line, &["field", "argument", "parameter"]);
+                ("missing".to_string(), target)
+            } else if line_lower.contains("unused") {
+                continue; // Skip warnings
+            } else {
+                ("other".to_string(), None)
+            };
+
+            patterns.push(ErrorPattern {
+                code,
+                category,
+                target,
+                message: line.chars().take(100).collect(),
+            });
+        }
+
+        patterns
+    }
+
+    /// Try to extract the target symbol from an error message
+    fn extract_target(line: &str, keywords: &[&str]) -> Option<String> {
+        // Look for patterns like "cannot find type `Foo`" or "value `bar` not found"
+        let backtick_re = Regex::new(r"`([^`]+)`").ok()?;
+
+        for keyword in keywords {
+            if line.to_lowercase().contains(keyword) {
+                if let Some(caps) = backtick_re.captures(line) {
+                    return Some(caps[1].to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if two error patterns are the same type of error
+    pub fn same_type(&self, other: &ErrorPattern) -> bool {
+        // Same error code is definitely the same error
+        if let (Some(c1), Some(c2)) = (&self.code, &other.code) {
+            if c1 == c2 {
+                return true;
+            }
+        }
+
+        // Same category + same target is the same error
+        if self.category == other.category {
+            if let (Some(t1), Some(t2)) = (&self.target, &other.target) {
+                return t1 == t2;
+            }
+            // Same category without target - might be same error
+            return self.category != "other";
+        }
+
+        false
     }
 }
 
@@ -92,6 +201,10 @@ pub struct LoopDetector {
     consecutive_failures: usize,
     /// Last error message (for similarity detection)
     last_error: Option<String>,
+    /// Track error patterns to detect same-error loops
+    error_history: Vec<ErrorPattern>,
+    /// Count of times each error type has occurred
+    error_type_counts: HashMap<String, usize>,
 }
 
 impl LoopDetector {
@@ -107,7 +220,85 @@ impl LoopDetector {
             config,
             consecutive_failures: 0,
             last_error: None,
+            error_history: Vec::new(),
+            error_type_counts: HashMap::new(),
         }
+    }
+
+    /// Record build errors and check if we're stuck on the same error type
+    /// Returns an action if we detect a same-error loop
+    pub fn record_build_errors(&mut self, build_output: &str) -> Option<DoomLoopAction> {
+        let patterns = ErrorPattern::extract_from_output(build_output);
+
+        if patterns.is_empty() {
+            // No errors - clear error tracking
+            self.error_history.clear();
+            self.error_type_counts.clear();
+            return None;
+        }
+
+        // Check each error pattern
+        for pattern in &patterns {
+            // Create a key for this error type
+            let key = if let Some(code) = &pattern.code {
+                code.clone()
+            } else if let Some(target) = &pattern.target {
+                format!("{}:{}", pattern.category, target)
+            } else {
+                pattern.category.clone()
+            };
+
+            // Increment count
+            let count = self.error_type_counts.entry(key.clone()).or_insert(0);
+            *count += 1;
+
+            // Check if we've seen this error type too many times
+            if *count >= 3 {
+                return Some(DoomLoopAction::AskUser {
+                    message: format!(
+                        "Same error type '{}' has occurred {} times. The fix attempts aren't working.\n\
+                         Error: {}\n\n\
+                         The AI should try a different approach. Continue anyway?",
+                        key, count, pattern.message
+                    ),
+                });
+            }
+        }
+
+        // Store in history
+        self.error_history.extend(patterns);
+
+        // Keep history bounded
+        if self.error_history.len() > 20 {
+            self.error_history.drain(0..10);
+        }
+
+        None
+    }
+
+    /// Clear error tracking (call when build succeeds)
+    pub fn clear_error_tracking(&mut self) {
+        self.error_history.clear();
+        self.error_type_counts.clear();
+    }
+
+    /// Get a summary of repeated errors for display
+    pub fn get_error_summary(&self) -> Option<String> {
+        let repeated: Vec<_> = self.error_type_counts
+            .iter()
+            .filter(|(_, count)| **count >= 2)
+            .collect();
+
+        if repeated.is_empty() {
+            return None;
+        }
+
+        let summary: Vec<String> = repeated
+            .iter()
+            .map(|(key, count)| format!("{}: {}x", key, count))
+            .collect();
+
+        Some(format!("Repeated errors: {}", summary.join(", ")))
     }
 
     /// Check if a tool call would create a doom loop
@@ -199,6 +390,8 @@ impl LoopDetector {
         self.recent_calls.clear();
         self.consecutive_failures = 0;
         self.last_error = None;
+        self.error_history.clear();
+        self.error_type_counts.clear();
     }
 
     /// Get current loop status for display

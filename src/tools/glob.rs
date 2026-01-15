@@ -13,6 +13,13 @@ struct GlobParams {
     /// Optional directory path to search in. Defaults to working directory.
     #[serde(default)]
     path: Option<String>,
+    /// Maximum number of files to return. Defaults to 100.
+    #[serde(default = "default_glob_limit")]
+    limit: usize,
+}
+
+fn default_glob_limit() -> usize {
+    100 // Return at most 100 files to avoid context bloat
 }
 
 pub struct GlobTool;
@@ -40,6 +47,10 @@ impl Tool for GlobTool {
                 "path": {
                     "type": "string",
                     "description": "Optional directory path to search in. Defaults to current working directory."
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of files to return. Defaults to 100."
                 }
             },
             "required": ["pattern"]
@@ -91,9 +102,13 @@ impl Tool for GlobTool {
             return Ok(format!("No files matched pattern: {}", params.pattern));
         }
 
-        // Format output - show relative paths when possible
+        let total_matches = matches.len();
+        let truncated = total_matches > params.limit;
+
+        // Format output - show relative paths when possible, limited by params.limit
         let output: Vec<String> = matches
             .iter()
+            .take(params.limit)
             .map(|(path, _)| {
                 path.strip_prefix(ctx.working_dir)
                     .map(|p| p.to_string_lossy().to_string())
@@ -101,11 +116,22 @@ impl Tool for GlobTool {
             })
             .collect();
 
-        Ok(format!(
-            "Found {} files matching '{}':\n{}",
-            output.len(),
-            params.pattern,
-            output.join("\n")
-        ))
+        if truncated {
+            Ok(format!(
+                "Found {} files matching '{}' (showing first {}):\n{}\n\n[{} more files not shown - use a more specific pattern]",
+                total_matches,
+                params.pattern,
+                params.limit,
+                output.join("\n"),
+                total_matches - params.limit
+            ))
+        } else {
+            Ok(format!(
+                "Found {} files matching '{}':\n{}",
+                output.len(),
+                params.pattern,
+                output.join("\n")
+            ))
+        }
     }
 }

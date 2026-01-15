@@ -4,6 +4,7 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use crate::orchestrator::{Task, TaskPlan, TaskStatus, WorkerKind};
+use crate::utils::truncate_str;
 
 /// The planner analyzes user requests and creates execution plans
 pub struct Planner {
@@ -148,8 +149,8 @@ impl Planner {
             .next()
             .unwrap_or(part);
         
-        if first_sentence.len() > 100 {
-            format!("{}...", &first_sentence[..97])
+        if first_sentence.chars().count() > 100 {
+            format!("{}...", truncate_str(first_sentence, 97))
         } else {
             first_sentence.to_string()
         }
@@ -227,7 +228,7 @@ impl Planner {
         let mut summary = format!(
             "Plan to address: \"{}\"\n\n\
              Breaking down into {} task(s):\n",
-            if request.len() > 100 { format!("{}...", &request[..97]) } else { request.to_string() },
+            if request.chars().count() > 100 { format!("{}...", truncate_str(request, 97)) } else { request.to_string() },
             task_count
         );
         

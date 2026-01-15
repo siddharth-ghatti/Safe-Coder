@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::approval::{ApprovalMode, ExecutionPlan, PlannedTool, UserMode};
+use crate::utils::truncate_str;
 use crate::checkpoint::{CheckpointManager, DirectoryCheckpointManager};
 use crate::config::Config;
 use crate::context::ContextManager;
@@ -18,13 +19,43 @@ use crate::mcp::McpManager;
 use crate::memory::MemoryManager;
 use crate::permissions::PermissionManager;
 use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
-use crate::planning::{PlanEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan};
+use crate::unified_planning::create_runner;
+use crate::planning::{PlanEvent, PlanStatus, PlanStep, TaskPlan};
 use crate::prompts;
 use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 // Unified planning imports (reserved for future use)
 // use crate::unified_planning::{ExecutionMode as UnifiedExecutionMode, UnifiedPlanner, PlanEvent as UnifiedPlanEvent};
 // use crate::unified_planning::integration::create_runner;
+
+/// Maximum characters for tool result content before truncation
+/// This prevents context bloat from large tool outputs
+const MAX_TOOL_RESULT_CHARS: usize = 8000;
+
+/// Truncate tool result to prevent context bloat
+fn truncate_tool_result(result: String) -> String {
+    if result.len() <= MAX_TOOL_RESULT_CHARS {
+        return result;
+    }
+
+    // Find a valid UTF-8 character boundary at or before MAX_TOOL_RESULT_CHARS
+    let mut safe_limit = MAX_TOOL_RESULT_CHARS;
+    while safe_limit > 0 && !result.is_char_boundary(safe_limit) {
+        safe_limit -= 1;
+    }
+
+    // Find a good truncation point (newline near the limit)
+    let truncate_at = result[..safe_limit]
+        .rfind('\n')
+        .unwrap_or(safe_limit);
+
+    format!(
+        "{}\n\n[Output truncated: {} chars total, showing first {}]",
+        &result[..truncate_at],
+        result.len(),
+        truncate_at
+    )
+}
 
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
@@ -94,6 +125,17 @@ pub enum SessionEvent {
     CompactionWarning {
         message: String,
         compaction_count: usize,
+    },
+    /// Doom loop detected - asking user whether to continue
+    /// The sender is used to receive the user's response (true = continue, false = stop)
+    DoomLoopPrompt {
+        prompt_id: String,
+        message: String,
+        response_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    },
+    /// Todo list was updated
+    TodoList {
+        todos: Vec<crate::tools::todo::TodoItem>,
     },
 }
 
@@ -265,6 +307,12 @@ impl Session {
         tracing::info!("Agent mode cycled to: {}", self.agent_mode);
     }
 
+    /// Reset the loop detector (used when user chooses to continue after doom loop detection)
+    pub fn reset_loop_detector(&mut self) {
+        self.loop_detector.reset();
+        tracing::info!("Loop detector reset by user");
+    }
+
     /// Apply a permission preset (safe, dev, full, yolo)
     pub fn apply_permission_preset(&mut self, preset: &str) {
         self.permission_manager.apply_preset(preset);
@@ -305,6 +353,99 @@ impl Session {
     /// Get current messages
     pub fn get_messages(&self) -> &[Message] {
         &self.messages
+    }
+
+    /// Set the event sender for real-time updates (used by HTTP server)
+    pub fn set_event_sender(&mut self, tx: mpsc::UnboundedSender<SessionEvent>) {
+        self.subagent_event_tx = Some(tx);
+    }
+
+    /// Clear the event sender
+    pub fn clear_event_sender(&mut self) {
+        self.subagent_event_tx = None;
+    }
+
+    /// Send LLM message with automatic retry on token limit errors
+    /// Will auto-compact context and retry if token limit is exceeded
+    async fn send_llm_with_auto_compact(
+        &mut self,
+        tools: &[ToolDefinition],
+        system_prompt: &str,
+        event_tx: Option<&mpsc::UnboundedSender<SessionEvent>>,
+    ) -> Result<crate::llm::LlmResponse> {
+        const MAX_RETRIES: usize = 3;
+
+        for attempt in 0..MAX_RETRIES {
+            match self.llm_client
+                .send_message_with_system(&self.messages, tools, Some(system_prompt))
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    let error_str = e.to_string().to_lowercase();
+
+                    // Check if it's a token limit error
+                    let is_token_limit = error_str.contains("token")
+                        && (error_str.contains("exceed")
+                            || error_str.contains("limit")
+                            || error_str.contains("max_prompt_tokens"));
+
+                    if is_token_limit && attempt < MAX_RETRIES - 1 {
+                        // Auto-compact and retry
+                        tracing::warn!(
+                            "Token limit exceeded (attempt {}), auto-compacting context...",
+                            attempt + 1
+                        );
+
+                        // Force aggressive compaction
+                        let (compacted, result) = self
+                            .context_manager
+                            .compact(std::mem::take(&mut self.messages));
+
+                        self.messages = compacted;
+
+                        if result.did_compact() {
+                            let msg = format!(
+                                "Context auto-compacted: {} (attempt {})",
+                                result.summary, attempt + 1
+                            );
+                            tracing::info!("{}", msg);
+
+                            if let Some(tx) = event_tx {
+                                let _ = tx.send(SessionEvent::TextChunk(
+                                    format!("\n[Context auto-compacted: {}]\n", result.summary)
+                                ));
+                                let _ = tx.send(SessionEvent::ContextCompressed {
+                                    tokens_compressed: result.tokens_saved(),
+                                });
+                            }
+                        } else {
+                            // Compaction didn't help, try removing more messages
+                            if self.messages.len() > 4 {
+                                // Remove older messages (keep system + last 3)
+                                let remove_count = self.messages.len() / 2;
+                                self.messages.drain(1..=remove_count);
+
+                                if let Some(tx) = event_tx {
+                                    let _ = tx.send(SessionEvent::TextChunk(
+                                        format!("\n[Removed {} older messages due to token limit]\n", remove_count)
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Small delay before retry
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+
+                    // Not a token limit error or max retries reached
+                    return Err(e);
+                }
+            }
+        }
+
+        anyhow::bail!("Failed to send message after {} retries due to token limits", MAX_RETRIES)
     }
 
     /// Set the current plan
@@ -459,7 +600,7 @@ impl Session {
     /// 4. Return summary
     pub async fn send_message_with_planning(&mut self, request: String) -> Result<String> {
         use crate::unified_planning::{
-            integration::{create_runner, create_runner_with_approval},
+
             ExecutionMode as UnifiedExecutionMode, UnifiedPlanner,
         };
 
@@ -538,7 +679,7 @@ impl Session {
         // Execute plan and get events
         let (initial_plan, mut events) = runner.execute(plan).await?;
         let mut final_summary = initial_plan.summary();
-        let mut final_success = false;
+        let mut _final_success = false;
 
         // Forward plan events to session events and await completion
         while let Some(event) = events.recv().await {
@@ -549,7 +690,7 @@ impl Session {
             match &event {
                 UPEvent::PlanCompleted { summary, success, .. } => {
                     final_summary = summary.clone();
-                    final_success = *success;
+                    _final_success = *success;
                     // Update the stored plan's status
                     if let Some(ref mut plan) = self.current_plan {
                         plan.status = if *success {
@@ -765,21 +906,34 @@ impl Session {
         // Smart fallback: Only try unified planning for appropriate requests
         if self.should_use_planning(&user_message) {
             tracing::debug!("Using unified planning for task-oriented request");
-            
-            // Try unified planning path (creates internal event channel)
-            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-            let prev_tx = self.subagent_event_tx.clone();
-            self.subagent_event_tx = Some(event_tx);
-            let planning_result = self.send_message_with_planning(user_message.clone()).await;
-            self.subagent_event_tx = prev_tx;
 
-            // Drain events (no UI to send them to in this method)
-            while event_rx.try_recv().is_ok() {}
+            // Try unified planning path
+            // If we have an external event sender (from HTTP server), use it directly
+            // Otherwise create an internal channel and drain events
+            let has_external_sender = self.subagent_event_tx.is_some();
+
+            let mut internal_rx = if has_external_sender {
+                // Use existing external sender - events will be forwarded to HTTP clients
+                None
+            } else {
+                // No external sender, create internal channel (will drain events)
+                let (event_tx, event_rx) = mpsc::unbounded_channel();
+                self.subagent_event_tx = Some(event_tx);
+                Some(event_rx)
+            };
+
+            let planning_result = self.send_message_with_planning(user_message.clone()).await;
+
+            // Clean up internal channel if we created one
+            if let Some(ref mut rx) = internal_rx {
+                while rx.try_recv().is_ok() {}
+                self.subagent_event_tx = None;
+            }
 
             if let Ok(resp) = planning_result {
                 return Ok(resp);
             }
-            
+
             tracing::debug!("Planning failed, falling back to direct execution");
         } else {
             tracing::debug!("Using direct execution for simple query");
@@ -823,11 +977,51 @@ impl Session {
                 })
                 .collect();
 
-            // Send to LLM with hierarchical system prompt
-            let llm_response = self
+            // Send to LLM with hierarchical system prompt, with auto-retry on token limit errors
+            tracing::info!("[LLM DEBUG] Sending to LLM, msgs: {}", self.messages.len());
+            let llm_start = std::time::Instant::now();
+            let llm_response = match self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
-                .await?;
+                .await
+            {
+                Ok(resp) => {
+                    tracing::info!("[LLM DEBUG] LLM responded in {:?}", llm_start.elapsed());
+                    resp
+                }
+                Err(e) => {
+                    let error_str = e.to_string().to_lowercase();
+                    let is_token_limit = error_str.contains("token")
+                        && (error_str.contains("exceed")
+                            || error_str.contains("limit")
+                            || error_str.contains("max_prompt_tokens"));
+
+                    if is_token_limit {
+                        // Auto-compact and retry
+                        tracing::warn!("Token limit exceeded, auto-compacting context...");
+                        let (compacted, result) = self
+                            .context_manager
+                            .compact(std::mem::take(&mut self.messages));
+                        self.messages = compacted;
+
+                        if result.did_compact() {
+                            tracing::info!("Context auto-compacted: {}", result.summary);
+                        } else if self.messages.len() > 4 {
+                            // Remove half of older messages
+                            let remove_count = self.messages.len() / 2;
+                            self.messages.drain(1..=remove_count);
+                            tracing::info!("Removed {} older messages due to token limit", remove_count);
+                        }
+
+                        // Retry once after compaction
+                        self.llm_client
+                            .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                            .await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             let assistant_message = llm_response.message;
 
@@ -858,9 +1052,13 @@ impl Session {
                 .iter()
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
-            // Extract text from response
+            // Extract text from response and emit events
             for block in &assistant_message.content {
                 if let ContentBlock::Text { text } = block {
+                    // Emit text chunk event for real-time streaming
+                    if let Some(ref tx) = self.subagent_event_tx {
+                        let _ = tx.send(SessionEvent::TextChunk(text.clone()));
+                    }
                     response_text.push_str(text);
                     response_text.push('\n');
                 }
@@ -984,8 +1182,13 @@ impl Session {
                             });
                             continue;
                         }
-                        DoomLoopAction::Warn { message } | DoomLoopAction::AskUser { message } => {
+                        DoomLoopAction::Warn { message } => {
                             tracing::warn!("{}", message);
+                        }
+                        DoomLoopAction::AskUser { message } => {
+                            // In non-streaming mode, just warn and continue
+                            // (blocking behavior is in send_message_with_progress)
+                            tracing::warn!("Doom loop detected: {}", message);
                         }
                         DoomLoopAction::Continue => {}
                     }
@@ -997,7 +1200,9 @@ impl Session {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
                             Ok(output) => {
                                 tools_executed.push(name.clone());
-                                (output, true)
+                                // Check if bash command failed (has non-zero exit status)
+                                let cmd_success = !output.contains("[Exit status:");
+                                (output, cmd_success)
                             }
                             Err(e) => (format!("Error: {}", e), false),
                         },
@@ -1014,7 +1219,7 @@ impl Session {
 
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: result,
+                        content: truncate_tool_result(result),
                     });
                 }
             }
@@ -1046,7 +1251,7 @@ impl Session {
                     if let Some(build_errors) = self.verify_build().await {
                         final_results.push(ContentBlock::Text {
                             text: format!(
-                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
+                                "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
                                 build_errors
                             ),
                         });
@@ -1057,7 +1262,7 @@ impl Session {
                     if !diagnostics_summary.is_empty() {
                         final_results.push(ContentBlock::Text {
                             text: format!(
-                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                "\n\n[LSP ERRORS - FIX NOW]\n{}\n\nFix these issues immediately. Continue working until all errors are resolved.",
                                 diagnostics_summary
                             ),
                         });
@@ -1185,10 +1390,46 @@ impl Session {
 
             // Run exploration loop until LLM produces a plan
             loop {
-                let llm_response = self
+                let llm_response = match self
                     .llm_client
                     .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
-                    .await?;
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let error_str = e.to_string().to_lowercase();
+                        let is_token_limit = error_str.contains("token")
+                            && (error_str.contains("exceed")
+                                || error_str.contains("limit")
+                                || error_str.contains("max_prompt_tokens"));
+
+                        if is_token_limit {
+                            // Auto-compact and retry
+                            let _ = event_tx.send(SessionEvent::TextChunk(
+                                "\n[Auto-compacting context due to token limit...]\n".to_string(),
+                            ));
+                            let (compacted, result) = self
+                                .context_manager
+                                .compact(std::mem::take(&mut self.messages));
+                            self.messages = compacted;
+
+                            if result.did_compact() {
+                                let _ = event_tx.send(SessionEvent::ContextCompressed {
+                                    tokens_compressed: result.tokens_saved(),
+                                });
+                            } else if self.messages.len() > 4 {
+                                let remove_count = self.messages.len() / 2;
+                                self.messages.drain(1..=remove_count);
+                            }
+
+                            self.llm_client
+                                .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                                .await?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
 
                 let assistant_message = llm_response.message;
 
@@ -1198,12 +1439,41 @@ impl Session {
                     .iter()
                     .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
-                // Stream text to UI
+                // Collect reasoning sentences to send interleaved with tool calls
+                let mut reasoning_sentences: Vec<String> = Vec::new();
                 for block in &assistant_message.content {
                     if let ContentBlock::Text { text } = block {
                         response_text.push_str(text);
                         response_text.push('\n');
-                        let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                        if has_tool_calls && !text.trim().is_empty() {
+                            // Split reasoning by sentences for interleaved display
+                            for line in text.split('\n') {
+                                if line.trim().is_empty() {
+                                    continue;
+                                }
+                                // Split by sentence boundaries (". " followed by capital letter)
+                                let mut current = String::new();
+                                let chars: Vec<char> = line.chars().collect();
+                                for i in 0..chars.len() {
+                                    current.push(chars[i]);
+                                    if chars[i] == '.' && i + 2 < chars.len()
+                                       && chars[i + 1] == ' '
+                                       && chars[i + 2].is_uppercase() {
+                                        let sentence = current.trim().to_string();
+                                        if !sentence.is_empty() {
+                                            reasoning_sentences.push(sentence);
+                                        }
+                                        current = String::new();
+                                    }
+                                }
+                                let sentence = current.trim().to_string();
+                                if !sentence.is_empty() {
+                                    reasoning_sentences.push(sentence);
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
+                        }
                     }
                 }
 
@@ -1216,9 +1486,18 @@ impl Session {
 
                 // Execute read-only tool calls
                 let mut tool_results = Vec::new();
+                let mut step_index = 0usize;
                 for block in &assistant_message.content {
                     if let ContentBlock::ToolUse { id, name, input } = block {
                         let description = self.describe_tool_action(name, input);
+
+                        // Send reasoning for this tool (if available)
+                        if step_index < reasoning_sentences.len() {
+                            let _ = event_tx.send(SessionEvent::Reasoning(
+                                reasoning_sentences[step_index].clone()
+                            ));
+                        }
+                        step_index += 1;
 
                         // Send proper tool events for vertical rendering
                         let _ = event_tx.send(SessionEvent::ToolStart {
@@ -1229,7 +1508,11 @@ impl Session {
                         let tool_context = ToolContext::new(&self.project_path, &self.config.tools);
                         let (result, success) = if let Some(tool) = self.tool_registry.get_tool(name) {
                             match tool.execute(input.clone(), &tool_context).await {
-                                Ok(r) => (r, true),
+                                Ok(r) => {
+                                    // Check if bash command failed (has non-zero exit status)
+                                    let cmd_success = !r.contains("[Exit status:");
+                                    (r, cmd_success)
+                                }
                                 Err(e) => (format!("Error: {}", e), false),
                             }
                         } else {
@@ -1244,7 +1527,7 @@ impl Session {
 
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
-                            content: result,
+                            content: truncate_tool_result(result),
                         });
                     }
                 }
@@ -1309,11 +1592,52 @@ impl Session {
                 })
                 .collect();
 
-            // Send to LLM with hierarchical system prompt
-            let llm_response = self
+            // Send to LLM with hierarchical system prompt, with auto-retry on token limit errors
+            tracing::info!("[LLM DEBUG] Sending to LLM, msgs: {}", self.messages.len());
+            let llm_start = std::time::Instant::now();
+            let llm_response = match self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
-                .await?;
+                .await
+            {
+                Ok(resp) => {
+                    tracing::info!("[LLM DEBUG] LLM responded in {:?}", llm_start.elapsed());
+                    resp
+                }
+                Err(e) => {
+                    let error_str = e.to_string().to_lowercase();
+                    let is_token_limit = error_str.contains("token")
+                        && (error_str.contains("exceed")
+                            || error_str.contains("limit")
+                            || error_str.contains("max_prompt_tokens"));
+
+                    if is_token_limit {
+                        // Auto-compact and retry
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n[Auto-compacting context due to token limit...]\n".to_string(),
+                        ));
+                        let (compacted, result) = self
+                            .context_manager
+                            .compact(std::mem::take(&mut self.messages));
+                        self.messages = compacted;
+
+                        if result.did_compact() {
+                            let _ = event_tx.send(SessionEvent::ContextCompressed {
+                                tokens_compressed: result.tokens_saved(),
+                            });
+                        } else if self.messages.len() > 4 {
+                            let remove_count = self.messages.len() / 2;
+                            self.messages.drain(1..=remove_count);
+                        }
+
+                        self.llm_client
+                            .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                            .await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             let assistant_message = llm_response.message;
 
@@ -1355,16 +1679,42 @@ impl Session {
                 .iter()
                 .any(|c| matches!(c, ContentBlock::ToolUse { .. }));
 
-            // Extract text from response and send as chunks
-            // If there are tool calls, text is reasoning (explaining what it's about to do)
-            // If no tool calls, text is the final response
+            // Extract text from response
+            // Collect reasoning sentences to send interleaved with tool calls
+            let mut reasoning_sentences: Vec<String> = Vec::new();
             for block in &assistant_message.content {
                 if let ContentBlock::Text { text } = block {
                     response_text.push_str(text);
                     response_text.push('\n');
                     if has_tool_calls && !text.trim().is_empty() {
-                        // This is the LLM's reasoning before executing tools
-                        let _ = event_tx.send(SessionEvent::Reasoning(text.clone()));
+                        // Split reasoning by sentences for interleaved display
+                        // Split on newlines first, then by sentence boundaries
+                        for line in text.split('\n') {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            // Split by sentence boundaries (". " followed by capital letter)
+                            let mut current = String::new();
+                            let chars: Vec<char> = line.chars().collect();
+                            for i in 0..chars.len() {
+                                current.push(chars[i]);
+                                // Check for sentence end: ". " followed by capital letter
+                                if chars[i] == '.' && i + 2 < chars.len()
+                                   && chars[i + 1] == ' '
+                                   && chars[i + 2].is_uppercase() {
+                                    let sentence = current.trim().to_string();
+                                    if !sentence.is_empty() {
+                                        reasoning_sentences.push(sentence);
+                                    }
+                                    current = String::new();
+                                }
+                            }
+                            // Add remaining text as final sentence
+                            let sentence = current.trim().to_string();
+                            if !sentence.is_empty() {
+                                reasoning_sentences.push(sentence);
+                            }
+                        }
                     } else {
                         let _ = event_tx.send(SessionEvent::TextChunk(text.clone()));
                     }
@@ -1513,16 +1863,51 @@ impl Session {
                                 event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
                         }
                         DoomLoopAction::AskUser { message } => {
-                            // For now, treat as warning (full approval would require UI changes)
-                            tracing::warn!("{}", message);
-                            let _ =
-                                event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
+                            tracing::warn!("Doom loop detected, asking user: {}", message);
+
+                            // Create channel for user response
+                            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+                            let prompt_id = uuid::Uuid::new_v4().to_string();
+
+                            // Send prompt to UI
+                            let _ = event_tx.send(SessionEvent::DoomLoopPrompt {
+                                prompt_id: prompt_id.clone(),
+                                message: message.clone(),
+                                response_tx,
+                            });
+
+                            // Wait for user response (with timeout)
+                            let should_continue = tokio::time::timeout(
+                                std::time::Duration::from_secs(300), // 5 minute timeout
+                                response_rx.recv()
+                            ).await.ok().flatten().unwrap_or(false);
+
+                            if !should_continue {
+                                tracing::info!("User chose to stop due to doom loop (prompt_id={})", prompt_id);
+                                tool_results.push(ContentBlock::ToolResult {
+                                    tool_use_id: id.clone(),
+                                    content: "Operation stopped by user due to detected loop pattern.".to_string(),
+                                });
+                                continue;
+                            }
+
+                            // User chose to continue - reset loop detector
+                            self.loop_detector.reset();
+                            tracing::info!("User chose to continue past doom loop (prompt_id={})", prompt_id);
                         }
                         DoomLoopAction::Continue => {}
                     }
 
                     // Generate description for the tool action
                     let description = self.describe_tool_action(name, input);
+
+                    // Send reasoning for this tool (if available)
+                    // Each tool gets one reasoning sentence for interleaved display
+                    if step_index < reasoning_sentences.len() {
+                        let _ = event_tx.send(SessionEvent::Reasoning(
+                            reasoning_sentences[step_index].clone()
+                        ));
+                    }
 
                     // Notify UI that tool is starting
                     let _ = event_tx.send(SessionEvent::ToolStart {
@@ -1584,16 +1969,31 @@ impl Session {
                             .with_session_events(event_tx.clone())
                     };
 
+                    tracing::info!("[TOOL DEBUG] Starting tool execution: {}", name);
+                    let tool_start = std::time::Instant::now();
+
                     let (result, success) = match self.tool_registry.get_tool(name) {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
                             Ok(output) => {
+                                tracing::info!("[TOOL DEBUG] Tool {} completed OK in {:?}, output len: {}",
+                                    name, tool_start.elapsed(), output.len());
                                 tools_executed.push(name.clone());
-                                (output, true)
+                                // Check if bash command failed (has non-zero exit status)
+                                let cmd_success = !output.contains("[Exit status:");
+                                (output, cmd_success)
                             }
-                            Err(e) => (format!("Error: {}", e), false),
+                            Err(e) => {
+                                tracing::error!("[TOOL DEBUG] Tool {} failed in {:?}: {}",
+                                    name, tool_start.elapsed(), e);
+                                (format!("Error: {}", e), false)
+                            },
                         },
-                        None => (format!("Error: Unknown tool '{}'", name), false),
+                        None => {
+                            tracing::error!("[TOOL DEBUG] Unknown tool: {}", name);
+                            (format!("Error: Unknown tool '{}'", name), false)
+                        },
                     };
+                    tracing::info!("[TOOL DEBUG] Tool {} finished, success: {}", name, success);
 
                     // Record tool call for doom loop detection
                     self.loop_detector.record(name, input);
@@ -1605,8 +2005,34 @@ impl Session {
                         if let Some(DoomLoopAction::AskUser { message }) =
                             self.loop_detector.check_failure_loop()
                         {
-                            let _ =
-                                event_tx.send(SessionEvent::TextChunk(format!("\n{}\n", message)));
+                            tracing::warn!("Failure loop detected, asking user: {}", message);
+
+                            // Create channel for user response
+                            let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+                            let prompt_id = uuid::Uuid::new_v4().to_string();
+
+                            // Send prompt to UI
+                            let _ = event_tx.send(SessionEvent::DoomLoopPrompt {
+                                prompt_id: prompt_id.clone(),
+                                message: message.clone(),
+                                response_tx,
+                            });
+
+                            // Wait for user response (with timeout)
+                            let should_continue = tokio::time::timeout(
+                                std::time::Duration::from_secs(300),
+                                response_rx.recv()
+                            ).await.ok().flatten().unwrap_or(false);
+
+                            if !should_continue {
+                                tracing::info!("User chose to stop due to failure loop (prompt_id={})", prompt_id);
+                                // Break out of the loop - session will end
+                                break;
+                            }
+
+                            // User chose to continue - reset loop detector
+                            self.loop_detector.reset();
+                            tracing::info!("User chose to continue past failure loop (prompt_id={})", prompt_id);
                         }
                     }
 
@@ -1620,14 +2046,18 @@ impl Session {
                         };
                         if let Some(path) = input.get(path_key).and_then(|v| v.as_str()) {
                             let full_path = self.project_path.join(path);
+                            tracing::info!("Sending FileDiff event for: {}", path);
 
                             // Send diff event - use empty string for old_content if file is new
                             if let Ok(new_content) = std::fs::read_to_string(&full_path) {
+                                tracing::info!("FileDiff: old_len={}, new_len={}", old_content.as_ref().map(|s| s.len()).unwrap_or(0), new_content.len());
                                 let _ = event_tx.send(SessionEvent::FileDiff {
                                     path: path.to_string(),
                                     old_content: old_content.unwrap_or_default(),
                                     new_content: new_content.clone(),
                                 });
+                            } else {
+                                tracing::warn!("Could not read file for FileDiff: {}", full_path.display());
                             }
 
                             // Notify LSP of file change for diagnostics
@@ -1640,6 +2070,12 @@ impl Session {
                             let (errors, warnings) = self.lsp_manager.get_diagnostic_counts().await;
                             let _ = event_tx.send(SessionEvent::DiagnosticUpdate { errors, warnings });
                         }
+                    }
+
+                    // For todowrite, send todo list update event
+                    if name == "todowrite" && success {
+                        let todos = crate::tools::todo::get_todo_list();
+                        let _ = event_tx.send(SessionEvent::TodoList { todos });
                     }
 
                     // Send tool output
@@ -1669,7 +2105,7 @@ impl Session {
 
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: result,
+                        content: truncate_tool_result(result),
                     });
                 }
             }
@@ -1715,16 +2151,51 @@ impl Session {
                     // Run build verification after file modifications
                     if let Some(build_errors) = self.verify_build().await {
                         has_issues = true;
-                        final_results.push(ContentBlock::Text {
-                            text: format!(
-                                "\n\n--- Build Verification Failed ---\nThe code does not compile. Fix these errors before proceeding:\n{}",
-                                build_errors
-                            ),
-                        });
+
+                        // Track error patterns to detect loops
+                        if let Some(loop_action) = self.loop_detector.record_build_errors(&build_errors) {
+                            // Same error type keeps occurring - add stronger hint to LLM
+                            match loop_action {
+                                DoomLoopAction::AskUser { message: loop_msg } => {
+                                    // Log the loop detection
+                                    let _ = event_tx.send(SessionEvent::TextChunk(
+                                        format!("\n⚠️ {}\n", loop_msg),
+                                    ));
+                                    // Add hint to the LLM to try a different approach
+                                    final_results.push(ContentBlock::Text {
+                                        text: format!(
+                                            "\n\n[BUILD ERRORS - SAME ERROR REPEATING]\n{}\n\n\
+                                            ⚠️ This same error has occurred multiple times. Your previous fixes did not work.\n\
+                                            STOP and THINK: What is the ROOT CAUSE? Try a completely different approach.\n\
+                                            Do NOT repeat the same fix.",
+                                            build_errors
+                                        ),
+                                    });
+                                }
+                                _ => {
+                                    final_results.push(ContentBlock::Text {
+                                        text: format!(
+                                            "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
+                                            build_errors
+                                        ),
+                                    });
+                                }
+                            }
+                        } else {
+                            final_results.push(ContentBlock::Text {
+                                text: format!(
+                                    "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
+                                    build_errors
+                                ),
+                            });
+                        }
 
                         let _ = event_tx.send(SessionEvent::TextChunk(
-                            "\n❌ Build failed - errors detected\n".to_string(),
+                            "\n⚙️ Build errors detected - fixing...\n".to_string(),
                         ));
+                    } else {
+                        // Build succeeded - clear error tracking
+                        self.loop_detector.clear_error_tracking();
                     }
 
                     // Check for LSP diagnostics after file modifications
@@ -1733,13 +2204,13 @@ impl Session {
                         has_issues = true;
                         final_results.push(ContentBlock::Text {
                             text: format!(
-                                "\n\n--- LSP Diagnostics ---\nThe following issues were detected after your changes:\n{}",
+                                "\n\n[LSP ERRORS - FIX NOW]\n{}\n\nFix these issues immediately. Continue working until all errors are resolved.",
                                 diagnostics_summary
                             ),
                         });
 
                         let _ = event_tx.send(SessionEvent::TextChunk(
-                            "\n⚠️ LSP detected issues - see diagnostics above\n".to_string(),
+                            "\n⚙️ LSP issues detected - fixing...\n".to_string(),
                         ));
                     }
 
@@ -1878,22 +2349,43 @@ impl Session {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let combined = format!("{}{}", stdout, stderr);
 
-            // Only return if there's meaningful output
-            if combined.trim().is_empty() {
-                Some("Build failed with no output".to_string())
+            // Filter to only include actual errors, not warnings
+            // For Rust: look for "error[" or "error:" patterns
+            // For TypeScript/JS: look for "error TS" or "Error:"
+            let error_lines: Vec<&str> = combined
+                .lines()
+                .filter(|line| {
+                    let l = line.to_lowercase();
+                    // Include lines with actual errors
+                    l.contains("error[") ||      // Rust error codes
+                    l.contains("error:") ||       // Generic errors
+                    l.contains("error ts") ||     // TypeScript
+                    l.contains("cannot find") ||  // Common error pattern
+                    l.contains("not found") ||    // Common error pattern
+                    l.contains("failed to") ||    // Build failures
+                    l.contains("aborting due")    // Rust abort message
+                })
+                .take(30) // Limit to 30 error lines
+                .collect();
+
+            // Only return if there are actual errors
+            if error_lines.is_empty() {
+                // Build failed but no error lines found - might be a different issue
+                None // Don't report warnings-only failures
             } else {
+                let error_output = error_lines.join("\n");
                 // Limit output to configured max size
-                let truncated = if combined.len() > max_output {
-                    format!("{}...\n[output truncated]", &combined[..max_output])
+                let truncated = if error_output.len() > max_output {
+                    format!("{}...\n[output truncated]", &error_output[..max_output])
                 } else {
-                    combined.to_string()
+                    error_output
                 };
                 Some(truncated)
             }
         }
     }
 
-    /// Generate a human-readable description of a tool action with parameters
+    /// Generate a compact description of a tool action (no emojis)
     fn describe_tool_action(&self, name: &str, params: &serde_json::Value) -> String {
         match name {
             "read_file" => {
@@ -1901,94 +2393,68 @@ impl Session {
                     .or_else(|| params.get("path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                format!("📖 Read `{}`", path)
+                path.to_string()
             }
             "write_file" => {
                 let path = params.get("file_path")
                     .or_else(|| params.get("path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let lines = params.get("content")
-                    .and_then(|v| v.as_str())
-                    .map(|c| c.lines().count())
-                    .unwrap_or(0);
-                format!("📝 Write `{}` ({} lines)", path, lines)
+                path.to_string()
             }
             "edit_file" => {
                 let path = params.get("file_path")
                     .or_else(|| params.get("path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let old = params.get("old_string")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                let new = params.get("new_string")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                format!("✏️ Edit `{}` ({} → {} chars)", path, old, new)
+                path.to_string()
             }
             "glob" => {
                 let pattern = params.get("pattern")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let path = params.get("path")
-                    .and_then(|v| v.as_str());
-                if let Some(p) = path {
-                    format!("🔍 Glob `{}` in `{}`", pattern, p)
-                } else {
-                    format!("🔍 Glob `{}`", pattern)
-                }
+                pattern.to_string()
             }
-            "grep" => {
+            "grep" | "code_search" => {
                 let pattern = params.get("pattern")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let path = params.get("path")
-                    .and_then(|v| v.as_str());
-                if let Some(p) = path {
-                    format!("🔎 Grep `{}` in `{}`", pattern, p)
-                } else {
-                    format!("🔎 Grep `{}`", pattern)
-                }
+                format!("\"{}\"", pattern)
             }
             "list" => {
                 let path = params.get("path")
                     .and_then(|v| v.as_str())
                     .unwrap_or(".");
-                format!("📁 List `{}`", path)
+                path.to_string()
             }
             "bash" => {
                 let cmd = params.get("command")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let cmd_preview = if cmd.len() > 50 {
-                    format!("{}...", &cmd[..50])
+                if cmd.chars().count() > 40 {
+                    format!("{}...", truncate_str(cmd, 37))
                 } else {
                     cmd.to_string()
-                };
-                format!("💻 Run `{}`", cmd_preview)
+                }
             }
             "webfetch" => {
                 let url = params.get("url")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let url_short = if url.len() > 40 {
-                    format!("{}...", &url[..40])
+                if url.chars().count() > 40 {
+                    format!("{}...", truncate_str(url, 37))
                 } else {
                     url.to_string()
-                };
-                format!("🌐 Fetch `{}`", url_short)
+                }
             }
             "todowrite" => {
                 let count = params.get("todos")
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                format!("📋 Update todos ({} items)", count)
+                format!("{} items", count)
             }
-            _ => format!("🔧 {}", name),
+            _ => name.to_string(),
         }
     }
 

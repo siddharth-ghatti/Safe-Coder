@@ -13,7 +13,7 @@ use crossterm::{
 };
 use futures::FutureExt;
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -24,13 +24,18 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp, SlashCommand};
 use super::shell_ui;
+use crate::client::{SafeCoderClient, ServerManager, DEFAULT_PORT};
 use crate::config::Config;
 use crate::llm::create_client;
-use crate::lsp::{default_lsp_configs, LspClient, LspManager};
+use crate::lsp::{LspManager, default_lsp_configs};
+use crate::auth::run_device_flow;
 use crate::orchestrator::TaskPlan;
 use crate::planning::PlanEvent;
-use crate::session::{Session, SessionEvent};
+use crate::server::types::ServerEvent;
 use crate::unified_planning::{ExecutionMode, UnifiedPlanner};
+
+// Use shared truncate_str from utils
+use crate::utils::truncate_str;
 
 /// Message types for async command execution
 #[derive(Debug)]
@@ -115,8 +120,18 @@ enum AiUpdate {
         block_id: String,
         tokens_compressed: usize,
     },
-    /// Plan approval sender (for TUI to respond to plan approval)
-    PlanApprovalSender(tokio::sync::mpsc::UnboundedSender<bool>),
+    /// Plan awaiting approval (plan_id for API response)
+    PlanAwaitingApproval { plan_id: String },
+    /// Doom loop prompt (prompt_id for API response)
+    DoomLoopPrompt {
+        prompt_id: String,
+        message: String,
+    },
+    /// Todo list update
+    TodoList {
+        block_id: String,
+        todos: Vec<crate::tools::todo::TodoItem>,
+    },
 }
 
 /// Message types for orchestration updates
@@ -164,6 +179,7 @@ pub struct ShellTuiRunner {
     app: ShellTuiApp,
     config: Config,
     lsp_manager: Option<LspManager>,
+    server_manager: ServerManager,
 }
 
 impl ShellTuiRunner {
@@ -188,6 +204,7 @@ impl ShellTuiRunner {
             app,
             config,
             lsp_manager: None,
+            server_manager: ServerManager::new(DEFAULT_PORT),
         }
     }
 
@@ -408,38 +425,12 @@ impl ShellTuiRunner {
                             continue;
                         }
 
-                        // Show reasoning inline as streaming output with a thinking prefix
-                        // This is more visible than child blocks
-                        if let Some(block) = self.app.get_block_mut(&block_id) {
-                            // Format reasoning with a thinking indicator
-                            let formatted_lines: Vec<String> = text
-                                .lines()
-                                .filter(|l| !l.trim().is_empty())
-                                .map(|l| format!("💭 {}", l))
-                                .collect();
-
-                            match &mut block.output {
-                                BlockOutput::Streaming { lines, .. } => {
-                                    // Add reasoning lines to streaming output
-                                    lines.extend(formatted_lines);
-                                }
-                                BlockOutput::Pending => {
-                                    block.output = BlockOutput::Streaming {
-                                        lines: formatted_lines,
-                                        complete: false,
-                                    };
-                                }
-                                _ => {
-                                    // If already has output, prepend reasoning
-                                    let existing = block.output.get_text();
-                                    let reasoning_text = formatted_lines.join("\n");
-                                    block.output = BlockOutput::Streaming {
-                                        lines: vec![reasoning_text, existing],
-                                        complete: false,
-                                    };
-                                }
-                            }
+                        // Buffer reasoning to attach to the next tool (using app state)
+                        let existing = self.app.pending_reasoning.entry(block_id.clone()).or_default();
+                        if !existing.is_empty() {
+                            existing.push('\n');
                         }
+                        existing.push_str(&text);
                         self.app.mark_dirty();
                     }
                     AiUpdate::TextChunk { block_id, text } => {
@@ -479,7 +470,7 @@ impl ShellTuiRunner {
                                 match &mut block.output {
                                     BlockOutput::Streaming { lines, .. } => {
                                         // Replace thinking message with actual text
-                                        if lines.len() == 1 && lines[0].starts_with("💭") {
+                                        if lines.len() == 1 && lines[0].starts_with(">") {
                                             lines.clear();
                                         }
                                         for line in text.lines() {
@@ -516,15 +507,21 @@ impl ShellTuiRunner {
                                 .add_tool_step(tool_name.clone(), description.clone());
                         }
 
+                        // Get pending reasoning for this block (consume it)
+                        let reasoning = self.app.pending_reasoning.remove(&block_id);
+
                         // Get prompt first before mutable borrow
                         let prompt = self.app.current_prompt();
-                        let child = CommandBlock::new(
+                        let mut child = CommandBlock::new(
                             description,
                             BlockType::AiToolExecution {
                                 tool_name: tool_name.clone(),
                             },
                             prompt,
                         );
+                        // Attach reasoning to the tool block
+                        child.reasoning = reasoning;
+
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             parent.add_child(child);
                         }
@@ -540,10 +537,11 @@ impl ShellTuiRunner {
                             if let Some(child) = parent.children.iter_mut().rev().find(|c| {
                                 matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
                             }) {
-                                // Truncate output for display (UTF-8 safe)
-                                let display_output = if output.chars().count() > 500 {
-                                    let truncated: String = output.chars().take(500).collect();
-                                    format!("{}...[truncated]", truncated)
+                                // Truncate output for display - show more for readability
+                                // 2000 chars is roughly 40 lines of code
+                                let display_output = if output.chars().count() > 2000 {
+                                    let truncated: String = output.chars().take(2000).collect();
+                                    format!("{}...\n[truncated - {} total chars]", truncated, output.chars().count())
                                 } else {
                                     output
                                 };
@@ -704,9 +702,9 @@ impl ShellTuiRunner {
                         // Update sidebar with plan event
                         self.app.update_plan(&event);
                     }
-                    AiUpdate::PlanApprovalSender(tx) => {
-                        // Store approval sender for TUI to use when user approves/rejects
-                        self.app.set_plan_approval_tx(tx);
+                    AiUpdate::PlanAwaitingApproval { plan_id } => {
+                        // Store plan_id for TUI to use when user approves/rejects via HTTP
+                        self.app.set_pending_plan_id(plan_id);
                     }
                     AiUpdate::TokenUsage {
                         input_tokens,
@@ -733,6 +731,20 @@ impl ShellTuiRunner {
                             .record_compression(tokens_compressed);
                         self.app.mark_dirty();
                     }
+                    AiUpdate::DoomLoopPrompt {
+                        prompt_id,
+                        message,
+                    } => {
+                        // Store doom loop prompt for TUI to handle via HTTP
+                        self.app.set_doom_loop_prompt_http(prompt_id, message);
+                    }
+                    AiUpdate::TodoList { block_id, todos } => {
+                        // Update todo list in sidebar AND inline display
+                        self.app.sidebar.update_todos(&todos);
+                        self.app.inline_todos = todos;
+                        self.app.mark_dirty();
+                        let _ = block_id; // Suppress unused warning
+                    }
                 }
             }
 
@@ -754,8 +766,8 @@ impl ShellTuiRunner {
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             parent.output = BlockOutput::Streaming {
                                 lines: vec![
-                                    format!("📋 Plan: {}", plan.summary),
-                                    format!("   {} task(s) to execute", plan.tasks.len()),
+                                    format!("Plan: {}", plan.summary),
+                                    format!("  {} task(s)", plan.tasks.len()),
                                 ],
                                 complete: false,
                             };
@@ -883,8 +895,8 @@ impl ShellTuiRunner {
                                     if tool_name == &format!("task-{}", task_id))
                             }) {
                                 let status = if success { "✓" } else { "✗" };
-                                let truncated_output = if output.len() > 200 {
-                                    format!("{}...", &output[..200])
+                                let truncated_output = if output.chars().count() > 200 {
+                                    format!("{}...", truncate_str(&output, 200))
                                 } else {
                                     output
                                 };
@@ -904,10 +916,9 @@ impl ShellTuiRunner {
                         fail_count,
                     } => {
                         if let Some(block) = self.app.get_block_mut(&block_id) {
-                            let status = if fail_count == 0 { "✅" } else { "⚠️" };
                             block.output = BlockOutput::Success(format!(
-                                "{} Orchestration complete: {} succeeded, {} failed\n\n{}",
-                                status, success_count, fail_count, summary
+                                "Done: {} succeeded, {} failed\n\n{}",
+                                success_count, fail_count, summary
                             ));
                             block.exit_code = Some(if fail_count == 0 { 0 } else { 1 });
                         }
@@ -999,12 +1010,12 @@ impl ShellTuiRunner {
                     self.app.set_agent_mode(crate::tools::AgentMode::Build);
                     self.app.approve_plan();
 
-                    // Sync with session and trigger execution
-                    if let Some(session) = &self.app.session {
-                        let session = session.clone();
+                    // Sync mode with server via HTTP
+                    if let Some(client) = &self.app.client {
+                        let client: Arc<Mutex<SafeCoderClient>> = Arc::clone(client);
                         tokio::spawn(async move {
-                            let mut session = session.lock().await;
-                            session.set_agent_mode(crate::tools::AgentMode::Build);
+                            let client = client.lock().await;
+                            let _ = client.set_mode("build").await;
                         });
                     }
 
@@ -1132,13 +1143,16 @@ impl ShellTuiRunner {
                 let block = CommandBlock::system(message, prompt);
                 self.app.add_block(block);
 
-                // Sync agent mode with session if connected
-                if let Some(session) = &self.app.session {
-                    let session = session.clone();
-                    let agent_mode = new_mode;
+                // Sync agent mode with server via HTTP
+                if let Some(client) = &self.app.client {
+                    let client: Arc<Mutex<SafeCoderClient>> = Arc::clone(client);
+                    let mode_str = match new_mode {
+                        crate::tools::AgentMode::Plan => "plan",
+                        crate::tools::AgentMode::Build => "build",
+                    };
                     tokio::spawn(async move {
-                        let mut session = session.lock().await;
-                        session.set_agent_mode(agent_mode);
+                        let client = client.lock().await;
+                        let _ = client.set_mode(mode_str).await;
                     });
                 }
             }
@@ -1198,8 +1212,12 @@ impl ShellTuiRunner {
 
             // Regular character input
             KeyCode::Char(c) => {
+                // Check if model picker is visible - send input there
+                if self.app.model_picker.visible {
+                    self.app.model_picker.add_filter_char(c);
+                    self.app.mark_dirty();
                 // Check if file picker is visible - send input there
-                if self.app.file_picker.visible {
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.filter_push(c);
                     self.app.mark_dirty();
                 } else {
@@ -1215,7 +1233,15 @@ impl ShellTuiRunner {
 
             // Backspace
             KeyCode::Backspace => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    if self.app.model_picker.filter.is_empty() {
+                        // Close picker
+                        self.app.model_picker.close();
+                    } else {
+                        self.app.model_picker.backspace_filter();
+                    }
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     if self.app.file_picker.filter.is_empty() {
                         // Close picker and remove the @ from input
                         self.app.file_picker.close();
@@ -1272,7 +1298,10 @@ impl ShellTuiRunner {
                 }
             }
             KeyCode::Up => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    self.app.model_picker.move_up();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.select_up();
                     self.app.mark_dirty();
                 } else if modifiers.contains(KeyModifiers::ALT) {
@@ -1291,7 +1320,10 @@ impl ShellTuiRunner {
                 }
             }
             KeyCode::Down => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    self.app.model_picker.move_down();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.select_down();
                     self.app.mark_dirty();
                 } else if modifiers.contains(KeyModifiers::ALT) {
@@ -1326,9 +1358,36 @@ impl ShellTuiRunner {
                 self.app.scroll_page_down();
             }
 
-            // Enter - submit command or apply autocomplete/file picker
+            // Enter - submit command or apply autocomplete/file picker/model picker
             KeyCode::Enter => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    // Select model from picker
+                    if let Some(model_id) = self.app.model_picker.get_selected_id() {
+                        self.config.llm.model = model_id.clone();
+
+                        // Save config
+                        if let Err(e) = self.config.save() {
+                            let prompt = self.app.current_prompt();
+                            let block = CommandBlock::system(
+                                format!("Warning: Failed to save config: {}", e),
+                                prompt,
+                            );
+                            self.app.add_block(block);
+                        }
+
+                        let prompt = self.app.current_prompt();
+                        let block = CommandBlock::system(
+                            format!("✓ Switched to model: {}\n\nUse /connect to reconnect.", model_id),
+                            prompt,
+                        );
+                        self.app.add_block(block);
+
+                        // Disconnect so reconnect uses new model
+                        self.disconnect_ai();
+                    }
+                    self.app.model_picker.close();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     // Select file from picker
                     let cwd = self.app.cwd.clone();
                     if let Some(selected_path) = self.app.file_picker.select_current(&cwd) {
@@ -1353,9 +1412,12 @@ impl ShellTuiRunner {
                 }
             }
 
-            // Escape - cancel file picker, autocomplete, or clear input
+            // Escape - cancel model picker, file picker, autocomplete, or clear input
             KeyCode::Esc => {
-                if self.app.file_picker.visible {
+                if self.app.model_picker.visible {
+                    self.app.model_picker.close();
+                    self.app.mark_dirty();
+                } else if self.app.file_picker.visible {
                     self.app.file_picker.close();
                     // Also remove the @ that triggered the picker
                     if self.app.input.ends_with('@') {
@@ -1394,12 +1456,12 @@ impl ShellTuiRunner {
                 self.app.set_agent_mode(crate::tools::AgentMode::Build);
                 self.app.approve_plan();
 
-                // Sync with session
-                if let Some(session) = &self.app.session {
-                    let session = session.clone();
+                // Sync mode with server via HTTP
+                if let Some(client) = &self.app.client {
+                    let client: Arc<Mutex<SafeCoderClient>> = Arc::clone(client);
                     tokio::spawn(async move {
-                        let mut session = session.lock().await;
-                        session.set_agent_mode(crate::tools::AgentMode::Build);
+                        let client = client.lock().await;
+                        let _ = client.set_mode("build").await;
                     });
                 }
 
@@ -1419,6 +1481,47 @@ impl ShellTuiRunner {
                 );
                 self.app.add_block(block);
                 self.app.reject_plan();
+                return Ok(());
+            }
+        }
+
+        // Check for doom loop response commands when a doom loop prompt is active
+        if self.app.has_doom_loop_prompt() {
+            if input_lower == "continue" || input_lower == "yes" || input_lower == "y" {
+                // Get prompt_id and respond via HTTP API
+                if let Some(prompt_id) = self.app.doom_loop_prompt_id.clone() {
+                    if let Some(client) = &self.app.client {
+                        let client = client.lock().await;
+                        if let Err(e) = client.respond_to_doom_loop(&prompt_id, true).await {
+                            tracing::error!("Failed to respond to doom loop: {}", e);
+                        }
+                    }
+                }
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    "⚠️ Continuing past potential loop. The loop detector has been reset.".to_string(),
+                    prompt,
+                );
+                self.app.add_block(block);
+                self.app.clear_doom_loop();
+                return Ok(());
+            } else if input_lower == "stop" || input_lower == "no" || input_lower == "n" {
+                // Get prompt_id and respond via HTTP API
+                if let Some(prompt_id) = self.app.doom_loop_prompt_id.clone() {
+                    if let Some(client) = &self.app.client {
+                        let client = client.lock().await;
+                        if let Err(e) = client.respond_to_doom_loop(&prompt_id, false).await {
+                            tracing::error!("Failed to respond to doom loop: {}", e);
+                        }
+                    }
+                }
+                let prompt = self.app.current_prompt();
+                let block = CommandBlock::system(
+                    "🛑 Stopped due to detected loop. You can modify your request and try again.".to_string(),
+                    prompt,
+                );
+                self.app.add_block(block);
+                self.app.clear_doom_loop();
                 return Ok(());
             }
         }
@@ -1647,13 +1750,16 @@ Keyboard Shortcuts:
                 );
                 self.app.add_block(block);
 
-                // Sync agent mode with session if connected
-                if let Some(session) = &self.app.session {
-                    let session = session.clone();
-                    let agent_mode = mode;
+                // Sync agent mode with server via HTTP
+                if let Some(client) = &self.app.client {
+                    let client: Arc<Mutex<SafeCoderClient>> = Arc::clone(client);
+                    let mode_str = match mode {
+                        crate::tools::AgentMode::Plan => "plan",
+                        crate::tools::AgentMode::Build => "build",
+                    };
                     tokio::spawn(async move {
-                        let mut session = session.lock().await;
-                        session.set_agent_mode(agent_mode);
+                        let client = client.lock().await;
+                        let _ = client.set_mode(mode_str).await;
                     });
                 }
             }
@@ -1800,7 +1906,7 @@ Keyboard:
                         // Try to get models from GitHub Copilot
                         match self.get_copilot_models().await {
                             Ok(models) => {
-                                let mut output = String::from("📋 Available GitHub Copilot Models:\n\n");
+                                let mut output = String::from("Available GitHub Copilot Models:\n\n");
                                 let current_model = &self.config.llm.model;
                                 for model in models {
                                     let marker = if model.id == *current_model { " ← current" } else { "" };
@@ -1814,7 +1920,7 @@ Keyboard:
                         }
                     }
                     crate::config::LlmProvider::Anthropic => {
-                        let mut output = String::from("📋 Available Anthropic Models:\n\n");
+                        let mut output = String::from("Available Anthropic Models:\n\n");
                         let current_model = &self.config.llm.model;
                         let models = [
                             "claude-opus-4-20250514",
@@ -1830,7 +1936,7 @@ Keyboard:
                         output
                     }
                     crate::config::LlmProvider::OpenAI => {
-                        let mut output = String::from("📋 Available OpenAI Models:\n\n");
+                        let mut output = String::from("Available OpenAI Models:\n\n");
                         let current_model = &self.config.llm.model;
                         let models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"];
                         for model in models {
@@ -1841,10 +1947,10 @@ Keyboard:
                         output
                     }
                     crate::config::LlmProvider::OpenRouter => {
-                        "📋 OpenRouter Models:\n\nVisit https://openrouter.ai/models for the full list.\nUse /model <provider/model-name> to switch.".to_string()
+                        "OpenRouter Models:\n\nVisit https://openrouter.ai/models for the full list.\nUse /model <provider/model-name> to switch.".to_string()
                     }
                     crate::config::LlmProvider::Ollama => {
-                        "📋 Ollama Models:\n\nRun `ollama list` to see installed models.\nUse /model <name> to switch.".to_string()
+                        "Ollama Models:\n\nRun `ollama list` to see installed models.\nUse /model <name> to switch.".to_string()
                     }
                 };
 
@@ -1951,11 +2057,11 @@ Keyboard:
                         self.disconnect_ai();
                     }
                     None => {
-                        let block = CommandBlock::system(
-                            format!("Current model: {}\n\nUse /model <name> to switch.\nUse /models to see available models.", self.config.llm.model),
-                            prompt,
+                        // Show model picker modal
+                        self.app.model_picker.open(
+                            self.config.llm.provider.clone(),
+                            &self.config.llm.model,
                         );
-                        self.app.add_block(block);
                     }
                 }
             }
@@ -2037,7 +2143,7 @@ Keyboard:
     /// Login to GitHub Copilot using device flow
     async fn login_github_copilot(&mut self) -> Result<()> {
         use crate::auth::github_copilot::GitHubCopilotAuth;
-        use crate::auth::{run_device_flow, StoredToken};
+
         use crate::config::LlmProvider;
 
         let auth = GitHubCopilotAuth::new();
@@ -2528,8 +2634,8 @@ Keyboard:
                                                 .and_then(|c| c.as_str())
                                                 .map(|cmd| {
                                                     // Truncate long commands
-                                                    if cmd.len() > 60 {
-                                                        format!(": {}...", &cmd[..57])
+                                                    if cmd.chars().count() > 60 {
+                                                        format!(": {}...", truncate_str(cmd, 57))
                                                     } else {
                                                         format!(": {}", cmd)
                                                     }
@@ -2579,8 +2685,8 @@ Keyboard:
                                             // Only show non-empty text that's not too long
                                             let trimmed = text.trim();
                                             if !trimmed.is_empty() {
-                                                let display = if trimmed.len() > 100 {
-                                                    format!("{}...", &trimmed[..97])
+                                                let display = if trimmed.chars().count() > 100 {
+                                                    format!("{}...", truncate_str(trimmed, 97))
                                                 } else {
                                                     trimmed.to_string()
                                                 };
@@ -2725,194 +2831,88 @@ Keyboard:
             )
         };
 
-        // Clone session for async task
-        if let Some(session) = &self.app.session {
-            let session = Arc::clone(session);
+        // Use HTTP client for async task
+        if let Some(client) = &self.app.client {
+            let client: Arc<Mutex<SafeCoderClient>> = Arc::clone(client);
             let ai_tx = tx.clone();
             let block_id_clone = block_id.clone();
 
-            // Take attached images (clears them from app state)
-            let attached_images: Vec<(String, String)> = self
-                .app
-                .take_attached_images()
-                .into_iter()
-                .map(|img| (img.data, img.media_type))
-                .collect();
+            // Send immediate "thinking" feedback
+            let _ = ai_tx.send(AiUpdate::Thinking {
+                block_id: block_id.clone(),
+                message: "Connecting to AI...".to_string(),
+            });
 
             tokio::spawn(async move {
-                let mut session = session.lock().await;
+                tracing::debug!("AI query: Acquiring client lock");
+                let client_guard = client.lock().await;
 
-                // Create channel for session events
-                let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
-
-                // Spawn a task to forward SessionEvents to AiUpdates
-                let block_id_inner = block_id_clone.clone();
-                let ai_tx_inner = ai_tx.clone();
-                let forwarder = tokio::spawn(async move {
-                    while let Some(event) = event_rx.recv().await {
-                        let update = match event {
-                            SessionEvent::Thinking(msg) => AiUpdate::Thinking {
-                                block_id: block_id_inner.clone(),
-                                message: msg,
-                            },
-                            SessionEvent::Reasoning(text) => AiUpdate::Reasoning {
-                                block_id: block_id_inner.clone(),
-                                text,
-                            },
-                            SessionEvent::ToolStart { name, description } => AiUpdate::ToolStart {
-                                block_id: block_id_inner.clone(),
-                                tool_name: name,
-                                description,
-                            },
-                            SessionEvent::ToolOutput { name, output } => AiUpdate::ToolOutput {
-                                block_id: block_id_inner.clone(),
-                                tool_name: name,
-                                output,
-                            },
-                            SessionEvent::BashOutputLine { name, line } => {
-                                AiUpdate::BashOutputLine {
-                                    block_id: block_id_inner.clone(),
-                                    tool_name: name,
-                                    line,
-                                }
-                            }
-                            SessionEvent::ToolComplete { name, success } => {
-                                AiUpdate::ToolComplete {
-                                    block_id: block_id_inner.clone(),
-                                    tool_name: name,
-                                    success,
-                                }
-                            }
-                            SessionEvent::FileDiff {
-                                path,
-                                old_content,
-                                new_content,
-                            } => AiUpdate::FileDiff {
-                                block_id: block_id_inner.clone(),
-                                path,
-                                old_content,
-                                new_content,
-                            },
-                            SessionEvent::DiagnosticUpdate { errors, warnings } => {
-                                AiUpdate::DiagnosticUpdate {
-                                    block_id: block_id_inner.clone(),
-                                    errors,
-                                    warnings,
-                                }
-                            }
-                            SessionEvent::TextChunk(text) => AiUpdate::TextChunk {
-                                block_id: block_id_inner.clone(),
-                                text,
-                            },
-                            // Subagent events - treat like tool executions
-                            SessionEvent::SubagentStarted { id, kind, task } => {
-                                AiUpdate::ToolStart {
-                                    block_id: block_id_inner.clone(),
-                                    tool_name: format!("subagent:{}", id),
-                                    description: format!("{} - {}", kind, task),
-                                }
-                            }
-                            SessionEvent::SubagentProgress { id, message } => {
-                                AiUpdate::BashOutputLine {
-                                    block_id: block_id_inner.clone(),
-                                    tool_name: format!("subagent:{}", id),
-                                    line: message,
-                                }
-                            }
-                            SessionEvent::SubagentToolUsed {
-                                id,
-                                tool,
-                                description,
-                            } => AiUpdate::BashOutputLine {
-                                block_id: block_id_inner.clone(),
-                                tool_name: format!("subagent:{}", id),
-                                line: format!("  {} {}", tool, description),
-                            },
-                            SessionEvent::SubagentCompleted {
-                                id,
-                                success,
-                                summary,
-                            } => AiUpdate::ToolComplete {
-                                block_id: block_id_inner.clone(),
-                                tool_name: format!("subagent:{}", id),
-                                success,
-                            },
-                            // Plan events - forward for sidebar updates
-                            SessionEvent::Plan(plan_event) => AiUpdate::PlanEvent {
-                                block_id: block_id_inner.clone(),
-                                event: plan_event,
-                            },
-                            // Plan approval sender - forward to TUI
-                            SessionEvent::PlanApprovalSender(tx) => {
-                                AiUpdate::PlanApprovalSender(tx)
-                            }
-                            // Token usage updates
-                            SessionEvent::TokenUsage {
-                                input_tokens,
-                                output_tokens,
-                                cache_read_tokens,
-                                cache_creation_tokens,
-                            } => AiUpdate::TokenUsage {
-                                block_id: block_id_inner.clone(),
-                                input_tokens,
-                                output_tokens,
-                                cache_read_tokens,
-                                cache_creation_tokens,
-                            },
-                            // Context compression updates
-                            SessionEvent::ContextCompressed { tokens_compressed } => {
-                                AiUpdate::ContextCompressed {
-                                    block_id: block_id_inner.clone(),
-                                    tokens_compressed,
-                                }
-                            }
-                            // Compaction warnings (handled by showing inline warning)
-                            SessionEvent::CompactionWarning { message, compaction_count } => {
-                                AiUpdate::Reasoning {
-                                    block_id: block_id_inner.clone(),
-                                    text: format!(
-                                        "\n⚠️  **Context Warning** (compaction #{}): {}\n",
-                                        compaction_count, message
-                                    ),
-                                }
-                            }
-                        };
-                        let _ = ai_tx_inner.send(update);
-                    }
-                });
-
-                // Call the progress-aware method (with images if present)
-                match session
-                    .send_message_with_images_and_progress(full_query, attached_images, event_tx)
-                    .await
-                {
-                    Ok(response) => {
-                        // Wait for forwarder to finish
-                        let _ = forwarder.await;
-
-                        let _ = ai_tx.send(AiUpdate::Response {
-                            block_id: block_id_clone.clone(),
-                            text: response,
-                        });
-                        let _ = ai_tx.send(AiUpdate::Complete {
-                            block_id: block_id_clone,
-                        });
-                    }
+                // Subscribe to SSE events first
+                tracing::debug!("AI query: Subscribing to SSE events");
+                let event_rx = match client_guard.subscribe_events().await {
+                    Ok(rx) => rx,
                     Err(e) => {
-                        forwarder.abort();
+                        tracing::error!("AI query: Failed to subscribe to events: {}", e);
                         let _ = ai_tx.send(AiUpdate::Error {
                             block_id: block_id_clone,
-                            message: e.to_string(),
+                            message: format!("Failed to subscribe to events: {}", e),
                         });
+                        return;
                     }
+                };
+
+                // Send "sending" feedback
+                let _ = ai_tx.send(AiUpdate::Thinking {
+                    block_id: block_id_clone.clone(),
+                    message: "Sending to AI...".to_string(),
+                });
+
+                // Send message via HTTP
+                tracing::debug!("AI query: Sending message to server");
+                if let Err(e) = client_guard.send_message(&full_query).await {
+                    tracing::error!("AI query: Failed to send message: {}", e);
+                    let _ = ai_tx.send(AiUpdate::Error {
+                        block_id: block_id_clone,
+                        message: format!("Failed to send message: {}", e),
+                    });
+                    return;
                 }
+
+                tracing::debug!("AI query: Message sent, waiting for response");
+
+                // Send "processing" feedback
+                let _ = ai_tx.send(AiUpdate::Thinking {
+                    block_id: block_id_clone.clone(),
+                    message: "AI is thinking...".to_string(),
+                });
+
+                // Drop the lock so we can process events
+                drop(client_guard);
+
+                // Forward ServerEvents to AiUpdates
+                let block_id_inner = block_id_clone.clone();
+                let ai_tx_inner = ai_tx.clone();
+                forward_server_events_to_ai_updates(event_rx, block_id_inner, ai_tx_inner).await;
+
+                tracing::debug!("AI query: Event stream completed");
+
+                // Signal completion
+                let _ = ai_tx.send(AiUpdate::Complete {
+                    block_id: block_id_clone,
+                });
+            });
+        } else {
+            tracing::warn!("AI query: No client connected");
+            let _ = tx.send(AiUpdate::Error {
+                block_id: block_id.clone(),
+                message: "Not connected to AI. Run /connect first.".to_string(),
             });
         }
 
         Ok(())
     }
 
-    /// Connect to AI service
+    /// Connect to AI service via HTTP server
     async fn connect_ai(&mut self) -> Result<()> {
         if self.app.ai_connected {
             let prompt = self.app.current_prompt();
@@ -2924,20 +2924,29 @@ Keyboard:
         let prompt = self.app.current_prompt();
         let mut block = CommandBlock::new("connect".to_string(), BlockType::AiQuery, prompt);
 
-        // Disable git auto-commit for shell TUI mode to prevent unwanted commits
-        let mut config = self.config.clone();
-        config.git.auto_commit = false;
+        // Ensure server is running
+        if let Err(e) = self.server_manager.ensure_running().await {
+            tracing::error!("Failed to start server: {:?}", e);
+            block.fail(
+                format!("Failed to start server: {}", e),
+                "Check server logs for details".to_string(),
+                1,
+            );
+            self.app.add_block(block);
+            return Ok(());
+        }
 
-        // Debug: log the provider and model being used
-        tracing::info!(
-            "connect_ai: Using provider {:?}, model {}",
-            config.llm.provider,
-            config.llm.model
-        );
+        // Create HTTP client and session
+        let mut client = SafeCoderClient::new(self.server_manager.port());
+        let project_path = self.app.cwd.to_string_lossy().to_string();
 
-        match Session::new(config, self.app.cwd.clone()).await {
-            Ok(session) => {
-                self.app.session = Some(Arc::new(Mutex::new(session)));
+        match client.create_session(&project_path, Some("build")).await {
+            Ok(session_response) => {
+                tracing::info!(
+                    "Connected to AI via HTTP, session_id: {}",
+                    session_response.id
+                );
+                self.app.client = Some(Arc::new(Mutex::new(client)));
                 self.app.set_ai_connected(true);
                 block.complete(
                     "Connected to AI. Just type naturally to ask questions. Use @file to add context.".to_string(),
@@ -2946,7 +2955,6 @@ Keyboard:
             }
             Err(e) => {
                 tracing::error!("connect_ai failed: {:?}", e);
-                // Show full error chain for debugging
                 let mut error_details = format!("Failed to connect: {}", e);
                 let mut source = e.source();
                 while let Some(s) = source {
@@ -2967,12 +2975,17 @@ Keyboard:
     }
 
     /// Disconnect from AI service
-    fn disconnect_ai(&mut self) {
+    async fn disconnect_ai(&mut self) {
         let prompt = self.app.current_prompt();
         let mut block = CommandBlock::new("disconnect".to_string(), BlockType::AiQuery, prompt);
 
         if self.app.ai_connected {
-            self.app.session = None;
+            // Close session via HTTP
+            if let Some(client) = &self.app.client {
+                let mut client = client.lock().await;
+                let _ = client.close_session().await;
+            }
+            self.app.client = None;
             self.app.set_ai_connected(false);
             block.complete("Disconnected from AI.".to_string(), 0);
         } else {
@@ -2980,6 +2993,194 @@ Keyboard:
         }
 
         self.app.add_block(block);
+    }
+}
+
+/// Forward ServerEvents from SSE to AiUpdates for TUI
+async fn forward_server_events_to_ai_updates(
+    mut event_rx: mpsc::UnboundedReceiver<ServerEvent>,
+    block_id: String,
+    ai_tx: mpsc::UnboundedSender<AiUpdate>,
+) {
+    tracing::debug!("Event forwarder: Starting to receive events for block {}", block_id);
+    let mut response_text = String::new();
+    let mut event_count = 0;
+
+    while let Some(event) = event_rx.recv().await {
+        event_count += 1;
+        tracing::trace!("Event forwarder: Received event #{}: {:?}", event_count, event);
+
+        let update = match event {
+            ServerEvent::Connected => {
+                tracing::debug!("Event forwarder: Connected event received");
+                continue; // Skip connection event
+            }
+            ServerEvent::Completed => {
+                tracing::debug!("Event forwarder: Completed event received, ending stream");
+                break; // End of stream
+            }
+            ServerEvent::Thinking { message } => AiUpdate::Thinking {
+                block_id: block_id.clone(),
+                message,
+            },
+            ServerEvent::Reasoning { text } => AiUpdate::Reasoning {
+                block_id: block_id.clone(),
+                text,
+            },
+            ServerEvent::ToolStart { name, description } => AiUpdate::ToolStart {
+                block_id: block_id.clone(),
+                tool_name: name,
+                description,
+            },
+            ServerEvent::ToolOutput { name, output } => AiUpdate::ToolOutput {
+                block_id: block_id.clone(),
+                tool_name: name,
+                output,
+            },
+            ServerEvent::BashOutputLine { name, line } => AiUpdate::BashOutputLine {
+                block_id: block_id.clone(),
+                tool_name: name,
+                line,
+            },
+            ServerEvent::ToolComplete { name, success } => AiUpdate::ToolComplete {
+                block_id: block_id.clone(),
+                tool_name: name,
+                success,
+            },
+            ServerEvent::FileDiff {
+                path,
+                additions: _,
+                deletions: _,
+                diff,
+            } => {
+                // We don't have old/new content from server, just the diff
+                // Create a simplified FileDiff with the diff as content
+                AiUpdate::FileDiff {
+                    block_id: block_id.clone(),
+                    path,
+                    old_content: String::new(),
+                    new_content: diff,
+                }
+            }
+            ServerEvent::DiagnosticUpdate { errors, warnings } => AiUpdate::DiagnosticUpdate {
+                block_id: block_id.clone(),
+                errors,
+                warnings,
+            },
+            ServerEvent::TextChunk { text } => {
+                response_text.push_str(&text);
+                AiUpdate::TextChunk {
+                    block_id: block_id.clone(),
+                    text,
+                }
+            }
+            ServerEvent::SubagentStarted { id, kind, task } => AiUpdate::ToolStart {
+                block_id: block_id.clone(),
+                tool_name: format!("subagent:{}", id),
+                description: format!("{} - {}", kind, task),
+            },
+            ServerEvent::SubagentProgress { id, message } => AiUpdate::BashOutputLine {
+                block_id: block_id.clone(),
+                tool_name: format!("subagent:{}", id),
+                line: message,
+            },
+            ServerEvent::SubagentCompleted { id, success, .. } => AiUpdate::ToolComplete {
+                block_id: block_id.clone(),
+                tool_name: format!("subagent:{}", id),
+                success,
+            },
+            ServerEvent::PlanCreated { title, steps } => {
+                // Convert to PlanEvent for sidebar
+                use crate::planning::{PlanStatus, PlanStep, TaskPlan};
+                let plan = TaskPlan {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    request: String::new(),
+                    title,
+                    status: PlanStatus::Planning,
+                    steps: steps
+                        .into_iter()
+                        .map(|s| PlanStep::new(s.id, s.description))
+                        .collect(),
+                    created_at: chrono::Utc::now(),
+                    started_at: None,
+                    completed_at: None,
+                };
+                AiUpdate::PlanEvent {
+                    block_id: block_id.clone(),
+                    event: PlanEvent::PlanCreated { plan },
+                }
+            }
+            ServerEvent::PlanStepStarted { plan_id, step_id } => AiUpdate::PlanEvent {
+                block_id: block_id.clone(),
+                event: PlanEvent::StepStarted {
+                    plan_id,
+                    step_id,
+                    description: String::new(),
+                },
+            },
+            ServerEvent::PlanStepCompleted {
+                plan_id,
+                step_id,
+                success,
+            } => AiUpdate::PlanEvent {
+                block_id: block_id.clone(),
+                event: PlanEvent::StepCompleted {
+                    plan_id,
+                    step_id,
+                    success,
+                    output: None,
+                    error: None,
+                },
+            },
+            ServerEvent::PlanAwaitingApproval { plan_id } => {
+                AiUpdate::PlanAwaitingApproval { plan_id }
+            }
+            ServerEvent::PlanApproved { .. } | ServerEvent::PlanRejected { .. } => continue,
+            ServerEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            } => AiUpdate::TokenUsage {
+                block_id: block_id.clone(),
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+            },
+            ServerEvent::ContextCompressed { tokens_compressed } => AiUpdate::ContextCompressed {
+                block_id: block_id.clone(),
+                tokens_compressed,
+            },
+            ServerEvent::DoomLoopPrompt { prompt_id, message } => AiUpdate::DoomLoopPrompt {
+                prompt_id,
+                message,
+            },
+            ServerEvent::Error { message } => AiUpdate::Error {
+                block_id: block_id.clone(),
+                message,
+            },
+            ServerEvent::TodoList { todos } => AiUpdate::TodoList {
+                block_id: block_id.clone(),
+                todos: todos.into_iter().map(|t| crate::tools::todo::TodoItem {
+                    content: t.content,
+                    status: t.status,
+                    active_form: t.active_form,
+                    priority: t.priority,
+                }).collect(),
+            },
+        };
+        let _ = ai_tx.send(update);
+    }
+
+    tracing::debug!("Event forwarder: Finished after {} events", event_count);
+
+    // Send final response if we accumulated text
+    if !response_text.is_empty() {
+        let _ = ai_tx.send(AiUpdate::Response {
+            block_id: block_id.clone(),
+            text: response_text,
+        });
     }
 }
 

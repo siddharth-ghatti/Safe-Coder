@@ -291,9 +291,11 @@ async fn install_from_npm(package: &str, binary_name: &str, servers_dir: &Path) 
     let npm_dir = servers_dir.join("npm");
     fs::create_dir_all(&npm_dir).await?;
 
-    // Install package locally
+    // Install package locally (redirect output to not pollute TUI)
     let status = Command::new("npm")
         .args(["install", "--prefix", npm_dir.to_str().unwrap(), package])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context("Failed to run npm install")?;
 
@@ -349,9 +351,11 @@ async fn install_from_pip(package: &str, binary_name: &str, servers_dir: &Path) 
     let pip_dir = servers_dir.join("pip");
     fs::create_dir_all(&pip_dir).await?;
 
-    // Install package to our directory
+    // Install package to our directory (redirect output to not pollute TUI)
     let status = Command::new(pip_cmd)
         .args(["install", "--target", pip_dir.to_str().unwrap(), package])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context("Failed to run pip install")?;
 
@@ -394,9 +398,11 @@ async fn install_from_cargo(
     let cargo_dir = servers_dir.join("cargo");
     fs::create_dir_all(&cargo_dir).await?;
 
-    // Install to our directory
+    // Install to our directory (redirect output to not pollute TUI)
     let status = Command::new("cargo")
         .args(["install", "--root", cargo_dir.to_str().unwrap(), crate_name])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .context("Failed to run cargo install")?;
 

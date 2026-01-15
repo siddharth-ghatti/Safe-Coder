@@ -11,12 +11,12 @@ use tokio::sync::RwLock;
 
 use super::client::LspClient;
 use super::config::{
-    default_lsp_configs, detect_language_id, extension_to_language_id, LspConfig, LspServerConfig,
+    default_lsp_configs, detect_language_id, extension_to_language_id, LspConfig,
 };
 use super::download::{
     get_effective_binary_path, get_install_info_for_language, install_lsp_server,
 };
-use super::protocol::{LspDiagnostic, Range};
+use super::protocol::LspDiagnostic;
 
 /// Diagnostic severity levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +174,7 @@ impl LspManager {
         for lang in languages {
             if let Err(e) = self.start_server(&lang).await {
                 // Log but don't fail - server might not be installed
-                eprintln!("Failed to start {} LSP: {}", lang, e);
+                tracing::warn!("Failed to start {} LSP: {}", lang, e);
             }
         }
 
@@ -256,7 +256,7 @@ impl LspManager {
         if binary_path.is_none() {
             // Try to auto-download the server with a timeout
             if let Some(install_info) = get_install_info_for_language(language) {
-                eprintln!(
+                tracing::info!(
                     "LSP server '{}' not found, attempting to install...",
                     config.command
                 );
@@ -267,7 +267,7 @@ impl LspManager {
                     .await
                 {
                     Ok(Ok(installed_path)) => {
-                        eprintln!(
+                        tracing::info!(
                             "Successfully installed {} to {}",
                             config.command,
                             installed_path.display()
@@ -277,7 +277,7 @@ impl LspManager {
                     }
                     Ok(Err(e)) => {
                         // Download failed - log and continue without this LSP
-                        eprintln!(
+                        tracing::warn!(
                             "LSP auto-install failed for {} (continuing without LSP support for {}): {}",
                             config.command, language, e
                         );
@@ -285,7 +285,7 @@ impl LspManager {
                     }
                     Err(_) => {
                         // Download timed out - log and continue without this LSP
-                        eprintln!(
+                        tracing::warn!(
                             "LSP auto-install timed out for {} (continuing without LSP support for {})",
                             config.command, language
                         );
@@ -294,7 +294,7 @@ impl LspManager {
                 }
             } else {
                 // No auto-install available - this is fine, just continue without this LSP
-                eprintln!(
+                tracing::debug!(
                     "LSP server '{}' not found (no auto-install available for {})",
                     config.command, language
                 );
@@ -309,7 +309,7 @@ impl LspManager {
 
         if !client.is_available() {
             // Server binary exists but isn't available - log and continue
-            eprintln!(
+            tracing::debug!(
                 "LSP server '{}' not available for {} (continuing without LSP)",
                 config.command, language
             );
@@ -318,7 +318,7 @@ impl LspManager {
 
         // Try to start and initialize the client
         if let Err(e) = client.start(&self.root_path) {
-            eprintln!(
+            tracing::warn!(
                 "Failed to start LSP server for {} (continuing without LSP): {}",
                 language, e
             );
@@ -326,7 +326,7 @@ impl LspManager {
         }
 
         if let Err(e) = client.initialize().await {
-            eprintln!(
+            tracing::warn!(
                 "Failed to initialize LSP server for {} (continuing without LSP): {}",
                 language, e
             );
@@ -488,37 +488,26 @@ impl LspManager {
             return String::new();
         }
 
-        let mut summary = String::from("## LSP Diagnostics\n\n");
-
+        // Only report ERRORS, ignore warnings
+        // This prevents the agent from looping on warning fixes
         let errors: Vec<_> = all_diags
             .iter()
             .filter(|d| d.severity == DiagnosticSeverity::Error)
             .collect();
 
-        let warnings: Vec<_> = all_diags
-            .iter()
-            .filter(|d| d.severity == DiagnosticSeverity::Warning)
-            .collect();
-
-        if !errors.is_empty() {
-            summary.push_str(&format!("### Errors ({})\n", errors.len()));
-            for diag in errors.iter().take(10) {
-                summary.push_str(&format!("- {}\n", diag.format_for_ai()));
-            }
-            if errors.len() > 10 {
-                summary.push_str(&format!("... and {} more errors\n", errors.len() - 10));
-            }
-            summary.push('\n');
+        // If no errors (only warnings), return empty - we ignore warnings
+        if errors.is_empty() {
+            return String::new();
         }
 
-        if !warnings.is_empty() {
-            summary.push_str(&format!("### Warnings ({})\n", warnings.len()));
-            for diag in warnings.iter().take(5) {
-                summary.push_str(&format!("- {}\n", diag.format_for_ai()));
-            }
-            if warnings.len() > 5 {
-                summary.push_str(&format!("... and {} more warnings\n", warnings.len() - 5));
-            }
+        let mut summary = String::from("## LSP Errors\n\n");
+
+        summary.push_str(&format!("### Errors ({})\n", errors.len()));
+        for diag in errors.iter().take(10) {
+            summary.push_str(&format!("- {}\n", diag.format_for_ai()));
+        }
+        if errors.len() > 10 {
+            summary.push_str(&format!("... and {} more errors\n", errors.len() - 10));
         }
 
         summary

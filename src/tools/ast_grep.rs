@@ -94,7 +94,7 @@ impl AstLanguage {
     }
 
     /// Get the tree-sitter language for this language
-    fn get_language(&self) -> tree_sitter::Language {
+    pub fn get_language(&self) -> tree_sitter::Language {
         match self {
             AstLanguage::Rust => tree_sitter_rust::LANGUAGE.into(),
             AstLanguage::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),

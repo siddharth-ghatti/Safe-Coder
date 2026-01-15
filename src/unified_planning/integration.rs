@@ -148,7 +148,7 @@ pub fn suggest_execution_mode(
 /// This bridges the unified planning system with the existing session event infrastructure
 fn convert_to_legacy_event(event: &PlanEvent) -> Option<crate::planning::PlanEvent> {
     use crate::planning::{
-        PlanEvent as LegacyEvent, PlanStatus, PlanStep, PlanStepStatus, TaskPlan,
+        PlanEvent as LegacyEvent,
     };
 
     match event {

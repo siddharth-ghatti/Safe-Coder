@@ -5,6 +5,9 @@
 use crate::planning::{PlanEvent, PlanStatus, PlanStepStatus, TaskPlan};
 use crate::tools::todo::TodoItem;
 
+// Use shared truncate_str from utils
+use crate::utils::truncate_str;
+
 /// Sidebar visibility and content state
 #[derive(Debug, Clone)]
 pub struct SidebarState {
@@ -111,8 +114,8 @@ impl SidebarState {
         // Fall back to current_task (the user's original query)
         // Truncate long queries and add "Working on:" prefix
         self.current_task.as_ref().map(|task| {
-            let truncated = if task.len() > 40 {
-                format!("{}...", &task[..37])
+            let truncated = if task.chars().count() > 40 {
+                format!("{}...", truncate_str(task, 37))
             } else {
                 task.clone()
             };
@@ -261,20 +264,12 @@ impl SidebarState {
     }
 
     /// Track a file modification
-    pub fn track_file_modification(&mut self, path: String, mod_type: ModificationType) {
-        // Check if we already have this file
-        if let Some(existing) = self.modified_files.iter_mut().find(|f| f.path == path) {
-            // Update the modification type and timestamp
-            existing.modification_type = mod_type;
-            existing.timestamp = chrono::Local::now();
-        } else {
-            // Add new file
-            self.modified_files.push(ModifiedFile {
-                path,
-                modification_type: mod_type,
-                timestamp: chrono::Local::now(),
-            });
-        }
+    ///
+    /// NOTE: Modified files are intentionally not shown in the sidebar UI
+    /// for a cleaner right-side panel. This method is kept as a no-op to
+    /// preserve call sites but prevent population of the modified_files list.
+    pub fn track_file_modification(&mut self, _path: String, _mod_type: ModificationType) {
+        // Intentionally no-op to avoid displaying modified files in the sidebar.
     }
 
     /// Get count of modified files

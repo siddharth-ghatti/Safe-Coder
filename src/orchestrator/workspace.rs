@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
+
 use tokio::process::Command;
 
 /// Manages git workspaces (worktrees or branches) for task isolation
@@ -202,7 +202,7 @@ impl WorkspaceManager {
 
     /// Merge a worktree's changes back
     async fn merge_worktree(&mut self, task_id: &str, branch_name: &str) -> Result<()> {
-        let original_branch = self
+        let _original_branch = self
             .original_branch
             .as_ref()
             .context("Original branch not known")?;

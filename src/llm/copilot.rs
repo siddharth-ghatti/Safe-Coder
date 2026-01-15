@@ -202,11 +202,17 @@ struct CopilotResponseMessage {
 
 impl CopilotClient {
     pub fn new(api_key: String, model: String, max_tokens: usize) -> Self {
+        // Create client with 120 second timeout to prevent hanging
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             api_key,
             model,
             max_tokens,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
@@ -327,11 +333,16 @@ impl LlmClient for CopilotClient {
             req_builder = req_builder.header("Copilot-Vision-Request", "true");
         }
 
+        tracing::info!("[COPILOT DEBUG] Sending request to Copilot API, model: {}, messages: {}", self.model, messages.len());
+        let request_start = std::time::Instant::now();
+
         let response = req_builder
             .json(&request)
             .send()
             .await
             .context("Failed to send request to GitHub Copilot")?;
+
+        tracing::info!("[COPILOT DEBUG] Got response in {:?}, status: {}", request_start.elapsed(), response.status());
 
         if !response.status().is_success() {
             let status = response.status();
@@ -339,10 +350,12 @@ impl LlmClient for CopilotClient {
             anyhow::bail!("GitHub Copilot API error ({}): {}", status, error_text);
         }
 
+        tracing::info!("[COPILOT DEBUG] Parsing response body...");
         let copilot_response: CopilotResponse = response
             .json()
             .await
             .context("Failed to parse GitHub Copilot response")?;
+        tracing::info!("[COPILOT DEBUG] Response parsed successfully");
 
         let choice = copilot_response
             .choices

@@ -3,7 +3,7 @@
 //! Provides a visual file browser that appears when typing @ in the input.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// A file entry in the picker
 #[derive(Debug, Clone)]

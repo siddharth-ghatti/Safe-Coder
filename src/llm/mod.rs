@@ -3,8 +3,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::auth::{StoredToken, TokenManager, TokenProvider};
-use crate::config::{Config, LlmConfig, LlmProvider};
+use crate::auth::{TokenManager, TokenProvider};
+use crate::config::{Config, LlmProvider};
 
 pub mod anthropic;
 pub mod cached;
@@ -13,6 +13,7 @@ pub mod ollama;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
+pub mod models;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
