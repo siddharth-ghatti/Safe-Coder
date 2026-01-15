@@ -261,20 +261,12 @@ impl SidebarState {
     }
 
     /// Track a file modification
-    pub fn track_file_modification(&mut self, path: String, mod_type: ModificationType) {
-        // Check if we already have this file
-        if let Some(existing) = self.modified_files.iter_mut().find(|f| f.path == path) {
-            // Update the modification type and timestamp
-            existing.modification_type = mod_type;
-            existing.timestamp = chrono::Local::now();
-        } else {
-            // Add new file
-            self.modified_files.push(ModifiedFile {
-                path,
-                modification_type: mod_type,
-                timestamp: chrono::Local::now(),
-            });
-        }
+    ///
+    /// NOTE: Modified files are intentionally not shown in the sidebar UI
+    /// for a cleaner right-side panel. This method is kept as a no-op to
+    /// preserve call sites but prevent population of the modified_files list.
+    pub fn track_file_modification(&mut self, _path: String, _mod_type: ModificationType) {
+        // Intentionally no-op to avoid displaying modified files in the sidebar.
     }
 
     /// Get count of modified files

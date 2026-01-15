@@ -488,37 +488,26 @@ impl LspManager {
             return String::new();
         }
 
-        let mut summary = String::from("## LSP Diagnostics\n\n");
-
+        // Only report ERRORS, ignore warnings
+        // This prevents the agent from looping on warning fixes
         let errors: Vec<_> = all_diags
             .iter()
             .filter(|d| d.severity == DiagnosticSeverity::Error)
             .collect();
 
-        let warnings: Vec<_> = all_diags
-            .iter()
-            .filter(|d| d.severity == DiagnosticSeverity::Warning)
-            .collect();
-
-        if !errors.is_empty() {
-            summary.push_str(&format!("### Errors ({})\n", errors.len()));
-            for diag in errors.iter().take(10) {
-                summary.push_str(&format!("- {}\n", diag.format_for_ai()));
-            }
-            if errors.len() > 10 {
-                summary.push_str(&format!("... and {} more errors\n", errors.len() - 10));
-            }
-            summary.push('\n');
+        // If no errors (only warnings), return empty - we ignore warnings
+        if errors.is_empty() {
+            return String::new();
         }
 
-        if !warnings.is_empty() {
-            summary.push_str(&format!("### Warnings ({})\n", warnings.len()));
-            for diag in warnings.iter().take(5) {
-                summary.push_str(&format!("- {}\n", diag.format_for_ai()));
-            }
-            if warnings.len() > 5 {
-                summary.push_str(&format!("... and {} more warnings\n", warnings.len() - 5));
-            }
+        let mut summary = String::from("## LSP Errors\n\n");
+
+        summary.push_str(&format!("### Errors ({})\n", errors.len()));
+        for diag in errors.iter().take(10) {
+            summary.push_str(&format!("- {}\n", diag.format_for_ai()));
+        }
+        if errors.len() > 10 {
+            summary.push_str(&format!("... and {} more errors\n", errors.len() - 10));
         }
 
         summary

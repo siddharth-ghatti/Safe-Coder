@@ -73,7 +73,15 @@ export type ServerEvent =
   | { type: "ContextCompressed"; tokens_compressed: number }
   | { type: "DoomLoopPrompt"; prompt_id: string; message: string }
   | { type: "Error"; message: string }
-  | { type: "Completed" };
+  | { type: "Completed" }
+  | { type: "TodoList"; todos: TodoItem[] };
+
+export interface TodoItem {
+  content: string;
+  status: string;
+  active_form: string;
+  priority: number;
+}
 
 export interface PlanStep {
   id: string;
@@ -101,6 +109,8 @@ export interface ToolExecution {
   endTime?: number;
   // Input parameters for the tool (for showing file content, etc.)
   input?: Record<string, unknown>;
+  // Reasoning text that appeared before this tool call
+  reasoning?: string;
 }
 
 export interface StreamingMessage {
@@ -108,6 +118,8 @@ export interface StreamingMessage {
   content: string;
   isStreaming: boolean;
   toolExecutions: ToolExecution[];
+  // Buffer for reasoning that hasn't been attached to a tool yet
+  pendingReasoning?: string;
 }
 
 export interface DoomLoopPrompt {

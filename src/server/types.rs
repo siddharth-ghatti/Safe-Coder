@@ -92,6 +92,9 @@ pub enum ServerEvent {
 
     /// Session completed (no more events)
     Completed,
+
+    /// Todo list update
+    TodoList { todos: Vec<TodoItemDto> },
 }
 
 /// Plan step DTO for API responses
@@ -100,6 +103,15 @@ pub struct PlanStepDto {
     pub id: String,
     pub description: String,
     pub status: String,
+}
+
+/// Todo item DTO for API responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoItemDto {
+    pub content: String,
+    pub status: String,
+    pub active_form: String,
+    pub priority: u8,
 }
 
 /// Convert SessionEvent to ServerEvent
@@ -239,6 +251,18 @@ impl From<SessionEvent> for ServerEvent {
                 ServerEvent::SubagentProgress {
                     id,
                     message: format!("Using {}: {}", tool, description),
+                }
+            }
+
+            // Handle todo list updates
+            SessionEvent::TodoList { todos } => {
+                ServerEvent::TodoList {
+                    todos: todos.into_iter().map(|t| TodoItemDto {
+                        content: t.content,
+                        status: t.status,
+                        active_form: t.active_form,
+                        priority: t.priority,
+                    }).collect(),
                 }
             }
         }

@@ -1,71 +1,122 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import { Check, X, Loader2, ArrowDown, FileCode, Terminal, Search, Eye, ChevronDown, ChevronRight } from "lucide-react";
+import { Check, X, Loader2, ArrowDown, ChevronDown, ChevronRight, Circle } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { UserMessage } from "./UserMessage";
 import { AssistantMessage } from "./AssistantMessage";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { cn } from "../../lib/utils";
-import type { ToolExecution } from "../../types";
+import type { ToolExecution, TodoItem } from "../../types";
 
-// Tool execution card with enhanced display for file operations
+// Todo list display component - compact inline checklist
+function TodoListDisplay({ todos }: { todos: TodoItem[] }) {
+  if (todos.length === 0) return null;
+
+  const completed = todos.filter(t => t.status === "completed").length;
+  const total = todos.length;
+
+  return (
+    <div className="border-l-2 border-border/50 pl-3 py-1 my-2">
+      <div className="text-[10px] text-muted-foreground mb-1">
+        {completed}/{total} tasks
+      </div>
+      <div className="space-y-0.5">
+        {todos.map((todo, idx) => (
+          <div
+            key={idx}
+            className={cn(
+              "flex items-center gap-1.5 text-xs",
+              todo.status === "completed" && "text-muted-foreground/60",
+              todo.status === "in_progress" && "text-foreground"
+            )}
+          >
+            {todo.status === "completed" ? (
+              <Check className="w-3 h-3 text-muted-foreground/60 flex-shrink-0" />
+            ) : todo.status === "in_progress" ? (
+              <Loader2 className="w-3 h-3 text-primary animate-spin flex-shrink-0" />
+            ) : (
+              <Circle className="w-3 h-3 text-muted-foreground/40 flex-shrink-0" />
+            )}
+            <span className={todo.status === "completed" ? "line-through" : ""}>
+              {todo.status === "in_progress" && todo.active_form
+                ? todo.active_form
+                : todo.content}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Generate smart summary for tool output (Claude Code style)
+function getToolSummary(toolName: string, output: string | undefined): string {
+  if (!output) return "";
+  const lines = output.split('\n').filter(l => l.trim());
+  const lineCount = lines.length;
+
+  switch (toolName.toLowerCase()) {
+    case "read_file":
+    case "read":
+      return `Read ${lineCount} lines`;
+    case "edit_file":
+    case "edit":
+    case "write_file":
+    case "write":
+      return lineCount > 0 ? `${lineCount} lines` : "Updated";
+    case "bash":
+      return lineCount === 0 ? "Completed" : `${lineCount} lines`;
+    case "grep":
+    case "glob":
+    case "code_search":
+      return lineCount === 0 ? "No matches" : `${lineCount} matches`;
+    default:
+      return lineCount === 0 ? "Done" : `${lineCount} lines`;
+  }
+}
+
+// Tool execution card - Claude Code style (compact with summary)
 function ToolExecutionCard({ tool }: { tool: ToolExecution }) {
   const [expanded, setExpanded] = useState(false);
 
-  // Determine tool type and extract relevant info from description
-  const isFileOperation = tool.name === "edit_file" || tool.name === "write_file" || tool.name === "read_file";
-  const isBashCommand = tool.name === "bash";
-  const isSearchTool = tool.name === "grep" || tool.name === "glob" || tool.name === "list_file";
+  // Extract target from description (file path, pattern, etc.)
+  const targetMatch = tool.description?.match(/`([^`]+)`/);
+  const target = targetMatch?.[1] || "";
 
-  // Extract file path from description (e.g., "📖 Read `path/to/file`" -> "path/to/file")
-  const filePathMatch = tool.description?.match(/`([^`]+)`/);
-  const filePath = filePathMatch?.[1];
-
-  // Get icon based on tool type
-  const getToolIcon = () => {
-    if (isFileOperation) return <FileCode className="w-3.5 h-3.5" />;
-    if (isBashCommand) return <Terminal className="w-3.5 h-3.5" />;
-    if (isSearchTool) return <Search className="w-3.5 h-3.5" />;
-    return <Eye className="w-3.5 h-3.5" />;
-  };
-
-  // For file operations, show more of the output
-  const outputLimit = isFileOperation ? 2000 : 500;
-  const hasLongOutput = (tool.output?.length || 0) > outputLimit;
+  // Get summary and preview
+  const summary = getToolSummary(tool.name, tool.output);
+  const outputLines = tool.output?.split('\n') || [];
+  const previewLines = outputLines.slice(0, 4);
+  const hiddenCount = Math.max(0, outputLines.length - 4);
 
   return (
-    <div
-      className={cn(
-        "bg-muted/30 rounded-lg border border-border/50 overflow-hidden tool-execution",
-        tool.success === undefined && "border-primary/30 animate-pulse-subtle"
+    <>
+      {/* Reasoning before tool call */}
+      {tool.reasoning && (
+        <div className="text-xs text-muted-foreground/70 pl-1 mb-0.5">
+          {tool.reasoning}
+        </div>
       )}
-    >
-      {/* Tool header */}
+
+      {/* Tool header: status + name(target) */}
       <div
-        className="flex items-center gap-2 px-3 py-2 bg-muted/20 cursor-pointer hover:bg-muted/30 transition-colors"
+        className="flex items-center gap-1.5 cursor-pointer hover:opacity-80"
         onClick={() => tool.output && setExpanded(!expanded)}
       >
         {tool.success === undefined ? (
-          <Loader2 className="w-3.5 h-3.5 text-primary animate-spin flex-shrink-0" />
+          <Loader2 className="w-3 h-3 text-primary animate-spin flex-shrink-0" />
         ) : tool.success ? (
-          <Check className="w-3.5 h-3.5 text-success flex-shrink-0" />
+          <span className="text-primary text-sm">●</span>
         ) : (
-          <X className="w-3.5 h-3.5 text-destructive flex-shrink-0" />
+          <X className="w-3 h-3 text-destructive flex-shrink-0" />
         )}
-
-        <span className={cn(
-          "flex-shrink-0",
-          isFileOperation ? "text-blue-400" : isBashCommand ? "text-orange-400" : "text-muted-foreground"
-        )}>
-          {getToolIcon()}
-        </span>
 
         <span className="text-xs font-medium text-primary">
           {tool.name}
         </span>
 
-        {filePath && (
-          <code className="text-xs text-muted-foreground font-mono truncate flex-1" title={filePath}>
-            {filePath}
+        {target && (
+          <code className="text-xs text-muted-foreground font-mono truncate" title={target}>
+            ({target})
           </code>
         )}
 
@@ -76,45 +127,44 @@ function ToolExecutionCard({ tool }: { tool: ToolExecution }) {
         )}
 
         {tool.output && (
-          <button className="ml-auto text-muted-foreground hover:text-foreground">
-            {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-          </button>
+          <span className="ml-auto text-muted-foreground">
+            {expanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          </span>
         )}
       </div>
 
-      {/* Tool description - shown when no file path */}
-      {!filePath && tool.description && (
-        <div className="px-3 py-2 border-t border-border/30">
-          <p className="text-xs text-muted-foreground">
-            {tool.description}
-          </p>
+      {/* Summary line */}
+      {tool.success !== undefined && summary && (
+        <div className="text-xs text-muted-foreground/60 pl-4">
+          └ {summary}
         </div>
       )}
 
-      {/* Tool output - expandable */}
+      {/* Preview lines (collapsed) */}
+      {tool.output && !expanded && previewLines.length > 0 && (
+        <div className="pl-4 mt-0.5">
+          {previewLines.slice(0, 2).map((line, i) => (
+            <div key={i} className="text-[10px] text-muted-foreground/50 font-mono truncate">
+              {line.slice(0, 80)}
+            </div>
+          ))}
+          {hiddenCount > 2 && (
+            <div className="text-[10px] text-muted-foreground/40">
+              ... +{hiddenCount} lines (click to expand)
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Expanded output */}
       {tool.output && expanded && (
-        <div className="border-t border-border/30 bg-background/30">
-          <pre className={cn(
-            "text-xs font-mono overflow-x-auto whitespace-pre-wrap p-3",
-            isFileOperation || isBashCommand ? "max-h-96" : "max-h-48",
-            "overflow-y-auto text-muted-foreground/90"
-          )}>
-            {hasLongOutput && !expanded
-              ? tool.output.slice(0, outputLimit) + "\n...(truncated)"
-              : tool.output}
+        <div className="pl-4 mt-1 border-l border-border/30 ml-1">
+          <pre className="text-xs font-mono overflow-x-auto whitespace-pre-wrap max-h-64 overflow-y-auto text-muted-foreground/80">
+            {tool.output}
           </pre>
         </div>
       )}
-
-      {/* Collapsed preview for output */}
-      {tool.output && !expanded && (
-        <div className="px-3 py-1.5 border-t border-border/30 bg-background/20">
-          <p className="text-[10px] text-muted-foreground/60 truncate">
-            {tool.output.split('\n')[0]?.slice(0, 80) || 'Click to expand output'}
-          </p>
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -123,6 +173,7 @@ export function MessageList() {
   const streamingMessage = useSessionStore((s) => s.streamingMessage);
   const thinkingMessage = useSessionStore((s) => s.thinkingMessage);
   const isProcessing = useSessionStore((s) => s.isProcessing);
+  const todoList = useSessionStore((s) => s.todoList);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const isAutoScrolling = useRef(false);
@@ -243,6 +294,9 @@ export function MessageList() {
                 ))}
               </div>
             )}
+
+            {/* Todo list display - shown below tool executions */}
+            {todoList.length > 0 && <TodoListDisplay todos={todoList} />}
 
             {/* Streaming text content */}
             {streamingMessage.content && (

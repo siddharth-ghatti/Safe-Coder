@@ -27,6 +27,35 @@ use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 // use crate::unified_planning::{ExecutionMode as UnifiedExecutionMode, UnifiedPlanner, PlanEvent as UnifiedPlanEvent};
 // use crate::unified_planning::integration::create_runner;
 
+/// Maximum characters for tool result content before truncation
+/// This prevents context bloat from large tool outputs
+const MAX_TOOL_RESULT_CHARS: usize = 8000;
+
+/// Truncate tool result to prevent context bloat
+fn truncate_tool_result(result: String) -> String {
+    if result.len() <= MAX_TOOL_RESULT_CHARS {
+        return result;
+    }
+
+    // Find a valid UTF-8 character boundary at or before MAX_TOOL_RESULT_CHARS
+    let mut safe_limit = MAX_TOOL_RESULT_CHARS;
+    while safe_limit > 0 && !result.is_char_boundary(safe_limit) {
+        safe_limit -= 1;
+    }
+
+    // Find a good truncation point (newline near the limit)
+    let truncate_at = result[..safe_limit]
+        .rfind('\n')
+        .unwrap_or(safe_limit);
+
+    format!(
+        "{}\n\n[Output truncated: {} chars total, showing first {}]",
+        &result[..truncate_at],
+        result.len(),
+        truncate_at
+    )
+}
+
 /// Events emitted during AI message processing for real-time UI updates
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -102,6 +131,10 @@ pub enum SessionEvent {
         prompt_id: String,
         message: String,
         response_tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    },
+    /// Todo list was updated
+    TodoList {
+        todos: Vec<crate::tools::todo::TodoItem>,
     },
 }
 
@@ -329,6 +362,89 @@ impl Session {
     /// Clear the event sender
     pub fn clear_event_sender(&mut self) {
         self.subagent_event_tx = None;
+    }
+
+    /// Send LLM message with automatic retry on token limit errors
+    /// Will auto-compact context and retry if token limit is exceeded
+    async fn send_llm_with_auto_compact(
+        &mut self,
+        tools: &[ToolDefinition],
+        system_prompt: &str,
+        event_tx: Option<&mpsc::UnboundedSender<SessionEvent>>,
+    ) -> Result<crate::llm::LlmResponse> {
+        const MAX_RETRIES: usize = 3;
+
+        for attempt in 0..MAX_RETRIES {
+            match self.llm_client
+                .send_message_with_system(&self.messages, tools, Some(system_prompt))
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    let error_str = e.to_string().to_lowercase();
+
+                    // Check if it's a token limit error
+                    let is_token_limit = error_str.contains("token")
+                        && (error_str.contains("exceed")
+                            || error_str.contains("limit")
+                            || error_str.contains("max_prompt_tokens"));
+
+                    if is_token_limit && attempt < MAX_RETRIES - 1 {
+                        // Auto-compact and retry
+                        tracing::warn!(
+                            "Token limit exceeded (attempt {}), auto-compacting context...",
+                            attempt + 1
+                        );
+
+                        // Force aggressive compaction
+                        let (compacted, result) = self
+                            .context_manager
+                            .compact(std::mem::take(&mut self.messages));
+
+                        self.messages = compacted;
+
+                        if result.did_compact() {
+                            let msg = format!(
+                                "Context auto-compacted: {} (attempt {})",
+                                result.summary, attempt + 1
+                            );
+                            tracing::info!("{}", msg);
+
+                            if let Some(tx) = event_tx {
+                                let _ = tx.send(SessionEvent::TextChunk(
+                                    format!("\n[Context auto-compacted: {}]\n", result.summary)
+                                ));
+                                let _ = tx.send(SessionEvent::ContextCompressed {
+                                    tokens_compressed: result.tokens_saved(),
+                                });
+                            }
+                        } else {
+                            // Compaction didn't help, try removing more messages
+                            if self.messages.len() > 4 {
+                                // Remove older messages (keep system + last 3)
+                                let remove_count = self.messages.len() / 2;
+                                self.messages.drain(1..=remove_count);
+
+                                if let Some(tx) = event_tx {
+                                    let _ = tx.send(SessionEvent::TextChunk(
+                                        format!("\n[Removed {} older messages due to token limit]\n", remove_count)
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Small delay before retry
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+
+                    // Not a token limit error or max retries reached
+                    return Err(e);
+                }
+            }
+        }
+
+        anyhow::bail!("Failed to send message after {} retries due to token limits", MAX_RETRIES)
     }
 
     /// Set the current plan
@@ -860,11 +976,51 @@ impl Session {
                 })
                 .collect();
 
-            // Send to LLM with hierarchical system prompt
-            let llm_response = self
+            // Send to LLM with hierarchical system prompt, with auto-retry on token limit errors
+            tracing::info!("[LLM DEBUG] Sending to LLM, msgs: {}", self.messages.len());
+            let llm_start = std::time::Instant::now();
+            let llm_response = match self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
-                .await?;
+                .await
+            {
+                Ok(resp) => {
+                    tracing::info!("[LLM DEBUG] LLM responded in {:?}", llm_start.elapsed());
+                    resp
+                }
+                Err(e) => {
+                    let error_str = e.to_string().to_lowercase();
+                    let is_token_limit = error_str.contains("token")
+                        && (error_str.contains("exceed")
+                            || error_str.contains("limit")
+                            || error_str.contains("max_prompt_tokens"));
+
+                    if is_token_limit {
+                        // Auto-compact and retry
+                        tracing::warn!("Token limit exceeded, auto-compacting context...");
+                        let (compacted, result) = self
+                            .context_manager
+                            .compact(std::mem::take(&mut self.messages));
+                        self.messages = compacted;
+
+                        if result.did_compact() {
+                            tracing::info!("Context auto-compacted: {}", result.summary);
+                        } else if self.messages.len() > 4 {
+                            // Remove half of older messages
+                            let remove_count = self.messages.len() / 2;
+                            self.messages.drain(1..=remove_count);
+                            tracing::info!("Removed {} older messages due to token limit", remove_count);
+                        }
+
+                        // Retry once after compaction
+                        self.llm_client
+                            .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                            .await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             let assistant_message = llm_response.message;
 
@@ -1062,7 +1218,7 @@ impl Session {
 
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: result,
+                        content: truncate_tool_result(result),
                     });
                 }
             }
@@ -1233,10 +1389,46 @@ impl Session {
 
             // Run exploration loop until LLM produces a plan
             loop {
-                let llm_response = self
+                let llm_response = match self
                     .llm_client
                     .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
-                    .await?;
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let error_str = e.to_string().to_lowercase();
+                        let is_token_limit = error_str.contains("token")
+                            && (error_str.contains("exceed")
+                                || error_str.contains("limit")
+                                || error_str.contains("max_prompt_tokens"));
+
+                        if is_token_limit {
+                            // Auto-compact and retry
+                            let _ = event_tx.send(SessionEvent::TextChunk(
+                                "\n[Auto-compacting context due to token limit...]\n".to_string(),
+                            ));
+                            let (compacted, result) = self
+                                .context_manager
+                                .compact(std::mem::take(&mut self.messages));
+                            self.messages = compacted;
+
+                            if result.did_compact() {
+                                let _ = event_tx.send(SessionEvent::ContextCompressed {
+                                    tokens_compressed: result.tokens_saved(),
+                                });
+                            } else if self.messages.len() > 4 {
+                                let remove_count = self.messages.len() / 2;
+                                self.messages.drain(1..=remove_count);
+                            }
+
+                            self.llm_client
+                                .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                                .await?
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                };
 
                 let assistant_message = llm_response.message;
 
@@ -1296,7 +1488,7 @@ impl Session {
 
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
-                            content: result,
+                            content: truncate_tool_result(result),
                         });
                     }
                 }
@@ -1361,11 +1553,52 @@ impl Session {
                 })
                 .collect();
 
-            // Send to LLM with hierarchical system prompt
-            let llm_response = self
+            // Send to LLM with hierarchical system prompt, with auto-retry on token limit errors
+            tracing::info!("[LLM DEBUG] Sending to LLM, msgs: {}", self.messages.len());
+            let llm_start = std::time::Instant::now();
+            let llm_response = match self
                 .llm_client
                 .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
-                .await?;
+                .await
+            {
+                Ok(resp) => {
+                    tracing::info!("[LLM DEBUG] LLM responded in {:?}", llm_start.elapsed());
+                    resp
+                }
+                Err(e) => {
+                    let error_str = e.to_string().to_lowercase();
+                    let is_token_limit = error_str.contains("token")
+                        && (error_str.contains("exceed")
+                            || error_str.contains("limit")
+                            || error_str.contains("max_prompt_tokens"));
+
+                    if is_token_limit {
+                        // Auto-compact and retry
+                        let _ = event_tx.send(SessionEvent::TextChunk(
+                            "\n[Auto-compacting context due to token limit...]\n".to_string(),
+                        ));
+                        let (compacted, result) = self
+                            .context_manager
+                            .compact(std::mem::take(&mut self.messages));
+                        self.messages = compacted;
+
+                        if result.did_compact() {
+                            let _ = event_tx.send(SessionEvent::ContextCompressed {
+                                tokens_compressed: result.tokens_saved(),
+                            });
+                        } else if self.messages.len() > 4 {
+                            let remove_count = self.messages.len() / 2;
+                            self.messages.drain(1..=remove_count);
+                        }
+
+                        self.llm_client
+                            .send_message_with_system(&self.messages, &tools, Some(&system_prompt))
+                            .await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
 
             let assistant_message = llm_response.message;
 
@@ -1663,18 +1896,31 @@ impl Session {
                             .with_session_events(event_tx.clone())
                     };
 
+                    tracing::info!("[TOOL DEBUG] Starting tool execution: {}", name);
+                    let tool_start = std::time::Instant::now();
+
                     let (result, success) = match self.tool_registry.get_tool(name) {
                         Some(tool) => match tool.execute(input.clone(), &tool_ctx).await {
                             Ok(output) => {
+                                tracing::info!("[TOOL DEBUG] Tool {} completed OK in {:?}, output len: {}",
+                                    name, tool_start.elapsed(), output.len());
                                 tools_executed.push(name.clone());
                                 // Check if bash command failed (has non-zero exit status)
                                 let cmd_success = !output.contains("[Exit status:");
                                 (output, cmd_success)
                             }
-                            Err(e) => (format!("Error: {}", e), false),
+                            Err(e) => {
+                                tracing::error!("[TOOL DEBUG] Tool {} failed in {:?}: {}",
+                                    name, tool_start.elapsed(), e);
+                                (format!("Error: {}", e), false)
+                            },
                         },
-                        None => (format!("Error: Unknown tool '{}'", name), false),
+                        None => {
+                            tracing::error!("[TOOL DEBUG] Unknown tool: {}", name);
+                            (format!("Error: Unknown tool '{}'", name), false)
+                        },
                     };
+                    tracing::info!("[TOOL DEBUG] Tool {} finished, success: {}", name, success);
 
                     // Record tool call for doom loop detection
                     self.loop_detector.record(name, input);
@@ -1753,6 +1999,12 @@ impl Session {
                         }
                     }
 
+                    // For todowrite, send todo list update event
+                    if name == "todowrite" && success {
+                        let todos = crate::tools::todo::get_todo_list();
+                        let _ = event_tx.send(SessionEvent::TodoList { todos });
+                    }
+
                     // Send tool output
                     let _ = event_tx.send(SessionEvent::ToolOutput {
                         name: name.clone(),
@@ -1780,7 +2032,7 @@ impl Session {
 
                     tool_results.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: result,
+                        content: truncate_tool_result(result),
                     });
                 }
             }
@@ -1826,16 +2078,51 @@ impl Session {
                     // Run build verification after file modifications
                     if let Some(build_errors) = self.verify_build().await {
                         has_issues = true;
-                        final_results.push(ContentBlock::Text {
-                            text: format!(
-                                "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
-                                build_errors
-                            ),
-                        });
+
+                        // Track error patterns to detect loops
+                        if let Some(loop_action) = self.loop_detector.record_build_errors(&build_errors) {
+                            // Same error type keeps occurring - add stronger hint to LLM
+                            match loop_action {
+                                DoomLoopAction::AskUser { message: loop_msg } => {
+                                    // Log the loop detection
+                                    let _ = event_tx.send(SessionEvent::TextChunk(
+                                        format!("\n⚠️ {}\n", loop_msg),
+                                    ));
+                                    // Add hint to the LLM to try a different approach
+                                    final_results.push(ContentBlock::Text {
+                                        text: format!(
+                                            "\n\n[BUILD ERRORS - SAME ERROR REPEATING]\n{}\n\n\
+                                            ⚠️ This same error has occurred multiple times. Your previous fixes did not work.\n\
+                                            STOP and THINK: What is the ROOT CAUSE? Try a completely different approach.\n\
+                                            Do NOT repeat the same fix.",
+                                            build_errors
+                                        ),
+                                    });
+                                }
+                                _ => {
+                                    final_results.push(ContentBlock::Text {
+                                        text: format!(
+                                            "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
+                                            build_errors
+                                        ),
+                                    });
+                                }
+                            }
+                        } else {
+                            final_results.push(ContentBlock::Text {
+                                text: format!(
+                                    "\n\n[BUILD ERRORS - FIX NOW]\n{}\n\nYou MUST fix these errors immediately. Do not ask the user - just fix them and verify.",
+                                    build_errors
+                                ),
+                            });
+                        }
 
                         let _ = event_tx.send(SessionEvent::TextChunk(
                             "\n⚙️ Build errors detected - fixing...\n".to_string(),
                         ));
+                    } else {
+                        // Build succeeded - clear error tracking
+                        self.loop_detector.clear_error_tracking();
                     }
 
                     // Check for LSP diagnostics after file modifications
@@ -1989,22 +2276,43 @@ impl Session {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let combined = format!("{}{}", stdout, stderr);
 
-            // Only return if there's meaningful output
-            if combined.trim().is_empty() {
-                Some("Build failed with no output".to_string())
+            // Filter to only include actual errors, not warnings
+            // For Rust: look for "error[" or "error:" patterns
+            // For TypeScript/JS: look for "error TS" or "Error:"
+            let error_lines: Vec<&str> = combined
+                .lines()
+                .filter(|line| {
+                    let l = line.to_lowercase();
+                    // Include lines with actual errors
+                    l.contains("error[") ||      // Rust error codes
+                    l.contains("error:") ||       // Generic errors
+                    l.contains("error ts") ||     // TypeScript
+                    l.contains("cannot find") ||  // Common error pattern
+                    l.contains("not found") ||    // Common error pattern
+                    l.contains("failed to") ||    // Build failures
+                    l.contains("aborting due")    // Rust abort message
+                })
+                .take(30) // Limit to 30 error lines
+                .collect();
+
+            // Only return if there are actual errors
+            if error_lines.is_empty() {
+                // Build failed but no error lines found - might be a different issue
+                None // Don't report warnings-only failures
             } else {
+                let error_output = error_lines.join("\n");
                 // Limit output to configured max size
-                let truncated = if combined.len() > max_output {
-                    format!("{}...\n[output truncated]", &combined[..max_output])
+                let truncated = if error_output.len() > max_output {
+                    format!("{}...\n[output truncated]", &error_output[..max_output])
                 } else {
-                    combined.to_string()
+                    error_output
                 };
                 Some(truncated)
             }
         }
     }
 
-    /// Generate a human-readable description of a tool action with parameters
+    /// Generate a compact description of a tool action (no emojis)
     fn describe_tool_action(&self, name: &str, params: &serde_json::Value) -> String {
         match name {
             "read_file" => {
@@ -2012,94 +2320,68 @@ impl Session {
                     .or_else(|| params.get("path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                format!("📖 Read `{}`", path)
+                path.to_string()
             }
             "write_file" => {
                 let path = params.get("file_path")
                     .or_else(|| params.get("path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let lines = params.get("content")
-                    .and_then(|v| v.as_str())
-                    .map(|c| c.lines().count())
-                    .unwrap_or(0);
-                format!("📝 Write `{}` ({} lines)", path, lines)
+                path.to_string()
             }
             "edit_file" => {
                 let path = params.get("file_path")
                     .or_else(|| params.get("path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let old = params.get("old_string")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                let new = params.get("new_string")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.len())
-                    .unwrap_or(0);
-                format!("✏️ Edit `{}` ({} → {} chars)", path, old, new)
+                path.to_string()
             }
             "glob" => {
                 let pattern = params.get("pattern")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let path = params.get("path")
-                    .and_then(|v| v.as_str());
-                if let Some(p) = path {
-                    format!("🔍 Glob `{}` in `{}`", pattern, p)
-                } else {
-                    format!("🔍 Glob `{}`", pattern)
-                }
+                pattern.to_string()
             }
-            "grep" => {
+            "grep" | "code_search" => {
                 let pattern = params.get("pattern")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let path = params.get("path")
-                    .and_then(|v| v.as_str());
-                if let Some(p) = path {
-                    format!("🔎 Grep `{}` in `{}`", pattern, p)
-                } else {
-                    format!("🔎 Grep `{}`", pattern)
-                }
+                format!("\"{}\"", pattern)
             }
             "list" => {
                 let path = params.get("path")
                     .and_then(|v| v.as_str())
                     .unwrap_or(".");
-                format!("📁 List `{}`", path)
+                path.to_string()
             }
             "bash" => {
                 let cmd = params.get("command")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let cmd_preview = if cmd.len() > 50 {
-                    format!("{}...", &cmd[..50])
+                if cmd.len() > 40 {
+                    format!("{}...", &cmd[..37])
                 } else {
                     cmd.to_string()
-                };
-                format!("💻 Run `{}`", cmd_preview)
+                }
             }
             "webfetch" => {
                 let url = params.get("url")
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
-                let url_short = if url.len() > 40 {
-                    format!("{}...", &url[..40])
+                if url.len() > 40 {
+                    format!("{}...", &url[..37])
                 } else {
                     url.to_string()
-                };
-                format!("🌐 Fetch `{}`", url_short)
+                }
             }
             "todowrite" => {
                 let count = params.get("todos")
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                format!("📋 Update todos ({} items)", count)
+                format!("{} items", count)
             }
-            _ => format!("🔧 {}", name),
+            _ => name.to_string(),
         }
     }
 

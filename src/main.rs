@@ -230,7 +230,8 @@ async fn main() -> Result<()> {
     } else {
         // TUI mode: log to a file so we don't interfere with the terminal
         // Set SAFE_CODER_LOG=debug to enable debug logging
-        let log_level = std::env::var("SAFE_CODER_LOG").unwrap_or_else(|_| "warn".to_string());
+        // Default to "info" to capture tool/LLM debug messages
+        let log_level = std::env::var("SAFE_CODER_LOG").unwrap_or_else(|_| "info".to_string());
         let log_dir = dirs::cache_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
             .join("safe-coder");

@@ -124,6 +124,11 @@ enum AiUpdate {
         prompt_id: String,
         message: String,
     },
+    /// Todo list update
+    TodoList {
+        block_id: String,
+        todos: Vec<crate::tools::todo::TodoItem>,
+    },
 }
 
 /// Message types for orchestration updates
@@ -417,14 +422,13 @@ impl ShellTuiRunner {
                             continue;
                         }
 
-                        // Show reasoning inline as streaming output with a thinking prefix
-                        // This is more visible than child blocks
+                        // Show reasoning inline as streaming output
                         if let Some(block) = self.app.get_block_mut(&block_id) {
-                            // Format reasoning with a thinking indicator
+                            // Format reasoning with a simple prefix
                             let formatted_lines: Vec<String> = text
                                 .lines()
                                 .filter(|l| !l.trim().is_empty())
-                                .map(|l| format!("💭 {}", l))
+                                .map(|l| format!("> {}", l))
                                 .collect();
 
                             match &mut block.output {
@@ -488,7 +492,7 @@ impl ShellTuiRunner {
                                 match &mut block.output {
                                     BlockOutput::Streaming { lines, .. } => {
                                         // Replace thinking message with actual text
-                                        if lines.len() == 1 && lines[0].starts_with("💭") {
+                                        if lines.len() == 1 && lines[0].starts_with(">") {
                                             lines.clear();
                                         }
                                         for line in text.lines() {
@@ -549,10 +553,11 @@ impl ShellTuiRunner {
                             if let Some(child) = parent.children.iter_mut().rev().find(|c| {
                                 matches!(&c.block_type, BlockType::AiToolExecution { tool_name: n } if n == &tool_name)
                             }) {
-                                // Truncate output for display (UTF-8 safe)
-                                let display_output = if output.chars().count() > 500 {
-                                    let truncated: String = output.chars().take(500).collect();
-                                    format!("{}...[truncated]", truncated)
+                                // Truncate output for display - show more for readability
+                                // 2000 chars is roughly 40 lines of code
+                                let display_output = if output.chars().count() > 2000 {
+                                    let truncated: String = output.chars().take(2000).collect();
+                                    format!("{}...\n[truncated - {} total chars]", truncated, output.chars().count())
                                 } else {
                                     output
                                 };
@@ -749,6 +754,12 @@ impl ShellTuiRunner {
                         // Store doom loop prompt for TUI to handle via HTTP
                         self.app.set_doom_loop_prompt_http(prompt_id, message);
                     }
+                    AiUpdate::TodoList { block_id, todos } => {
+                        // Update todo list in sidebar
+                        self.app.sidebar.update_todos(&todos);
+                        self.app.mark_dirty();
+                        let _ = block_id; // Suppress unused warning
+                    }
                 }
             }
 
@@ -770,8 +781,8 @@ impl ShellTuiRunner {
                         if let Some(parent) = self.app.get_block_mut(&block_id) {
                             parent.output = BlockOutput::Streaming {
                                 lines: vec![
-                                    format!("📋 Plan: {}", plan.summary),
-                                    format!("   {} task(s) to execute", plan.tasks.len()),
+                                    format!("Plan: {}", plan.summary),
+                                    format!("  {} task(s)", plan.tasks.len()),
                                 ],
                                 complete: false,
                             };
@@ -920,10 +931,9 @@ impl ShellTuiRunner {
                         fail_count,
                     } => {
                         if let Some(block) = self.app.get_block_mut(&block_id) {
-                            let status = if fail_count == 0 { "✅" } else { "⚠️" };
                             block.output = BlockOutput::Success(format!(
-                                "{} Orchestration complete: {} succeeded, {} failed\n\n{}",
-                                status, success_count, fail_count, summary
+                                "Done: {} succeeded, {} failed\n\n{}",
+                                success_count, fail_count, summary
                             ));
                             block.exit_code = Some(if fail_count == 0 { 0 } else { 1 });
                         }
@@ -1911,7 +1921,7 @@ Keyboard:
                         // Try to get models from GitHub Copilot
                         match self.get_copilot_models().await {
                             Ok(models) => {
-                                let mut output = String::from("📋 Available GitHub Copilot Models:\n\n");
+                                let mut output = String::from("Available GitHub Copilot Models:\n\n");
                                 let current_model = &self.config.llm.model;
                                 for model in models {
                                     let marker = if model.id == *current_model { " ← current" } else { "" };
@@ -1925,7 +1935,7 @@ Keyboard:
                         }
                     }
                     crate::config::LlmProvider::Anthropic => {
-                        let mut output = String::from("📋 Available Anthropic Models:\n\n");
+                        let mut output = String::from("Available Anthropic Models:\n\n");
                         let current_model = &self.config.llm.model;
                         let models = [
                             "claude-opus-4-20250514",
@@ -1941,7 +1951,7 @@ Keyboard:
                         output
                     }
                     crate::config::LlmProvider::OpenAI => {
-                        let mut output = String::from("📋 Available OpenAI Models:\n\n");
+                        let mut output = String::from("Available OpenAI Models:\n\n");
                         let current_model = &self.config.llm.model;
                         let models = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"];
                         for model in models {
@@ -1952,10 +1962,10 @@ Keyboard:
                         output
                     }
                     crate::config::LlmProvider::OpenRouter => {
-                        "📋 OpenRouter Models:\n\nVisit https://openrouter.ai/models for the full list.\nUse /model <provider/model-name> to switch.".to_string()
+                        "OpenRouter Models:\n\nVisit https://openrouter.ai/models for the full list.\nUse /model <provider/model-name> to switch.".to_string()
                     }
                     crate::config::LlmProvider::Ollama => {
-                        "📋 Ollama Models:\n\nRun `ollama list` to see installed models.\nUse /model <name> to switch.".to_string()
+                        "Ollama Models:\n\nRun `ollama list` to see installed models.\nUse /model <name> to switch.".to_string()
                     }
                 };
 
@@ -3164,6 +3174,15 @@ async fn forward_server_events_to_ai_updates(
             ServerEvent::Error { message } => AiUpdate::Error {
                 block_id: block_id.clone(),
                 message,
+            },
+            ServerEvent::TodoList { todos } => AiUpdate::TodoList {
+                block_id: block_id.clone(),
+                todos: todos.into_iter().map(|t| crate::tools::todo::TodoItem {
+                    content: t.content,
+                    status: t.status,
+                    active_form: t.active_form,
+                    priority: t.priority,
+                }).collect(),
             },
         };
         let _ = ai_tx.send(update);

@@ -62,7 +62,10 @@ impl Tool for ReadTool {
 
         let lines: Vec<&str> = content.lines().collect();
         let offset = params.offset.unwrap_or(0);
-        let limit = params.limit.unwrap_or(lines.len());
+        // Default limit to 500 lines to avoid context bloat, unless explicitly specified
+        const MAX_DEFAULT_LINES: usize = 500;
+        let limit = params.limit.unwrap_or(MAX_DEFAULT_LINES.min(lines.len()));
+        let total_lines = lines.len();
 
         let selected_lines = lines.iter()
             .skip(offset)
@@ -72,6 +75,17 @@ impl Tool for ReadTool {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Ok(selected_lines)
+        // Add info about truncation if file is larger than what we're showing
+        if total_lines > offset + limit {
+            Ok(format!(
+                "{}\n\n[Showing lines {}-{} of {} total. Use offset/limit to read more.]",
+                selected_lines,
+                offset + 1,
+                (offset + limit).min(total_lines),
+                total_lines
+            ))
+        } else {
+            Ok(selected_lines)
+        }
     }
 }

@@ -128,12 +128,18 @@ impl OpenAiClient {
         max_tokens: usize,
         base_url: Option<String>,
     ) -> Self {
+        // Create client with 120 second timeout to prevent hanging
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Self {
             api_key,
             model,
             max_tokens,
             base_url: base_url.unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
-            client: reqwest::Client::new(),
+            client,
         }
     }
 

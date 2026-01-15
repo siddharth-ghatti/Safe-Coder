@@ -23,7 +23,7 @@ use textwrap::wrap;
 use super::markdown::{has_markdown, render_markdown_lines};
 use super::shell_app::{BlockOutput, BlockType, CommandBlock, FileDiff, ShellTuiApp};
 
-use super::sidebar::{PlanStepDisplay, ToolStepStatus};
+use super::sidebar::{PlanStepDisplay, TodoPlanDisplay, ToolStepStatus};
 use crate::planning::PlanStepStatus;
 
 // ============================================================================
@@ -42,12 +42,16 @@ const TEXT_SECONDARY: Color = Color::Rgb(150, 150, 160); // Secondary text
 const TEXT_DIM: Color = Color::Rgb(100, 100, 110); // Dimmed text
 const TEXT_MUTED: Color = Color::Rgb(70, 70, 80); // Very dim text
 
-const BG_PRIMARY: Color = Color::Rgb(30, 32, 40); // Main background
-const BG_BLOCK: Color = Color::Rgb(38, 40, 50); // Message block background
-const BG_INPUT: Color = Color::Rgb(45, 48, 58); // Input area background
-const BG_STATUS: Color = Color::Rgb(35, 38, 48); // Status bar background
+const BG_PRIMARY: Color = Color::Rgb(0, 0, 0); // Pure black background
+const BG_BLOCK: Color = Color::Rgb(15, 15, 15); // Slightly lighter for blocks
+const BG_INPUT: Color = Color::Rgb(20, 20, 20); // Input area
+const BG_STATUS: Color = Color::Rgb(10, 10, 10); // Status bar
 
-const BORDER_SUBTLE: Color = Color::Rgb(55, 58, 68); // Subtle borders
+const BORDER_SUBTLE: Color = Color::Rgb(40, 40, 45); // Subtle borders
+
+// Diff colors (for file changes)
+const BG_DIFF_ADD: Color = Color::Rgb(30, 60, 30); // Green background for additions
+const BG_DIFF_DEL: Color = Color::Rgb(60, 30, 30); // Red background for deletions
 const BORDER_ACCENT: Color = Color::Rgb(80, 200, 220); // Accent borders
 
 // ============================================================================
@@ -55,6 +59,77 @@ const BORDER_ACCENT: Color = Color::Rgb(80, 200, 220); // Accent borders
 // ============================================================================
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Extract meaningful target from tool input (Claude Code style)
+/// For Read/Write/Edit: extract file path
+/// For Glob/Grep: extract pattern
+/// For Bash: extract command (truncated)
+fn extract_tool_target(tool_name: &str, input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+
+    match tool_name.to_lowercase().as_str() {
+        "read" | "write" | "edit" => {
+            // Try to extract file path from input
+            // Input might be "path/to/file" or "Reading path/to/file"
+            let input = input.trim();
+            // If starts with common path chars, use as-is
+            if input.starts_with('/') || input.starts_with('.') || input.starts_with("src") {
+                return input.to_string();
+            }
+            // Otherwise try to find a path-like string
+            for word in input.split_whitespace() {
+                if word.contains('/') || word.contains('.') {
+                    return word.trim_matches(|c| c == '\'' || c == '"').to_string();
+                }
+            }
+            input.to_string()
+        }
+        "glob" => {
+            // Extract glob pattern
+            for word in input.split_whitespace() {
+                if word.contains('*') || word.contains('/') {
+                    return word.trim_matches(|c| c == '\'' || c == '"').to_string();
+                }
+            }
+            input.to_string()
+        }
+        "grep" | "code_search" => {
+            // Extract search pattern
+            if let Some(pattern) = input.split('"').nth(1) {
+                return format!("\"{}\"", pattern);
+            }
+            if let Some(pattern) = input.split('\'').nth(1) {
+                return format!("'{}'", pattern);
+            }
+            input.to_string()
+        }
+        "bash" => {
+            // For bash, truncate long commands
+            let cmd = input.trim();
+            if cmd.len() > 40 {
+                format!("{}...", &cmd[..37])
+            } else {
+                cmd.to_string()
+            }
+        }
+        _ => input.to_string(),
+    }
+}
+
+/// Capitalize first letter of a string
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
 
 // ============================================================================
 // Main Draw Function
@@ -221,8 +296,40 @@ fn draw_messages(f: &mut Frame, app: &mut ShellTuiApp, area: Rect) {
     let current_task = app.sidebar.current_task_active_form();
     let status_text = current_task.as_deref().unwrap_or_else(|| app.spinner.current());
 
+    // Get todos for inline display during AI processing
+    let todos = app.sidebar.todo_plan.as_ref();
+
+    // Compute elapsed time for status line
+    let elapsed_secs = chrono::Local::now()
+        .signed_duration_since(app.start_time)
+        .num_seconds();
+    let elapsed_str = if elapsed_secs >= 3600 {
+        format!(
+            "{}h {}m",
+            elapsed_secs / 3600,
+            (elapsed_secs % 3600) / 60
+        )
+    } else if elapsed_secs >= 60 {
+        format!("{}m {}s", elapsed_secs / 60, elapsed_secs % 60)
+    } else {
+        format!("{}s", elapsed_secs)
+    };
+
+    // Get total tokens
+    let total_tokens = app.sidebar.token_usage.total_tokens;
+
     for block in app.blocks.iter().skip(start_block) {
-        render_block(&mut all_lines, block, content_width, app.animation_frame, &app.model_display, status_text);
+        render_block(
+            &mut all_lines,
+            block,
+            content_width,
+            app.animation_frame,
+            &app.model_display,
+            status_text,
+            todos,
+            &elapsed_str,
+            total_tokens,
+        );
         all_lines.push(MessageLine::Empty);
     }
 
@@ -383,6 +490,10 @@ enum MessageLine {
     ThinkingText {
         text: String,
     },
+    // AI reasoning explanation (more prominent, shown before tool calls)
+    ReasoningText {
+        text: String,
+    },
     // Tool metadata footer (exit code, duration, truncation info)
     ToolFooter {
         exit_code: Option<i32>,
@@ -391,10 +502,33 @@ enum MessageLine {
         lines_total: usize,
         truncated: bool,
     },
+    // Tool summary line: "└ Read 50 lines" or "└ Added 6 lines, removed 17 lines"
+    ToolSummary {
+        text: String,
+    },
+    // Tool output preview line (indented)
+    ToolPreviewLine {
+        text: String,
+    },
+    // Truncation hint: "... +8 lines (ctrl+o to expand)"
+    ToolTruncated {
+        hidden_count: usize,
+    },
     // Diagnostic counts after file operations
     DiagnosticInfo {
         errors: usize,
         warnings: usize,
+    },
+    // Inline todo status line (like Claude Code)
+    TodoStatusLine {
+        current_task: String,
+        elapsed: String,
+        tokens: usize,
+    },
+    // Inline todo item
+    TodoItem {
+        text: String,
+        status: String, // "completed", "in_progress", "pending"
     },
 }
 
@@ -441,7 +575,7 @@ impl MessageLine {
             }
 
             MessageLine::ToolHeader { tool, target, duration_ms, exit_code } => {
-                // Claude Code style: "● Tool(target)"
+                // Claude Code style: "● Tool(target)" - compact, no emojis
                 let status_color = match exit_code {
                     Some(0) => ACCENT_GREEN,
                     Some(_) => ACCENT_RED,
@@ -450,35 +584,29 @@ impl MessageLine {
 
                 let mut spans = vec![
                     Span::styled("● ", Style::default().fg(status_color)),
-                ];
-
-                // Format as "Tool(target)" if target is not empty, else just "Tool"
-                if target.is_empty() {
-                    spans.push(Span::styled(
+                    Span::styled(
                         tool.clone(),
                         Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        format!("{}(", tool),
-                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::styled(
-                        target.clone(),
-                        Style::default().fg(TEXT_SECONDARY),
-                    ));
-                    spans.push(Span::styled(
-                        ")",
-                        Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
-                    ));
+                    ),
+                ];
+
+                // Add target in parentheses if not empty (truncate long targets)
+                if !target.is_empty() {
+                    let display_target = if target.len() > 50 {
+                        format!("{}...", &target[..47])
+                    } else {
+                        target.clone()
+                    };
+                    spans.push(Span::styled("(", Style::default().fg(TEXT_DIM)));
+                    spans.push(Span::styled(display_target, Style::default().fg(TEXT_SECONDARY)));
+                    spans.push(Span::styled(")", Style::default().fg(TEXT_DIM)));
                 }
 
                 // Add duration if complete
                 if let Some(ms) = duration_ms {
-                    let duration_str = format_duration(*ms);
                     spans.push(Span::styled(
-                        format!(" {}", duration_str),
-                        Style::default().fg(TEXT_DIM),
+                        format!(" {}",  format_duration(*ms)),
+                        Style::default().fg(TEXT_MUTED),
                     ));
                 }
 
@@ -498,30 +626,30 @@ impl MessageLine {
             ]),
 
             MessageLine::DiffRemove { old_num, text } => Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(format!("{:>3}", old_num), Style::default().fg(ACCENT_RED)),
-                Span::styled("    ", Style::default()),
-                Span::styled(" - ", Style::default().fg(ACCENT_RED)),
+                Span::styled(
+                    format!("{:>3}-", old_num),
+                    Style::default().fg(TEXT_MUTED).bg(BG_DIFF_DEL),
+                ),
                 Span::styled(
                     text.clone(),
-                    Style::default().fg(ACCENT_RED).bg(Color::Rgb(50, 20, 20)),
+                    Style::default().fg(Color::Rgb(255, 180, 180)).bg(BG_DIFF_DEL),
                 ),
             ]),
 
             MessageLine::DiffAdd { new_num, text } => Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled("   ", Style::default()),
-                Span::styled(format!("{:>4}", new_num), Style::default().fg(ACCENT_GREEN)),
-                Span::styled(" + ", Style::default().fg(ACCENT_GREEN)),
+                Span::styled(
+                    format!("{:>3}+", new_num),
+                    Style::default().fg(TEXT_MUTED).bg(BG_DIFF_ADD),
+                ),
                 Span::styled(
                     text.clone(),
-                    Style::default().fg(ACCENT_GREEN).bg(Color::Rgb(20, 40, 20)),
+                    Style::default().fg(Color::Rgb(180, 255, 180)).bg(BG_DIFF_ADD),
                 ),
             ]),
 
             MessageLine::ShellOutput { text } => Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
+                Span::styled("  ", Style::default()),  // Indent
+                Span::styled(text.clone(), Style::default().fg(TEXT_DIM)),
             ]),
 
             MessageLine::SystemInfo { text } => {
@@ -558,51 +686,71 @@ impl MessageLine {
                 ])
             }
 
-            MessageLine::ToolFooter { exit_code, duration_ms, lines_shown, lines_total, truncated } => {
-                let mut spans = vec![Span::styled("  └ ", Style::default().fg(TEXT_DIM))];
+            MessageLine::ReasoningText { text } => {
+                // Prominent reasoning with cyan prefix
+                Line::from(vec![
+                    Span::styled("→ ", Style::default().fg(ACCENT_CYAN)),
+                    Span::styled(
+                        text.clone(),
+                        Style::default().fg(TEXT_SECONDARY),
+                    ),
+                ])
+            }
 
-                // Exit code
+            MessageLine::ToolFooter { exit_code, duration_ms: _, lines_shown, lines_total, truncated } => {
+                // Compact footer: "└ X lines" or "└ exit N"
+                let mut spans = vec![Span::styled("  └ ", Style::default().fg(TEXT_MUTED))];
+
+                // Show error exit code if non-zero
                 if let Some(code) = exit_code {
-                    let (icon, color) = if *code == 0 {
-                        ("✓", ACCENT_GREEN)
-                    } else {
-                        ("✗", ACCENT_RED)
-                    };
-                    spans.push(Span::styled(
-                        format!("{} ", icon),
-                        Style::default().fg(color),
-                    ));
                     if *code != 0 {
                         spans.push(Span::styled(
                             format!("exit {} ", code),
-                            Style::default().fg(color),
+                            Style::default().fg(ACCENT_RED),
                         ));
                     }
                 }
 
-                // Duration
-                if let Some(ms) = duration_ms {
-                    let duration_str = format_duration(*ms);
-                    spans.push(Span::styled(
-                        format!("{} ", duration_str),
-                        Style::default().fg(TEXT_DIM),
-                    ));
-                }
-
-                // Truncation/line count info
+                // Line count info (compact)
                 if *truncated {
                     spans.push(Span::styled(
-                        format!("({}/{} lines shown)", lines_shown, lines_total),
-                        Style::default().fg(ACCENT_YELLOW),
+                        format!("{}/{} lines", lines_shown, lines_total),
+                        Style::default().fg(TEXT_MUTED),
                     ));
                 } else if *lines_total > 0 {
                     spans.push(Span::styled(
-                        format!("({} lines)", lines_total),
-                        Style::default().fg(TEXT_DIM),
+                        format!("{} lines", lines_total),
+                        Style::default().fg(TEXT_MUTED),
                     ));
                 }
 
                 Line::from(spans)
+            }
+
+            MessageLine::ToolSummary { text } => {
+                // Claude Code style: "  └ Summary text"
+                Line::from(vec![
+                    Span::styled("  └ ", Style::default().fg(TEXT_MUTED)),
+                    Span::styled(text.clone(), Style::default().fg(TEXT_SECONDARY)),
+                ])
+            }
+
+            MessageLine::ToolPreviewLine { text } => {
+                // Indented preview line
+                Line::from(vec![
+                    Span::styled("    ", Style::default()),
+                    Span::styled(text.clone(), Style::default().fg(TEXT_MUTED)),
+                ])
+            }
+
+            MessageLine::ToolTruncated { hidden_count } => {
+                // "  ... +N lines (ctrl+o to expand)"
+                Line::from(vec![
+                    Span::styled(
+                        format!("  ... +{} lines (ctrl+o to expand)", hidden_count),
+                        Style::default().fg(TEXT_DIM),
+                    ),
+                ])
             }
 
             MessageLine::DiagnosticInfo { errors, warnings } => {
@@ -629,6 +777,43 @@ impl MessageLine {
 
                 Line::from(spans)
             }
+
+            MessageLine::TodoStatusLine { current_task, elapsed, tokens } => {
+                // Format like: "· Adding feature... (ctrl+c to interrupt · 6m 17s · ↑ 15.3k tokens)"
+                let tokens_str = if *tokens >= 1_000_000 {
+                    format!("{:.1}M", *tokens as f64 / 1_000_000.0)
+                } else if *tokens >= 1_000 {
+                    format!("{:.1}k", *tokens as f64 / 1_000.0)
+                } else {
+                    tokens.to_string()
+                };
+
+                Line::from(vec![
+                    Span::styled("· ", Style::default().fg(ACCENT_CYAN)),
+                    Span::styled(
+                        format!("{}  ", current_task),
+                        Style::default().fg(TEXT_PRIMARY),
+                    ),
+                    Span::styled(
+                        format!("(ctrl+c to interrupt · {} · ↑ {} tokens)", elapsed, tokens_str),
+                        Style::default().fg(TEXT_DIM),
+                    ),
+                ])
+            }
+
+            MessageLine::TodoItem { text, status } => {
+                let (icon, style) = match status.as_str() {
+                    "completed" => ("☒", Style::default().fg(TEXT_DIM)),
+                    "in_progress" => ("☐", Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)),
+                    _ => ("☐", Style::default().fg(TEXT_SECONDARY)),
+                };
+
+                Line::from(vec![
+                    Span::styled("  ", Style::default()),
+                    Span::styled(format!("{} ", icon), style),
+                    Span::styled(text.clone(), style),
+                ])
+            }
         }
     }
 }
@@ -637,7 +822,17 @@ impl MessageLine {
 // Block Rendering
 // ============================================================================
 
-fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize, frame: usize, model_display: &str, spinner_word: &str) {
+fn render_block(
+    lines: &mut Vec<MessageLine>,
+    block: &CommandBlock,
+    width: usize,
+    frame: usize,
+    model_display: &str,
+    spinner_word: &str,
+    todos: Option<&TodoPlanDisplay>,
+    elapsed_str: &str,
+    total_tokens: usize,
+) {
     match &block.block_type {
         BlockType::SystemMessage => {
             for line in block.output.get_text().lines() {
@@ -680,6 +875,29 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
             let is_running = block.is_running();
             let has_children = !block.children.is_empty();
             let has_output = !block.output.get_text().is_empty();
+
+            // Inline todo display when AI is processing (like Claude Code)
+            if is_running {
+                if let Some(todo_plan) = todos {
+                    if !todo_plan.items.is_empty() {
+                        lines.push(MessageLine::Empty);
+                        // Status line with current task, elapsed, tokens
+                        let current_task_text = spinner_word.to_string();
+                        lines.push(MessageLine::TodoStatusLine {
+                            current_task: current_task_text,
+                            elapsed: elapsed_str.to_string(),
+                            tokens: total_tokens,
+                        });
+                        // Todo items
+                        for item in &todo_plan.items {
+                            lines.push(MessageLine::TodoItem {
+                                text: item.content.clone(),
+                                status: item.status.clone(),
+                            });
+                        }
+                    }
+                }
+            }
 
             if is_running && !has_children && !has_output {
                 // Initial thinking state - show current task or rotating word
@@ -801,22 +1019,17 @@ fn render_block(lines: &mut Vec<MessageLine>, block: &CommandBlock, width: usize
         }
 
         BlockType::AiReasoning => {
+            // Render reasoning with prominent cyan arrow prefix
             let text = block.output.get_text();
-            if has_markdown(&text) {
-                // Render with markdown formatting
-                for md_line in render_markdown_lines(&text) {
-                    lines.push(MessageLine::AiMarkdownLine {
-                        spans: md_line.spans,
-                    });
-                }
-            } else {
-                // Plain text fallback
+            if !text.is_empty() {
                 for line in text.lines() {
-                    for wrapped in wrap(line, width.saturating_sub(4)) {
-                        lines.push(MessageLine::AiText {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    for wrapped in wrap(trimmed, width.saturating_sub(4)) {
+                        lines.push(MessageLine::ReasoningText {
                             text: wrapped.to_string(),
-                            model: None,
-                            timestamp: None,
                         });
                     }
                 }
@@ -872,26 +1085,23 @@ fn render_child_block(
 ) {
     match &block.block_type {
         BlockType::AiToolExecution { tool_name } => {
+            // Compact: just one empty line before tool
             lines.push(MessageLine::Empty);
-            lines.push(MessageLine::BlockStart);
 
-            // Tool header
-            let target = if !block.input.is_empty() {
-                block.input.clone()
-            } else {
-                String::new()
-            };
+            // Tool header - extract meaningful target from input
+            let target = extract_tool_target(tool_name, &block.input);
 
-            // Capitalize first letter of tool name
+            // Capitalize tool name
             let tool_display = match tool_name.as_str() {
                 "bash" => "Bash".to_string(),
                 "read" | "Read" => "Read".to_string(),
                 "write" | "Write" => "Write".to_string(),
                 "edit" | "Edit" => "Edit".to_string(),
                 "glob" | "Glob" => "Glob".to_string(),
-                "grep" | "Grep" => "Grep".to_string(),
-                name if name.starts_with("task-") => format!("Task {}", &name[5..]),
-                other => other.to_string(),
+                "grep" | "Grep" => "Search".to_string(),  // Use "Search" like Claude Code
+                "code_search" => "Search".to_string(),
+                name if name.starts_with("task-") => "Task".to_string(),
+                other => capitalize_first(other),
             };
 
             lines.push(MessageLine::ToolHeader {
@@ -901,36 +1111,53 @@ fn render_child_block(
                 exit_code: block.exit_code,
             });
 
-            // Only show spinner if this is the last running block
+            // Show spinner while running
             if block.is_running() && show_spinner {
                 lines.push(MessageLine::Running {
-                    text: "Executing...".to_string(),
+                    text: "...".to_string(),
                     spinner_frame: frame,
                 });
-            }
+            } else if !block.is_running() {
+                // Claude Code style: summary line first, then preview
+                // Show diff summary for edit_file/write_file
+                if let Some(diff) = &block.diff {
+                    // Count line changes
+                    let old_lines = diff.old_content.lines().count();
+                    let new_lines = diff.new_content.lines().count();
+                    let added = new_lines.saturating_sub(old_lines);
+                    let removed = old_lines.saturating_sub(new_lines);
 
-            // Show diff if present (OpenCode-style with line numbers)
-            if let Some(diff) = &block.diff {
-                render_diff_opencode(lines, diff, width);
-            } else if tool_name == "bash"
-                || tool_name.starts_with("task-")
-                || tool_name.starts_with("subagent:")
-            {
-                let meta = render_tool_output(lines, &block.output, width, unthrottled);
+                    let summary = if added > 0 && removed > 0 {
+                        format!("Added {} lines, removed {} lines", added, removed)
+                    } else if added > 0 {
+                        format!("Added {} lines", added)
+                    } else if removed > 0 {
+                        format!("Removed {} lines", removed)
+                    } else {
+                        format!("Modified {} lines", new_lines.min(old_lines).max(1))
+                    };
+                    lines.push(MessageLine::ToolSummary { text: summary });
 
-                // Add footer for completed tools with output
-                if !block.is_running() && meta.lines_total > 0 {
-                    lines.push(MessageLine::ToolFooter {
-                        exit_code: block.exit_code,
-                        duration_ms: block.duration_ms,
-                        lines_shown: meta.lines_shown,
-                        lines_total: meta.lines_total,
-                        truncated: meta.truncated,
-                    });
+                    // Show preview of new content (limited lines)
+                    let preview_lines: Vec<&str> = diff.new_content.lines().take(4).collect();
+                    for (i, line) in preview_lines.iter().enumerate() {
+                        let line_num = new_lines.saturating_sub(preview_lines.len()) + i + 1;
+                        lines.push(MessageLine::ToolPreviewLine {
+                            text: format!("{:>4}  {}", line_num, line),
+                        });
+                    }
+                    if new_lines > 4 && !unthrottled {
+                        lines.push(MessageLine::ToolTruncated {
+                            hidden_count: new_lines - 4,
+                        });
+                    }
+                } else {
+                    // For non-diff tools, generate smart summary and preview
+                    render_tool_output_claude_style(lines, tool_name, &block.output, width, unthrottled, block.exit_code);
                 }
             }
 
-            // Show diagnostic counts if present (after file operations)
+            // Show diagnostic counts if present
             if let Some((errors, warnings)) = block.diagnostic_counts {
                 if errors > 0 || warnings > 0 {
                     lines.push(MessageLine::DiagnosticInfo { errors, warnings });
@@ -1123,14 +1350,117 @@ fn render_tool_output(
     }
 }
 
-/// Render diff in OpenCode style with side-by-side line numbers
+/// Render tool output in Claude Code style (compact summary + preview)
+fn render_tool_output_claude_style(
+    lines: &mut Vec<MessageLine>,
+    tool_name: &str,
+    output: &BlockOutput,
+    _width: usize,
+    unthrottled: bool,
+    exit_code: Option<i32>,
+) {
+    let text = output.get_text();
+    if text.is_empty() {
+        return;
+    }
+
+    let output_lines: Vec<&str> = text.lines().collect();
+    let total_lines = output_lines.len();
+    let preview_count = if unthrottled { total_lines } else { 4 };
+
+    // Generate smart summary based on tool type
+    let summary = match tool_name.to_lowercase().as_str() {
+        "read" | "read_file" => {
+            format!("Read {} lines", total_lines)
+        }
+        "bash" => {
+            if let Some(code) = exit_code {
+                if code != 0 {
+                    format!("Exit code {} ({} lines)", code, total_lines)
+                } else if total_lines == 0 {
+                    "Completed".to_string()
+                } else {
+                    format!("{} lines", total_lines)
+                }
+            } else if total_lines == 0 {
+                "Completed".to_string()
+            } else {
+                format!("{} lines", total_lines)
+            }
+        }
+        "grep" | "glob" | "code_search" | "list_file" => {
+            // Count matches (lines with content)
+            let matches = output_lines.iter().filter(|l| !l.trim().is_empty()).count();
+            if matches == 0 {
+                "No matches".to_string()
+            } else {
+                format!("{} matches", matches)
+            }
+        }
+        "todowrite" | "todoread" => {
+            "Updated".to_string()
+        }
+        _ => {
+            if total_lines == 0 {
+                "Done".to_string()
+            } else {
+                format!("{} lines", total_lines)
+            }
+        }
+    };
+
+    lines.push(MessageLine::ToolSummary { text: summary });
+
+    // Show preview lines (first few lines)
+    for (i, line) in output_lines.iter().take(preview_count).enumerate() {
+        let line_num = i + 1;
+        let preview_text = if line.len() > 80 {
+            format!("{:>4}  {}...", line_num, &line[..77])
+        } else {
+            format!("{:>4}  {}", line_num, line)
+        };
+        lines.push(MessageLine::ToolPreviewLine { text: preview_text });
+    }
+
+    // Show truncation hint if there's more
+    if total_lines > preview_count && !unthrottled {
+        lines.push(MessageLine::ToolTruncated {
+            hidden_count: total_lines - preview_count,
+        });
+    }
+}
+
+/// Render diff in Claude Code style with colored backgrounds
 fn render_diff_opencode(lines: &mut Vec<MessageLine>, diff: &FileDiff, _width: usize) {
     let text_diff = TextDiff::from_lines(&diff.old_content, &diff.new_content);
+
+    // Count additions and deletions for summary
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    for change in text_diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => additions += 1,
+            ChangeTag::Delete => deletions += 1,
+            _ => {}
+        }
+    }
+
+    // Add summary line like Claude Code: "└ Added X lines, removed Y lines"
+    let summary = if additions > 0 && deletions > 0 {
+        format!("└ Added {} lines, removed {} lines", additions, deletions)
+    } else if additions > 0 {
+        format!("└ Added {} line{}", additions, if additions == 1 { "" } else { "s" })
+    } else if deletions > 0 {
+        format!("└ Removed {} line{}", deletions, if deletions == 1 { "" } else { "s" })
+    } else {
+        "└ No changes".to_string()
+    };
+    lines.push(MessageLine::ShellOutput { text: summary });
 
     let mut old_line = 1usize;
     let mut new_line = 1usize;
     let mut changes_shown = 0;
-    let max_changes = 15;
+    let max_changes = 20;
 
     // Find the first change and show some context
     let changes: Vec<_> = text_diff.iter_all_changes().collect();
@@ -1219,52 +1549,6 @@ fn shorten_model_name(model: &str) -> String {
     }
 }
 
-fn draw_input_hints(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    // Show key commands on the left, model on the right
-    // Format: "/help  /undo  /redo  /compact  @file  !cmd                    model"
-
-    let hints = vec![
-        ("/help", "help"),
-        ("/undo", "undo"),
-        ("/redo", "redo"),
-        ("/compact", "tokens"),
-        ("@", "attach"),
-        ("!", "shell"),
-    ];
-
-    let mut spans: Vec<Span> = vec![Span::styled(" ", Style::default())];
-
-    for (i, (cmd, _desc)) in hints.iter().enumerate() {
-        spans.push(Span::styled(*cmd, Style::default().fg(TEXT_SECONDARY)));
-        if i < hints.len() - 1 {
-            spans.push(Span::styled("  ", Style::default().fg(TEXT_MUTED)));
-        }
-    }
-
-    // Model name on the right - use actual configured model
-    let model_name = if app.ai_connected {
-        // Shorten model name for display
-        shorten_model_name(&app.model_display)
-    } else {
-        "disconnected".to_string()
-    };
-
-    // Calculate left side length
-    let left_len: usize = spans.iter().map(|s| s.content.len()).sum();
-    let right_len = model_name.len();
-    let padding = area
-        .width
-        .saturating_sub(left_len as u16 + right_len as u16 + 2) as usize;
-
-    spans.push(Span::styled(" ".repeat(padding.max(1)), Style::default()));
-    spans.push(Span::styled(&model_name, Style::default().fg(TEXT_DIM)));
-    spans.push(Span::styled(" ", Style::default()));
-
-    let line = Line::from(spans);
-    let para = Paragraph::new(line).style(Style::default().bg(BG_PRIMARY));
-    f.render_widget(para, area);
-}
-
 // ============================================================================
 // Input Area
 // ============================================================================
@@ -1281,7 +1565,6 @@ fn draw_input_area(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     // Check for attached images and adjust available height
     let has_images = app.has_attached_images();
-    let image_line_height: u16 = if has_images { 1 } else { 0 };
 
     // Split inner area if we have images
     let (image_area, input_inner) = if has_images && inner.height > 1 {
@@ -1504,19 +1787,10 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let inner = sidebar_block.inner(area);
     f.render_widget(sidebar_block, area);
 
-    // Calculate modified files section height (dynamic based on file count, more compact)
-    let modified_count = app.sidebar.modified_files.len();
-    let modified_height = if modified_count == 0 {
-        0 // Hide empty section
-    } else {
-        (modified_count.min(3) + 1) as u16 // Header + files (max 3)
-    };
-
-    // Compact sidebar sections - hide empty sections
+    // Compact sidebar sections - simplified to remove the FILES/modified section
     let sections = Layout::vertical([
         Constraint::Length(2),               // MODE (compact)
         Constraint::Length(2),               // CONTEXT (compact)
-        Constraint::Length(modified_height), // FILES (hidden if empty)
         Constraint::Min(4),                  // PLAN (flexible)
         Constraint::Length(3),               // LSP (compact)
     ])
@@ -1524,31 +1798,43 @@ fn draw_sidebar(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
     draw_sidebar_mode(f, app, sections[0]);
     draw_sidebar_context(f, app, sections[1]);
-    if modified_count > 0 {
-        draw_sidebar_files(f, app, sections[2]);
-    }
-    draw_sidebar_plan(f, app, sections[3]);
-    draw_sidebar_lsp(f, app, sections[4]);
+    draw_sidebar_plan(f, app, sections[2]);
+    draw_sidebar_lsp(f, app, sections[3]);
 }
 
 fn draw_sidebar_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let mode = app.agent_mode.short_name();
+    let is_processing = app.ai_thinking;
+
     let mode_color = match mode {
         "BUILD" => ACCENT_GREEN,
         "PLAN" => ACCENT_CYAN,
         _ => TEXT_PRIMARY,
     };
 
-    // Mode indicator with dot
+    // Animate the dot when processing
+    let dot = if is_processing {
+        let frame = app.animation_frame / 3 % 4;
+        match frame {
+            0 => "●",
+            1 => "◐",
+            2 => "○",
+            _ => "◑",
+        }
+    } else if mode == "BUILD" {
+        "●"
+    } else {
+        "○"
+    };
+
     let line = Line::from(vec![
-        Span::styled(" ", Style::default()),
         Span::styled(
             mode,
             Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            if mode == "BUILD" { " ●" } else { " ○" },
-            Style::default().fg(mode_color),
+            format!(" {}", dot),
+            Style::default().fg(if is_processing { ACCENT_CYAN } else { mode_color }),
         ),
     ]);
 
@@ -1558,41 +1844,24 @@ fn draw_sidebar_mode(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 
 fn draw_sidebar_context(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let usage = &app.sidebar.token_usage;
+    let is_processing = app.ai_thinking;
 
-    // Context display with progress bar
-    let pct = usage.usage_percent() as usize;
-    let bar_width = 8;
-    let filled = (pct * bar_width / 100).min(bar_width);
-    let bar: String = "▓".repeat(filled) + &"░".repeat(bar_width - filled);
+    // Compact format: "In: 3.0M / Out: 8.5K"
+    let display = usage.format_display();
 
-    let color = if pct > 80 {
-        ACCENT_RED
-    } else if pct > 60 {
-        ACCENT_YELLOW
+    // Use accent color when actively streaming tokens
+    let color = if is_processing {
+        ACCENT_CYAN
     } else {
         TEXT_SECONDARY
     };
 
     let line = Line::from(vec![
-        Span::styled(" ", Style::default()),
-        Span::styled(usage.format_display(), Style::default().fg(color)),
-        Span::styled(" ", Style::default()),
-        Span::styled(bar, Style::default().fg(color)),
+        Span::styled(display, Style::default().fg(color)),
     ]);
 
     let para = Paragraph::new(line);
     f.render_widget(para, area);
-}
-
-/// Format large numbers with K/M suffixes (duplicated here for shell_ui)
-fn format_number(n: usize) -> String {
-    if n >= 1_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else {
-        n.to_string()
-    }
 }
 
 /// Format duration in human-readable form (ms, s, m)
@@ -1608,50 +1877,6 @@ fn format_duration(ms: u64) -> String {
     }
 }
 
-fn draw_sidebar_files(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
-    use super::sidebar::ModificationType;
-
-    let files = &app.sidebar.modified_files;
-    let mut lines = Vec::new();
-
-    // List files with modification icons
-    let max_files = 3;
-    for file in files.iter().take(max_files) {
-        let (icon, color) = match file.modification_type {
-            ModificationType::Created => ("+", ACCENT_GREEN),
-            ModificationType::Edited => ("~", ACCENT_YELLOW),
-            ModificationType::Deleted => ("-", ACCENT_RED),
-        };
-
-        let filename = std::path::Path::new(&file.path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| file.path.clone());
-
-        let max_len = area.width.saturating_sub(4) as usize;
-        let display = if filename.len() > max_len {
-            format!("{}…", &filename[..max_len.saturating_sub(1)])
-        } else {
-            filename
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(" ", Style::default()),
-            Span::styled(icon, Style::default().fg(color)),
-            Span::styled(display, Style::default().fg(TEXT_SECONDARY)),
-        ]));
-    }
-
-    if files.len() > max_files {
-        lines.push(Line::from(Span::styled(
-            format!(" +{} more", files.len() - max_files),
-            Style::default().fg(TEXT_MUTED),
-        )));
-    }
-
-    let para = Paragraph::new(lines);
-    f.render_widget(para, area);
-}
 
 fn draw_sidebar_plan(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     // Check if we're in build mode

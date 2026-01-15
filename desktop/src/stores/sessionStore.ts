@@ -9,6 +9,7 @@ import type {
   AgentMode,
   ServerEvent,
   DoomLoopPrompt,
+  TodoItem,
 } from "../types";
 import * as api from "../api/client";
 
@@ -45,6 +46,9 @@ interface SessionState {
 
   // Doom loop
   doomLoopPrompt: DoomLoopPrompt | null;
+
+  // Todo list
+  todoList: TodoItem[];
 
   // Actions
   loadSessions: () => Promise<void>;
@@ -83,6 +87,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
   agentMode: "build",
   doomLoopPrompt: null,
+  todoList: [],
 
   // Load all sessions
   loadSessions: async () => {
@@ -298,7 +303,30 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         break;
 
       case "Reasoning":
-        set({ thinkingMessage: event.text });
+        // Buffer reasoning to attach to the next tool execution
+        // This ensures reasoning appears ABOVE the tool it relates to
+        if (event.text.trim()) {
+          set((state) => {
+            const streaming = state.streamingMessage || {
+              role: "assistant" as const,
+              content: "",
+              isStreaming: true,
+              toolExecutions: [],
+            };
+            // Accumulate reasoning in the pending buffer
+            const existingReasoning = streaming.pendingReasoning || "";
+            const newReasoning = existingReasoning
+              ? `${existingReasoning}\n${event.text}`
+              : event.text;
+            return {
+              thinkingMessage: event.text, // Also show in thinking indicator for visual feedback
+              streamingMessage: {
+                ...streaming,
+                pendingReasoning: newReasoning,
+              },
+            };
+          });
+        }
         break;
 
       case "TextChunk":
@@ -362,18 +390,21 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             isStreaming: true,
             toolExecutions: [],
           };
+          // Attach any pending reasoning to this tool
           const newTool: ToolExecution = {
             id: `tool_${Date.now()}`,
             name: event.name,
             description: event.description,
             output: "",
             startTime: Date.now(),
+            reasoning: streaming.pendingReasoning || undefined,
           };
           return {
             thinkingMessage: null,
             streamingMessage: {
               ...streaming,
               toolExecutions: [...streaming.toolExecutions, newTool],
+              pendingReasoning: undefined, // Clear the buffer
             },
           };
         });
@@ -501,6 +532,11 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             message: event.message,
           },
         });
+        break;
+
+      case "TodoList":
+        // Update todo list
+        set({ todoList: event.todos });
         break;
 
       case "Error":

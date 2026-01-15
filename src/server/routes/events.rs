@@ -60,6 +60,7 @@ pub async fn session_events(
                 ServerEvent::DoomLoopPrompt { .. } => "DoomLoopPrompt",
                 ServerEvent::Error { .. } => "Error",
                 ServerEvent::Completed => "Completed",
+                ServerEvent::TodoList { .. } => "TodoList",
             };
 
             Ok::<_, Infallible>(
