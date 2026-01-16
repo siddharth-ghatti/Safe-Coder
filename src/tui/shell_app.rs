@@ -1103,6 +1103,14 @@ pub struct ShellTuiApp {
     // === Attached Images ===
     /// Images attached to the current message (base64 data, media_type)
     pub attached_images: Vec<AttachedImage>,
+
+    // === Request Queue ===
+    /// Queued messages to process after current AI response completes
+    pub queued_messages: VecDeque<String>,
+
+    // === Logo Popup State ===
+    /// Whether the logo popup is visible
+    pub logo_visible: bool,
 }
 
 /// An image attached to a message
@@ -1196,6 +1204,10 @@ impl ShellTuiApp {
             model_display,
 
             attached_images: Vec::new(),
+
+            queued_messages: VecDeque::new(),
+
+            logo_visible: false,
         };
 
         // Add welcome message
@@ -1389,6 +1401,31 @@ impl ShellTuiApp {
         }
 
         input
+    }
+
+    // === Request Queue ===
+
+    /// Queue a message to be processed after current AI response completes
+    pub fn queue_message(&mut self, message: String) {
+        if !message.is_empty() {
+            self.queued_messages.push_back(message);
+            self.needs_redraw = true;
+        }
+    }
+
+    /// Get the next queued message to process
+    pub fn pop_queued_message(&mut self) -> Option<String> {
+        self.queued_messages.pop_front()
+    }
+
+    /// Check if there are queued messages waiting
+    pub fn has_queued_messages(&self) -> bool {
+        !self.queued_messages.is_empty()
+    }
+
+    /// Get count of queued messages (for display)
+    pub fn queued_message_count(&self) -> usize {
+        self.queued_messages.len()
     }
 
     // === Autocomplete ===
@@ -2081,6 +2118,18 @@ impl ShellTuiApp {
         self.needs_redraw = true;
     }
 
+    /// Show the logo popup
+    pub fn show_logo_popup(&mut self) {
+        self.logo_visible = true;
+        self.needs_redraw = true;
+    }
+
+    /// Hide the logo popup
+    pub fn hide_logo_popup(&mut self) {
+        self.logo_visible = false;
+        self.needs_redraw = true;
+    }
+
     /// Check if input is a slash command (e.g., /connect, /help)
     pub fn is_slash_command(input: &str) -> bool {
         input.starts_with('/')
@@ -2167,6 +2216,7 @@ impl ShellTuiApp {
             "provider" => Some(SlashCommand::Provider(args)),
             "model" => Some(SlashCommand::Model(args)),
             "login" => Some(SlashCommand::Login(args)),
+            "about" => Some(SlashCommand::About),
             _ => None,
         }
     }
@@ -2297,4 +2347,6 @@ pub enum SlashCommand {
     Model(Option<String>),
     /// Login to a provider
     Login(Option<String>),
+    /// Show about/logo popup
+    About,
 }

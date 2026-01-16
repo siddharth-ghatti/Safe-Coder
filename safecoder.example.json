@@ -1,0 +1,31 @@
+{
+  "llm": {
+    "provider": "openrouter",
+    "model": "anthropic/claude-sonnet-4-20250514",
+    "max_tokens": 8192,
+    "base_url": null,
+    "api_key": null
+  },
+  "git": {
+    "auto_commit": false
+  },
+  "tools": {
+    "bash_timeout_secs": 120,
+    "max_output_bytes": 1048576,
+    "warn_dangerous_commands": true
+  },
+  "lsp": {
+    "enabled": true
+  },
+  "cache": {
+    "enabled": true,
+    "provider_native": true,
+    "application_cache": true,
+    "max_entries": 100,
+    "ttl_minutes": 30
+  },
+  "build": {
+    "enabled": true,
+    "timeout_secs": 60
+  }
+}

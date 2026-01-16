@@ -47,7 +47,7 @@ impl AgentMode {
                 "todowrite",
                 "todoread",
                 "build_config",
-                "orchestrate",
+                // "orchestrate", // Disabled for v1 launch - coming soon
                 "subagent",
             ],
         }

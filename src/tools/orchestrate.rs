@@ -10,14 +10,11 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 
-use crate::approval::UserMode;
 use crate::config::Config;
-use crate::orchestrator::{
-    Orchestrator, OrchestratorConfig as InternalOrchestratorConfig, Task, TaskPlan, ThrottleLimits,
-    WorkerKind, WorkerStrategy,
-};
+use crate::orchestrator::{Task, TaskStatus, Worker, WorkerEvent, WorkerKind};
+use crate::session::SessionEvent;
 use crate::tools::{Tool, ToolContext};
 
 /// Tracks orchestration depth to prevent recursive SafeCoder calls
@@ -69,13 +66,6 @@ struct OrchestrateParams {
     /// Files relevant to this task (for context)
     #[serde(default)]
     relevant_files: Vec<String>,
-    /// Whether to use git worktree isolation (default: true)
-    #[serde(default = "default_true")]
-    prefer_worktree: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Serialize)]
@@ -113,18 +103,13 @@ impl Tool for OrchestrateTool {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Files relevant to this task (helps the worker focus)"
-                },
-                "prefer_worktree": {
-                    "type": "boolean",
-                    "description": "Whether to use git worktree isolation (default: true). Set false to work directly in the main repo.",
-                    "default": true
                 }
             },
             "required": ["worker", "task"]
         })
     }
 
-    async fn execute(&self, params: serde_json::Value, _ctx: &ToolContext<'_>) -> Result<String> {
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext<'_>) -> Result<String> {
         // Check orchestration depth to prevent recursion
         let current_depth = ORCHESTRATION_DEPTH.fetch_add(1, Ordering::SeqCst);
 
@@ -216,9 +201,6 @@ impl Tool for OrchestrateTool {
             })?);
         }
 
-        // Build orchestrator config from main config
-        let orch_config = build_orchestrator_config(config, params.prefer_worktree, &worker_kind);
-
         // Verify CLI is available
         let cli_path = get_cli_path(config, &worker_kind);
         if !check_cli_available(&cli_path, &worker_kind).await {
@@ -235,86 +217,127 @@ impl Tool for OrchestrateTool {
             })?);
         }
 
-        // Create orchestrator
-        let mut orchestrator =
-            Orchestrator::new(project_path.clone(), orch_config)
-                .await
-                .context("Failed to create orchestrator")?;
-
-        // Create a simple single-task plan
+        // Create task
         let task_id = format!("orch-{}", uuid::Uuid::new_v4().to_string()[..8].to_string());
+        let task = Task {
+            id: task_id.clone(),
+            description: truncate_str(&params.task, 100),
+            instructions: params.task.clone(),
+            relevant_files: params.relevant_files.clone(),
+            dependencies: vec![],
+            preferred_worker: Some(worker_kind.clone()),
+            priority: 0,
+            status: TaskStatus::Pending,
+        };
 
-        let mut task = Task::new(task_id.clone(), params.task.clone(), params.task.clone());
-        task = task.with_files(params.relevant_files.clone());
-        task.preferred_worker = Some(worker_kind.clone());
+        // Determine workspace - use project path directly for simplicity
+        let workspace = project_path.clone();
 
-        let mut plan = TaskPlan::new(
-            task_id.clone(),
-            params.task.clone(),
-            format!(
-                "Orchestrated task for {:?}: {}",
-                worker_kind,
-                truncate_str(&params.task, 50)
-            ),
-        );
-        plan.add_task(task);
+        // Create worker event channel for streaming
+        let (worker_event_tx, mut worker_event_rx) = mpsc::unbounded_channel();
 
-        // Execute
-        let response = orchestrator.process_request(&params.task).await;
+        // Create worker with event sender
+        let mut worker = Worker::with_event_sender(
+            task,
+            workspace.clone(),
+            worker_kind.clone(),
+            cli_path,
+            worker_event_tx,
+        )?;
 
-        // Cleanup
-        let _ = orchestrator.cleanup().await;
+        // Clone session event tx for the forwarder task
+        let session_tx = ctx.session_event_tx.clone();
+        let has_session_tx = session_tx.is_some();
+        tracing::info!("[ORCHESTRATE] session_event_tx is_some: {}", has_session_tx);
 
-        match response {
-            Ok(resp) => {
-                let task_result = resp.task_results.first();
-                let result = OrchestrateResult {
-                    success: task_result.map(|r| r.result.is_ok()).unwrap_or(false),
-                    worker: format!("{:?}", worker_kind),
-                    workspace_path: task_result
-                        .map(|r| r.workspace_path.to_string_lossy().to_string()),
-                    output: task_result
-                        .map(|r| match &r.result {
-                            Ok(out) => truncate_output(out, 4000),
-                            Err(err) => err.clone(),
-                        })
-                        .unwrap_or_default(),
-                    error: task_result.and_then(|r| r.result.as_ref().err().cloned()),
-                };
-                Ok(serde_json::to_string_pretty(&result)?)
+        let task_id_clone = task_id.clone();
+        let worker_name_clone = worker_name.to_string();
+        let task_desc = truncate_str(&params.task, 50);
+
+        // Spawn forwarder task to convert WorkerEvent -> SessionEvent
+        let forwarder_handle = tokio::spawn(async move {
+            tracing::info!("[ORCHESTRATE] Forwarder task started, has session_tx: {}", session_tx.is_some());
+
+            // Send started event
+            if let Some(ref tx) = session_tx {
+                tracing::info!("[ORCHESTRATE] Sending OrchestrateStarted event");
+                let _ = tx.send(SessionEvent::OrchestrateStarted {
+                    id: task_id_clone.clone(),
+                    worker: worker_name_clone.clone(),
+                    task: task_desc,
+                });
             }
-            Err(e) => Ok(serde_json::to_string_pretty(&OrchestrateResult {
+
+            // Forward streaming events
+            let mut event_count = 0;
+            while let Some(event) = worker_event_rx.recv().await {
+                event_count += 1;
+                tracing::debug!("[ORCHESTRATE] Received worker event #{}: {:?}", event_count, std::mem::discriminant(&event));
+
+                if let Some(ref tx) = session_tx {
+                    match event {
+                        WorkerEvent::OutputLine { task_id, line } => {
+                            tracing::debug!("[ORCHESTRATE] Forwarding output line: {}", &line[..line.len().min(100)]);
+                            let _ = tx.send(SessionEvent::OrchestrateOutput {
+                                id: task_id,
+                                line,
+                            });
+                        }
+                        WorkerEvent::ErrorLine { task_id, line } => {
+                            tracing::debug!("[ORCHESTRATE] Forwarding error line: {}", &line[..line.len().min(100)]);
+                            let _ = tx.send(SessionEvent::OrchestrateOutput {
+                                id: task_id,
+                                line: format!("[stderr] {}", line),
+                            });
+                        }
+                        WorkerEvent::Completed { task_id, output } => {
+                            tracing::info!("[ORCHESTRATE] Worker completed, output len: {}", output.len());
+                            let _ = tx.send(SessionEvent::OrchestrateCompleted {
+                                id: task_id,
+                                success: true,
+                                output: truncate_output(&output, 500),
+                            });
+                        }
+                        WorkerEvent::Failed { task_id, error } => {
+                            tracing::info!("[ORCHESTRATE] Worker failed: {}", error);
+                            let _ = tx.send(SessionEvent::OrchestrateCompleted {
+                                id: task_id,
+                                success: false,
+                                output: error,
+                            });
+                        }
+                        WorkerEvent::Started { .. } => {
+                            tracing::debug!("[ORCHESTRATE] Worker started event (already sent)");
+                        }
+                    }
+                }
+            }
+            tracing::info!("[ORCHESTRATE] Forwarder task finished, processed {} events", event_count);
+        });
+
+        // Execute the worker
+        let result = worker.execute().await;
+
+        // Wait for forwarder to complete (it will finish when worker drops the sender)
+        let _ = forwarder_handle.await;
+
+        // Build result
+        match result {
+            Ok(output) => Ok(serde_json::to_string_pretty(&OrchestrateResult {
+                success: true,
+                worker: format!("{:?}", worker_kind),
+                workspace_path: Some(workspace.to_string_lossy().to_string()),
+                output: truncate_output(&output, 4000),
+                error: None,
+            })?),
+            Err(error) => Ok(serde_json::to_string_pretty(&OrchestrateResult {
                 success: false,
                 worker: format!("{:?}", worker_kind),
-                workspace_path: None,
+                workspace_path: Some(workspace.to_string_lossy().to_string()),
                 output: String::new(),
-                error: Some(e.to_string()),
+                error: Some(error),
             })?),
         }
-    }
-}
-
-fn build_orchestrator_config(
-    config: &Config,
-    use_worktrees: bool,
-    default_worker: &WorkerKind,
-) -> InternalOrchestratorConfig {
-    InternalOrchestratorConfig {
-        claude_cli_path: Some(config.orchestrator.claude_cli_path.clone()),
-        gemini_cli_path: Some(config.orchestrator.gemini_cli_path.clone()),
-        safe_coder_cli_path: Some(config.orchestrator.safe_coder_cli_path.clone()),
-        gh_cli_path: Some(config.orchestrator.gh_cli_path.clone()),
-        max_workers: 1, // Single task execution
-        default_worker: default_worker.clone(),
-        worker_strategy: WorkerStrategy::SingleWorker,
-        enabled_workers: vec![
-            WorkerKind::ClaudeCode,
-            WorkerKind::GeminiCli,
-            WorkerKind::GitHubCopilot,
-        ],
-        use_worktrees,
-        throttle_limits: ThrottleLimits::default(),
-        user_mode: UserMode::Build, // Auto-execute for orchestrated tasks
     }
 }
 

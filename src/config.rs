@@ -520,17 +520,59 @@ pub enum LlmProvider {
 }
 
 impl Config {
+    /// Load configuration with the following priority:
+    /// 1. Local `safecoder.json` in project directory (highest priority)
+    /// 2. Global `~/.config/safe-coder/config.toml`
+    /// 3. Environment variables for API keys
+    /// 4. Default values
     pub fn load() -> Result<Self> {
-        let config_path = Self::config_path()?;
+        Self::load_for_project(&std::env::current_dir().unwrap_or_default())
+    }
 
-        if !config_path.exists() {
-            return Ok(Self::default());
+    /// Load configuration for a specific project directory
+    pub fn load_for_project(project_path: &std::path::Path) -> Result<Self> {
+        // Try local safecoder.json first
+        let local_json = project_path.join("safecoder.json");
+        if local_json.exists() {
+            tracing::info!("Loading config from local safecoder.json");
+            let content = std::fs::read_to_string(&local_json)
+                .context("Failed to read safecoder.json")?;
+            let mut config: Config = serde_json::from_str(&content)
+                .context("Failed to parse safecoder.json")?;
+            // Override with env vars if API key not set
+            config.apply_env_overrides();
+            return Ok(config);
         }
 
-        let content =
-            std::fs::read_to_string(&config_path).context("Failed to read config file")?;
+        // Try global config.toml
+        let config_path = Self::config_path()?;
+        if config_path.exists() {
+            tracing::info!("Loading config from global config.toml");
+            let content = std::fs::read_to_string(&config_path)
+                .context("Failed to read config file")?;
+            let mut config: Config = toml::from_str(&content)
+                .context("Failed to parse config file")?;
+            config.apply_env_overrides();
+            return Ok(config);
+        }
 
-        toml::from_str(&content).context("Failed to parse config file")
+        // Fall back to defaults (with env var detection)
+        tracing::info!("No config file found, using defaults with env vars");
+        Ok(Self::default())
+    }
+
+    /// Apply environment variable overrides for API keys
+    fn apply_env_overrides(&mut self) {
+        // Only override if API key is not already set in config
+        if self.llm.api_key.is_none() {
+            self.llm.api_key = match self.llm.provider {
+                LlmProvider::Anthropic => std::env::var("ANTHROPIC_API_KEY").ok(),
+                LlmProvider::OpenAI => std::env::var("OPENAI_API_KEY").ok(),
+                LlmProvider::OpenRouter => std::env::var("OPENROUTER_API_KEY").ok(),
+                LlmProvider::GitHubCopilot => std::env::var("GITHUB_COPILOT_TOKEN").ok(),
+                LlmProvider::Ollama => None, // Ollama doesn't need an API key
+            };
+        }
     }
 
     pub fn save(&self) -> Result<()> {
@@ -543,6 +585,14 @@ impl Config {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(&config_path, content)?;
 
+        Ok(())
+    }
+
+    /// Save config as safecoder.json in the given project directory
+    pub fn save_to_project(&self, project_path: &std::path::Path) -> Result<()> {
+        let local_json = project_path.join("safecoder.json");
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(&local_json, content)?;
         Ok(())
     }
 

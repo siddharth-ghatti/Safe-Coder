@@ -133,6 +133,20 @@ pub async fn send_message(
         while let Some(event) = session_rx.recv().await {
             tracing::debug!("Forwarding event: {:?}", std::mem::discriminant(&event));
 
+            // Log orchestration events specifically
+            match &event {
+                SessionEvent::OrchestrateStarted { id, worker, task } => {
+                    tracing::info!("[SERVER] OrchestrateStarted: id={}, worker={}, task={}", id, worker, task);
+                }
+                SessionEvent::OrchestrateOutput { id, line } => {
+                    tracing::debug!("[SERVER] OrchestrateOutput: id={}, line={}", id, &line[..line.len().min(50)]);
+                }
+                SessionEvent::OrchestrateCompleted { id, success, .. } => {
+                    tracing::info!("[SERVER] OrchestrateCompleted: id={}, success={}", id, success);
+                }
+                _ => {}
+            }
+
             // Handle file diff events specially to track changes
             if let SessionEvent::FileDiff { ref path, ref old_content, ref new_content } = event {
                 tracing::info!("FileDiff event received for path: {}", path);

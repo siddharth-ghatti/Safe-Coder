@@ -4,10 +4,30 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 use crate::orchestrator::Task;
+
+/// Events emitted by workers during execution for streaming output
+#[derive(Debug, Clone)]
+pub enum WorkerEvent {
+    /// Worker started executing
+    Started { task_id: String, worker: WorkerKind },
+    /// Output line from stdout
+    OutputLine { task_id: String, line: String },
+    /// Error line from stderr
+    ErrorLine { task_id: String, line: String },
+    /// Worker completed successfully
+    Completed { task_id: String, output: String },
+    /// Worker failed
+    Failed { task_id: String, error: String },
+}
+
+/// Callback type for streaming worker output
+pub type WorkerEventSender = mpsc::UnboundedSender<WorkerEvent>;
 
 /// Types of CLI workers available
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -74,6 +94,8 @@ pub struct Worker {
     output: String,
     /// Child process handle (if running)
     process_handle: Option<tokio::process::Child>,
+    /// Optional event sender for streaming output
+    event_tx: Option<WorkerEventSender>,
 }
 
 impl Worker {
@@ -87,12 +109,51 @@ impl Worker {
             state: WorkerState::Initializing,
             output: String::new(),
             process_handle: None,
+            event_tx: None,
         })
+    }
+
+    /// Create a new worker with an event sender for streaming output
+    pub fn with_event_sender(
+        task: Task,
+        workspace: PathBuf,
+        kind: WorkerKind,
+        cli_path: String,
+        event_tx: WorkerEventSender,
+    ) -> Result<Self> {
+        Ok(Self {
+            task,
+            workspace,
+            kind,
+            cli_path,
+            state: WorkerState::Initializing,
+            output: String::new(),
+            process_handle: None,
+            event_tx: Some(event_tx),
+        })
+    }
+
+    /// Set the event sender for streaming output
+    pub fn set_event_sender(&mut self, event_tx: WorkerEventSender) {
+        self.event_tx = Some(event_tx);
+    }
+
+    /// Send an event if event sender is configured
+    fn send_event(&self, event: WorkerEvent) {
+        if let Some(tx) = &self.event_tx {
+            let _ = tx.send(event);
+        }
     }
 
     /// Execute the task
     pub async fn execute(&mut self) -> Result<String, String> {
         self.state = WorkerState::Running;
+
+        // Send started event
+        self.send_event(WorkerEvent::Started {
+            task_id: self.task.id.clone(),
+            worker: self.kind.clone(),
+        });
 
         // Build the command based on worker kind
         let result = match &self.kind {
@@ -106,11 +167,19 @@ impl Worker {
             Ok(output) => {
                 self.output = output.clone();
                 self.state = WorkerState::Completed;
+                self.send_event(WorkerEvent::Completed {
+                    task_id: self.task.id.clone(),
+                    output: output.clone(),
+                });
                 Ok(output)
             }
             Err(e) => {
                 let error_msg = e.to_string();
                 self.state = WorkerState::Failed(error_msg.clone());
+                self.send_event(WorkerEvent::Failed {
+                    task_id: self.task.id.clone(),
+                    error: error_msg.clone(),
+                });
                 Err(error_msg)
             }
         }
@@ -239,7 +308,7 @@ impl Worker {
         self.run_command(cmd).await
     }
 
-    /// Run a command and collect output with timeout
+    /// Run a command and collect output with timeout, streaming lines as they arrive
     async fn run_command(&mut self, mut cmd: Command) -> Result<String> {
         let mut child = cmd.spawn().context("Failed to spawn CLI process")?;
 
@@ -255,14 +324,33 @@ impl Worker {
         let stdout_reader = BufReader::new(stdout);
         let stderr_reader = BufReader::new(stderr);
 
-        // Spawn tasks to read both streams concurrently
+        // Clone event sender for use in spawned tasks
+        let stdout_event_tx = self.event_tx.clone();
+        let stderr_event_tx = self.event_tx.clone();
+        let task_id_stdout = self.task.id.clone();
+        let task_id_stderr = self.task.id.clone();
+
+        tracing::info!("[WORKER] Starting stdout/stderr readers, has_event_tx: {}", self.event_tx.is_some());
+
+        // Spawn tasks to read both streams concurrently, streaming lines as they arrive
         let stdout_task = tokio::spawn(async move {
             let mut output = String::new();
             let mut lines = stdout_reader.lines();
+            let mut line_count = 0;
             while let Ok(Some(line)) = lines.next_line().await {
+                line_count += 1;
+                // Stream the line to event sender
+                if let Some(ref tx) = stdout_event_tx {
+                    tracing::debug!("[WORKER] Sending stdout line #{}: {}", line_count, &line[..line.len().min(50)]);
+                    let _ = tx.send(WorkerEvent::OutputLine {
+                        task_id: task_id_stdout.clone(),
+                        line: line.clone(),
+                    });
+                }
                 output.push_str(&line);
                 output.push('\n');
             }
+            tracing::info!("[WORKER] stdout reader finished, read {} lines", line_count);
             output
         });
 
@@ -270,6 +358,13 @@ impl Worker {
             let mut errors = String::new();
             let mut lines = stderr_reader.lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                // Stream error lines to event sender
+                if let Some(ref tx) = stderr_event_tx {
+                    let _ = tx.send(WorkerEvent::ErrorLine {
+                        task_id: task_id_stderr.clone(),
+                        line: line.clone(),
+                    });
+                }
                 errors.push_str(&line);
                 errors.push('\n');
             }

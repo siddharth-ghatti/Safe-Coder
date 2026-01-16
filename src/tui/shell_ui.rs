@@ -8,7 +8,7 @@
 //! - Simple input with model info
 
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
@@ -202,6 +202,11 @@ pub fn draw(f: &mut Frame, app: &mut ShellTuiApp) {
 
     if app.commands_modal_visible {
         draw_commands_modal(f, app, size);
+    }
+
+    // Logo popup (above commands modal, below approval modals)
+    if app.logo_visible {
+        draw_logo_popup(f, app, size);
     }
 
     // Plan approval popup (highest priority)
@@ -2388,6 +2393,73 @@ fn draw_sidebar_lsp(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
 // ============================================================================
 // Popups
 // ============================================================================
+
+/// Draw the retro ASCII logo popup
+fn draw_logo_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
+    if !app.logo_visible {
+        return;
+    }
+
+    const LOGO: &[&str] = &[
+        r"  ____         __        ____          _           ",
+        r" / ___|  __ _ / _| ___  / ___|___   __| | ___ _ __ ",
+        r" \___ \ / _` | |_ / _ \| |   / _ \ / _` |/ _ \ '__|",
+        r"  ___) | (_| |  _|  __/| |__| (_) | (_| |  __/ |   ",
+        r" |____/ \__,_|_|  \___| \____\___/ \__,_|\___|_|   ",
+        r"",
+        r"        AI-Powered Development Shell",
+    ];
+
+    // Calculate popup size with padding
+    let width = LOGO.iter().map(|l| l.len()).max().unwrap_or(0) as u16 + 6;
+    let height = LOGO.len() as u16 + 5; // +5 for borders, padding, and help line
+
+    let popup_area = Rect {
+        x: area.width.saturating_sub(width) / 2,
+        y: area.height.saturating_sub(height) / 2,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    };
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" safe-coder ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_CYAN))
+        .style(Style::default().bg(BG_BLOCK));
+
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Cycle colors based on animation frame for retro effect
+    let colors = [ACCENT_CYAN, ACCENT_GREEN, ACCENT_YELLOW, ACCENT_MAGENTA];
+
+    let mut lines: Vec<Line> = LOGO
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let color = colors[(app.animation_frame + i) % colors.len()];
+            Line::from(Span::styled(
+                *l,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
+
+    // Add empty line and help text
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Press any key or type /about to close",
+        Style::default().fg(TEXT_MUTED),
+    )));
+
+    let para = Paragraph::new(lines)
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(para, inner);
+}
 
 fn draw_model_picker_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
     let filtered = app.model_picker.filtered_models();
