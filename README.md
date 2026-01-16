@@ -132,6 +132,53 @@ safe-coder serve
 | Ollama | (none needed) | `llama3.2` |
 | GitHub Copilot | `GITHUB_COPILOT_TOKEN` | `gpt-4` |
 
+## Authentication
+
+Safe Coder supports device flow authentication for providers that require OAuth login. This is useful for using your existing subscriptions (like GitHub Copilot) without needing to manage API keys manually.
+
+### Login with GitHub Copilot
+
+If you have a GitHub Copilot subscription, you can authenticate using your GitHub account:
+
+```bash
+safe-coder login github-copilot
+```
+
+This will:
+1. Generate a device code and display a verification URL
+2. Open GitHub's device authorization page
+3. After you authorize, Safe Coder will automatically retrieve and store your token
+
+Aliases: `github-copilot`, `copilot`
+
+### Login with Anthropic/Claude
+
+You can also authenticate with Anthropic using your Claude Pro/Max subscription:
+
+```bash
+safe-coder login anthropic
+```
+
+This provides three options:
+1. **Claude Pro/Max** - Use your existing Claude subscription via OAuth
+2. **Create API Key** - Generate an API key through the console
+3. **Enter API Key** - Manually enter an existing API key
+
+Aliases: `anthropic`, `claude`
+
+### Managing Credentials
+
+```bash
+# Logout from a specific provider
+safe-coder logout github-copilot
+safe-coder logout anthropic
+
+# Logout from all providers
+safe-coder logout all
+```
+
+Tokens are securely stored in `~/.config/safe-coder/` with restricted file permissions.
+
 ## Desktop App
 
 The Safe Coder desktop app provides a native experience with:
