@@ -65,6 +65,7 @@ impl SubagentExecutor {
             SubagentKind::Tester => "tester",
             SubagentKind::Refactorer => "refactorer",
             SubagentKind::Documenter => "documenter",
+            SubagentKind::Explorer => "explorer",
             SubagentKind::Custom => "custom",
         };
 

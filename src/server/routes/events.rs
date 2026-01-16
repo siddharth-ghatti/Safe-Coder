@@ -61,6 +61,9 @@ pub async fn session_events(
                 ServerEvent::Error { .. } => "Error",
                 ServerEvent::Completed => "Completed",
                 ServerEvent::TodoList { .. } => "TodoList",
+                ServerEvent::OrchestrateStarted { .. } => "OrchestrateStarted",
+                ServerEvent::OrchestrateOutput { .. } => "OrchestrateOutput",
+                ServerEvent::OrchestrateCompleted { .. } => "OrchestrateCompleted",
             };
 
             Ok::<_, Infallible>(

@@ -39,6 +39,12 @@ pub fn get_todo_list() -> Vec<TodoItem> {
     TODO_LIST.lock().unwrap().clone()
 }
 
+/// Clear the todo list (called at the start of each new request)
+pub fn clear_todo_list() {
+    TODO_LIST.lock().unwrap().clear();
+    reset_turns_counter();
+}
+
 /// Increment turns without update counter (called by session after each LLM response)
 pub fn increment_turns_without_update() {
     let mut turns = TURNS_WITHOUT_UPDATE.lock().unwrap();

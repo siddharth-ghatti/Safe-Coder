@@ -95,6 +95,26 @@ pub enum ServerEvent {
 
     /// Todo list update
     TodoList { todos: Vec<TodoItemDto> },
+
+    /// Orchestration started (external CLI task)
+    OrchestrateStarted {
+        id: String,
+        worker: String,
+        task: String,
+    },
+
+    /// Orchestration output line (streaming from external CLI)
+    OrchestrateOutput {
+        id: String,
+        line: String,
+    },
+
+    /// Orchestration completed
+    OrchestrateCompleted {
+        id: String,
+        success: bool,
+        output: String,
+    },
 }
 
 /// Plan step DTO for API responses
@@ -264,6 +284,19 @@ impl From<SessionEvent> for ServerEvent {
                         priority: t.priority,
                     }).collect(),
                 }
+            }
+
+            // Handle orchestration events (external CLI streaming)
+            SessionEvent::OrchestrateStarted { id, worker, task } => {
+                ServerEvent::OrchestrateStarted { id, worker, task }
+            }
+
+            SessionEvent::OrchestrateOutput { id, line } => {
+                ServerEvent::OrchestrateOutput { id, line }
+            }
+
+            SessionEvent::OrchestrateCompleted { id, success, output } => {
+                ServerEvent::OrchestrateCompleted { id, success, output }
             }
         }
     }

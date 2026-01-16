@@ -15,7 +15,7 @@ pub mod workspace;
 
 pub use planner::Planner;
 pub use task::{Task, TaskPlan, TaskStatus};
-pub use worker::{Worker, WorkerKind, WorkerStatus};
+pub use worker::{Worker, WorkerEvent, WorkerEventSender, WorkerKind, WorkerStatus};
 pub use workspace::WorkspaceManager;
 
 use anyhow::Result;

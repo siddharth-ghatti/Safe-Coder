@@ -22,7 +22,7 @@ use crate::persistence::{SessionPersistence, SessionStats, ToolUsage};
 use crate::unified_planning::create_runner;
 use crate::planning::{PlanEvent, PlanStatus, PlanStep, TaskPlan};
 use crate::prompts;
-use crate::tools::todo::{get_todo_list, increment_turns_without_update, should_show_reminder};
+use crate::tools::todo::{clear_todo_list, get_todo_list, increment_turns_without_update, should_show_reminder};
 use crate::tools::{AgentMode, ToolContext, ToolRegistry};
 // Unified planning imports (reserved for future use)
 // use crate::unified_planning::{ExecutionMode as UnifiedExecutionMode, UnifiedPlanner, PlanEvent as UnifiedPlanEvent};
@@ -104,6 +104,23 @@ pub enum SessionEvent {
         id: String,
         success: bool,
         summary: String,
+    },
+    /// Orchestration started (external CLI task)
+    OrchestrateStarted {
+        id: String,
+        worker: String,
+        task: String,
+    },
+    /// Orchestration output line (streaming from external CLI)
+    OrchestrateOutput {
+        id: String,
+        line: String,
+    },
+    /// Orchestration completed
+    OrchestrateCompleted {
+        id: String,
+        success: bool,
+        output: String,
     },
     /// Plan event (from planning system)
     Plan(PlanEvent),
@@ -895,6 +912,9 @@ impl Session {
     }
 
     pub async fn send_message(&mut self, user_message: String) -> Result<String> {
+        // Clear todo list at the start of each new request
+        clear_todo_list();
+
         // Create checkpoint before processing user task (git-agnostic safety)
         if self.dir_checkpoints.is_enabled() {
             let label = user_message.chars().take(100).collect::<String>();
@@ -1302,6 +1322,9 @@ impl Session {
         images: Vec<(String, String)>,
         event_tx: mpsc::UnboundedSender<SessionEvent>,
     ) -> Result<String> {
+        // Clear todo list at the start of each new request
+        clear_todo_list();
+
         // Create checkpoint before processing user task (git-agnostic safety)
         if self.dir_checkpoints.is_enabled() {
             let label = user_message.chars().take(100).collect::<String>();

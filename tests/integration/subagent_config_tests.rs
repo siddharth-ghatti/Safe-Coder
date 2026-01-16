@@ -14,6 +14,7 @@ fn test_subagent_config_default() {
     assert!(config.tester.is_none());
     assert!(config.refactorer.is_none());
     assert!(config.documenter.is_none());
+    assert!(config.explorer.is_none());
     assert!(config.custom.is_none());
 }
 
@@ -29,6 +30,7 @@ fn test_subagent_config_with_analyzer() {
         tester: None,
         refactorer: None,
         documenter: None,
+        explorer: None,
         custom: None,
     };
 
@@ -204,6 +206,7 @@ fn test_subagent_config_serialization() -> Result<()> {
         }),
         refactorer: None,
         documenter: None,
+        explorer: None,
         custom: None,
     };
 
@@ -350,6 +353,7 @@ max_tokens = 8192
     assert!(config.subagents.tester.is_none());
     assert!(config.subagents.refactorer.is_none());
     assert!(config.subagents.documenter.is_none());
+    assert!(config.subagents.explorer.is_none());
     assert!(config.subagents.custom.is_none());
 
     Ok(())

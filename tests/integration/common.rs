@@ -1,7 +1,7 @@
 use anyhow::Result;
 use assert_fs::prelude::*;
 use assert_fs::TempDir;
-use safe_coder::config::{Config, LlmConfig, LlmProvider, GitConfig, OrchestratorConfig, ToolConfig, LspConfigWrapper, CacheConfig, CheckpointConfig, SubagentConfig};
+use safe_coder::config::{Config, LlmConfig, LlmProvider, GitConfig, OrchestratorConfig, ToolConfig, LspConfigWrapper, CacheConfig, CheckpointConfig, SubagentConfig, BuildConfig, ContextConfig};
 use safe_coder::mcp::McpConfig;
 use std::env;
 use std::path::PathBuf;
@@ -143,6 +143,8 @@ edition = "2021"
             mcp: McpConfig::default(),
             checkpoint: CheckpointConfig::default(),
             subagents: SubagentConfig::default(),
+            build: BuildConfig::default(),
+            context: ContextConfig::default(),
         };
 
         let config_path = self.config_dir.path().join("safe-coder").join("config.toml");

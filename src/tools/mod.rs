@@ -47,7 +47,8 @@ impl AgentMode {
                 "todowrite",
                 "todoread",
                 "build_config",
-                // "subagent", // Disabled for now - perfecting planning first
+                // "orchestrate", // Disabled for v1 launch - coming soon
+                "subagent",
             ],
         }
     }
@@ -99,6 +100,7 @@ pub mod edit;
 pub mod glob;
 pub mod grep;
 pub mod list;
+pub mod orchestrate;
 pub mod read;
 pub mod subagent;
 pub mod todo;
@@ -114,6 +116,7 @@ pub use edit::EditTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list::ListTool;
+pub use orchestrate::OrchestrateTool;
 pub use read::ReadTool;
 pub use subagent::SubagentTool;
 pub use todo::{TodoReadTool, TodoWriteTool};
@@ -362,13 +365,20 @@ impl ToolRegistry {
         // Create and initialize subagent tool
         let subagent_tool = Arc::new(SubagentTool::new());
         subagent_tool
-            .initialize(config, project_path, event_tx)
+            .initialize(config.clone(), project_path.clone(), event_tx)
             .await;
 
         // Store reference and register
         self.subagent_tool = Some(subagent_tool.clone());
         self.register(Box::new(SubagentToolWrapper {
             inner: subagent_tool,
+        }));
+
+        // Create and initialize orchestrate tool
+        let orchestrate_tool = Arc::new(OrchestrateTool::new());
+        orchestrate_tool.initialize(config, project_path).await;
+        self.register(Box::new(OrchestrateToolWrapper {
+            inner: orchestrate_tool,
         }));
 
         self
@@ -433,6 +443,30 @@ struct SubagentToolWrapper {
 
 #[async_trait]
 impl Tool for SubagentToolWrapper {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+
+    async fn execute(&self, params: serde_json::Value, ctx: &ToolContext<'_>) -> Result<String> {
+        self.inner.execute(params, ctx).await
+    }
+}
+
+/// Wrapper to make Arc<OrchestrateTool> usable as Box<dyn Tool>
+struct OrchestrateToolWrapper {
+    inner: Arc<OrchestrateTool>,
+}
+
+#[async_trait]
+impl Tool for OrchestrateToolWrapper {
     fn name(&self) -> &str {
         self.inner.name()
     }

@@ -110,7 +110,42 @@ You have full execution capabilities. Complete the task autonomously.
 - `bash` - Run shell commands
 - `list_file`, `glob`, `grep` - Find files
 - `todowrite`, `todoread` - Track multi-step progress (USE THIS!)
-- `subagent` - Spawn parallel workers for independent subtasks
+- `subagent` - Spawn specialized agents for focused tasks
+- `orchestrate` - Delegate tasks to external CLI agents (Claude, Gemini, Copilot)
+
+### When to Use Subagents (IMPORTANT)
+
+**ALWAYS spawn a subagent** for these request patterns:
+- "Where is...", "Find...", "How does...work" → use `explorer`
+- "Analyze...", "Review...", "Check for issues" → use `code_analyzer`
+- "Write tests for...", "Add tests..." → use `tester`
+- "Refactor...", "Clean up...", "Improve structure" → use `refactorer`
+- "Document...", "Add docs..." → use `documenter`
+
+| Kind | Trigger Phrases | Tools Available |
+|------|-----------------|-----------------|
+| `explorer` | "where is", "find", "how does", "show me", "what files" | read-only: glob, grep, read_file, bash |
+| `code_analyzer` | "analyze", "review", "check", "issues", "patterns" | read-only: all search tools |
+| `tester` | "write tests", "add tests", "test coverage" | all tools including write/edit |
+| `refactorer` | "refactor", "clean up", "simplify", "extract" | all tools including write/edit |
+| `documenter` | "document", "add docs", "write comments" | all tools including write/edit |
+
+**Example - CORRECT usage:**
+```
+User: "Where is the config parsing code?"
+→ Call: subagent(kind="explorer", task="Find where config parsing is implemented")
+```
+
+**DO use subagents when:**
+- User asks exploration questions (where, find, how)
+- Task requires deep analysis or review
+- Writing tests, documentation, or doing focused refactoring
+- You need to understand unfamiliar code before making changes
+
+**DON'T use subagents when:**
+- Task is simple (1-2 tool calls like "read this file")
+- You're in the middle of an edit that needs continuity
+- You already know exactly what to do
 
 ### Execution Rules
 
@@ -188,6 +223,15 @@ pub const TOOL_USAGE_GUIDELINES: &str = r#"
 ### Tracking
 - `todowrite` - Track multi-step progress. Mark complete immediately.
 - `todoread` - Check current task status.
+
+### Delegation
+- `subagent` - Spawn focused internal agents:
+  - `explorer`: Find code, understand codebase (READ-ONLY, use for "where is X?")
+  - `code_analyzer`: Analyze patterns and issues (READ-ONLY)
+  - `tester`: Write and run tests
+  - `refactorer`: Improve code structure
+  - `documenter`: Generate documentation
+- `orchestrate` - Delegate to external CLIs (Claude, Gemini, Copilot) in isolated git worktrees
 
 ### Output Format (for bash)
 When reporting command results, include:

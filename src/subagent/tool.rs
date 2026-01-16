@@ -71,7 +71,7 @@ impl Tool for SubagentTool {
     }
 
     fn description(&self) -> &str {
-        "Spawn a specialized subagent to handle a focused task autonomously. Use this for complex subtasks that benefit from dedicated attention. Available kinds: code_analyzer (analyzes code, read-only), tester (creates/runs tests), refactorer (improves code structure), documenter (writes documentation), custom (user-defined role)."
+        "Spawn a specialized subagent to handle a focused task autonomously. Use this for complex subtasks that benefit from dedicated attention. Available kinds: code_analyzer (analyzes code, read-only), tester (creates/runs tests), refactorer (improves code structure), documenter (writes documentation), explorer (navigates codebase, finds code locations, read-only), custom (user-defined role)."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -80,8 +80,8 @@ impl Tool for SubagentTool {
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["code_analyzer", "tester", "refactorer", "documenter", "custom"],
-                    "description": "Type of subagent to spawn. code_analyzer: read-only analysis, tester: creates/runs tests, refactorer: improves code, documenter: writes docs, custom: user-defined"
+                    "enum": ["code_analyzer", "tester", "refactorer", "documenter", "explorer", "custom"],
+                    "description": "Type of subagent to spawn. code_analyzer: read-only analysis, tester: creates/runs tests, refactorer: improves code, documenter: writes docs, explorer: codebase exploration (read-only), custom: user-defined"
                 },
                 "task": {
                     "type": "string",
@@ -111,10 +111,11 @@ impl Tool for SubagentTool {
             "tester" => SubagentKind::Tester,
             "refactorer" => SubagentKind::Refactorer,
             "documenter" => SubagentKind::Documenter,
+            "explorer" => SubagentKind::Explorer,
             "custom" => SubagentKind::Custom,
             _ => {
                 return Err(anyhow::anyhow!(
-                    "Invalid subagent kind: {}. Valid kinds: code_analyzer, tester, refactorer, documenter, custom",
+                    "Invalid subagent kind: {}. Valid kinds: code_analyzer, tester, refactorer, documenter, explorer, custom",
                     params.kind
                 ));
             }

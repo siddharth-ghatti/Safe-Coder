@@ -930,6 +930,37 @@ impl ShellTuiRunner {
                 }
             }
 
+            // Process queued messages when AI is not thinking
+            if !self.app.ai_thinking && self.app.has_queued_messages() {
+                if let Some(queued_msg) = self.app.pop_queued_message() {
+                    // Show that we're processing the queued message
+                    let remaining = self.app.queued_message_count();
+                    let prompt = self.app.current_prompt();
+                    let block = CommandBlock::system(
+                        format!(
+                            "▶ Processing queued message{}",
+                            if remaining > 0 {
+                                format!(" ({} more in queue)", remaining)
+                            } else {
+                                String::new()
+                            }
+                        ),
+                        prompt,
+                    );
+                    self.app.add_block(block);
+
+                    // Execute the queued message
+                    if let Err(e) = self
+                        .execute_input(&queued_msg, cmd_tx.clone(), ai_tx.clone(), orch_tx.clone())
+                        .await
+                    {
+                        let prompt = self.app.current_prompt();
+                        let block = CommandBlock::system(format!("Error: {}", e), prompt);
+                        self.app.add_block(block);
+                    }
+                }
+            }
+
             // Tick animations
             self.app.tick();
         }
@@ -1406,8 +1437,21 @@ impl ShellTuiRunner {
                 } else {
                     let input = self.app.input_submit();
                     if !input.is_empty() {
-                        self.execute_input(&input, cmd_tx.clone(), ai_tx.clone(), orch_tx.clone())
-                            .await?;
+                        // If AI is currently thinking, queue the message for later
+                        if self.app.ai_thinking {
+                            self.app.queue_message(input.clone());
+                            // Show feedback that message was queued
+                            let prompt = self.app.current_prompt();
+                            let queued_count = self.app.queued_message_count();
+                            let block = CommandBlock::system(
+                                format!("📋 Message queued (#{}) - will process after current request", queued_count),
+                                prompt,
+                            );
+                            self.app.add_block(block);
+                        } else {
+                            self.execute_input(&input, cmd_tx.clone(), ai_tx.clone(), orch_tx.clone())
+                                .await?;
+                        }
                     }
                 }
             }
@@ -1448,6 +1492,12 @@ impl ShellTuiRunner {
     ) -> Result<()> {
         let input = input.trim();
         let input_lower = input.to_lowercase();
+
+        // Dismiss logo popup on any input except /about (which toggles it)
+        if self.app.logo_visible && input_lower != "/about" {
+            self.app.hide_logo_popup();
+            return Ok(());
+        }
 
         // Check for plan approval commands when a plan is pending
         if self.app.plan_approval_tx.is_some() || self.app.pending_approval_plan.is_some() {
@@ -2115,6 +2165,15 @@ Keyboard:
                         );
                         self.app.add_block(block);
                     }
+                }
+            }
+
+            SlashCommand::About => {
+                // Toggle logo popup visibility
+                if self.app.logo_visible {
+                    self.app.hide_logo_popup();
+                } else {
+                    self.app.show_logo_popup();
                 }
             }
         }
@@ -3169,6 +3228,31 @@ async fn forward_server_events_to_ai_updates(
                     priority: t.priority,
                 }).collect(),
             },
+            // Handle orchestration events (external CLI streaming)
+            ServerEvent::OrchestrateStarted { id, worker, task } => {
+                tracing::info!("[TUI] OrchestrateStarted: id={}, worker={}", id, worker);
+                AiUpdate::ToolStart {
+                    block_id: block_id.clone(),
+                    tool_name: format!("orchestrate:{}", id),
+                    description: format!("[{}] {}", worker, task),
+                }
+            }
+            ServerEvent::OrchestrateOutput { id, line } => {
+                tracing::debug!("[TUI] OrchestrateOutput: id={}, line len={}", id, line.len());
+                AiUpdate::BashOutputLine {
+                    block_id: block_id.clone(),
+                    tool_name: format!("orchestrate:{}", id),
+                    line,
+                }
+            }
+            ServerEvent::OrchestrateCompleted { id, success, .. } => {
+                tracing::info!("[TUI] OrchestrateCompleted: id={}, success={}", id, success);
+                AiUpdate::ToolComplete {
+                    block_id: block_id.clone(),
+                    tool_name: format!("orchestrate:{}", id),
+                    success,
+                }
+            }
         };
         let _ = ai_tx.send(update);
     }
