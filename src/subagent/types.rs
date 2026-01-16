@@ -17,6 +17,8 @@ pub enum SubagentKind {
     Refactorer,
     /// Generates and updates documentation
     Documenter,
+    /// Explores codebase structure, finds patterns, answers "where is X" questions (read-only)
+    Explorer,
     /// Custom subagent with user-defined role
     Custom,
 }
@@ -49,6 +51,16 @@ impl SubagentKind {
                 "edit_file",
                 "bash",
             ],
+            // Explorer is read-only, optimized for codebase navigation and discovery
+            SubagentKind::Explorer => &[
+                "read_file",
+                "list",
+                "glob",
+                "grep",
+                "bash",
+                "ast_grep",
+                "code_search",
+            ],
             // Custom gets basic tools plus bash for flexibility
             SubagentKind::Custom => &["read_file", "list", "glob", "grep", "bash"],
         }
@@ -66,6 +78,7 @@ impl SubagentKind {
             SubagentKind::Tester => "Tester",
             SubagentKind::Refactorer => "Refactorer",
             SubagentKind::Documenter => "Documenter",
+            SubagentKind::Explorer => "Explorer",
             SubagentKind::Custom => "Custom Agent",
         }
     }
@@ -77,6 +90,7 @@ impl SubagentKind {
             SubagentKind::Tester => "🧪",
             SubagentKind::Refactorer => "🔧",
             SubagentKind::Documenter => "📝",
+            SubagentKind::Explorer => "🔭",
             SubagentKind::Custom => "🤖",
         }
     }

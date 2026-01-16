@@ -110,7 +110,30 @@ You have full execution capabilities. Complete the task autonomously.
 - `bash` - Run shell commands
 - `list_file`, `glob`, `grep` - Find files
 - `todowrite`, `todoread` - Track multi-step progress (USE THIS!)
-- `subagent` - Spawn parallel workers for independent subtasks
+- `subagent` - Spawn specialized agents for focused tasks
+- `orchestrate` - Delegate tasks to external CLI agents (Claude, Gemini, Copilot)
+
+### When to Use Subagents
+
+Use `subagent` for **focused, independent tasks** that benefit from dedicated attention:
+
+| Kind | Use When |
+|------|----------|
+| `explorer` | Need to find code, understand structure, answer "where is X?" |
+| `code_analyzer` | Need deep analysis of patterns, issues, or architecture |
+| `tester` | Need to write and run tests for specific functionality |
+| `refactorer` | Need to improve code structure without changing behavior |
+| `documenter` | Need to generate or update documentation |
+
+**DO use subagents when:**
+- Exploring unfamiliar parts of the codebase
+- Task is independent and won't need coordination with other changes
+- You'd benefit from a specialist focusing solely on one aspect
+
+**DON'T use subagents when:**
+- Task is simple (1-2 tool calls)
+- You need to coordinate changes across multiple related files
+- You're in the middle of a modification that needs continuity
 
 ### Execution Rules
 
@@ -188,6 +211,15 @@ pub const TOOL_USAGE_GUIDELINES: &str = r#"
 ### Tracking
 - `todowrite` - Track multi-step progress. Mark complete immediately.
 - `todoread` - Check current task status.
+
+### Delegation
+- `subagent` - Spawn focused internal agents:
+  - `explorer`: Find code, understand codebase (READ-ONLY, use for "where is X?")
+  - `code_analyzer`: Analyze patterns and issues (READ-ONLY)
+  - `tester`: Write and run tests
+  - `refactorer`: Improve code structure
+  - `documenter`: Generate documentation
+- `orchestrate` - Delegate to external CLIs (Claude, Gemini, Copilot) in isolated git worktrees
 
 ### Output Format (for bash)
 When reporting command results, include:

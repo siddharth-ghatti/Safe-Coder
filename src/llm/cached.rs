@@ -190,7 +190,7 @@ impl LlmClient for CachingLlmClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::{ContentBlock, Message, Role};
+    use crate::llm::{ContentBlock, Message, Role, TokenUsage};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A mock LLM client for testing

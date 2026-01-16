@@ -45,6 +45,9 @@ pub struct SubagentConfig {
     /// Model for Documenter subagent (documentation)
     #[serde(default)]
     pub documenter: Option<SubagentModelConfig>,
+    /// Model for Explorer subagent (codebase exploration)
+    #[serde(default)]
+    pub explorer: Option<SubagentModelConfig>,
     /// Model for Custom subagent
     #[serde(default)]
     pub custom: Option<SubagentModelConfig>,
@@ -57,6 +60,7 @@ impl Default for SubagentConfig {
             tester: None,
             refactorer: None,
             documenter: None,
+            explorer: None,
             custom: None,
         }
     }
@@ -621,6 +625,7 @@ impl Config {
             "tester" => self.subagents.tester.as_ref(),
             "refactorer" => self.subagents.refactorer.as_ref(),
             "documenter" => self.subagents.documenter.as_ref(),
+            "explorer" => self.subagents.explorer.as_ref(),
             "custom" => self.subagents.custom.as_ref(),
             _ => None,
         }

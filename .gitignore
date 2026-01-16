@@ -21,3 +21,7 @@ config.toml
 
 .safe-coder-checkpoints/
 .safe-coder-workspaces/*
+
+# Desktop app
+desktop/node_modules/*
+desktop/dist/*

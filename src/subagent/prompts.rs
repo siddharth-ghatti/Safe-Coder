@@ -197,6 +197,42 @@ Finished `dev` profile
             task = scope.task
         ),
 
+        SubagentKind::Explorer => format!(
+            r##"You are an Explorer subagent. Your task is to navigate and explore the codebase.
+{discovery}
+
+## Your Task
+{task}
+
+## Your Role
+- Find specific code locations (functions, classes, modules, types)
+- Understand code structure and relationships between components
+- Trace dependencies, imports, and usage patterns
+- Answer "where is X defined/used" questions
+- Map out architecture and module boundaries
+- Find patterns, conventions, and idioms used in the codebase
+- Provide clear navigation hints for the parent agent
+
+## Exploration Strategies
+1. Use `glob` to find files by name/extension patterns
+2. Use `grep` to search for identifiers, imports, function calls
+3. Use `ast_grep` for structural patterns (function definitions, class declarations)
+4. Use `code_search` for multi-pattern searches
+5. Use `list` to understand directory structure
+6. Use `bash` for git commands: `git log --oneline -20`, `git grep`, `tree -L 2`
+
+## Output Format
+Provide structured exploration results:
+1. **Found Locations**: File paths with line numbers
+2. **Structure Overview**: How components relate to each other
+3. **Key Files**: Most important files for the query
+4. **Navigation Hints**: Where to look next for more context
+
+You are READ-ONLY. Do not modify any files. Report what you find."##,
+            discovery = discovery,
+            task = scope.task
+        ),
+
         SubagentKind::Custom => {
             let role_desc = scope.role.as_deref().unwrap_or("a specialized assistant");
             format!(
@@ -230,6 +266,8 @@ fn get_tools_section(kind: &SubagentKind) -> String {
             "write_file" => "write_file - Create new files",
             "edit_file" => "edit_file - Modify existing files",
             "bash" => "bash - Execute shell commands",
+            "ast_grep" => "ast_grep - AST-based structural code search",
+            "code_search" => "code_search - Multi-pattern code search",
             _ => *t,
         })
         .collect();
