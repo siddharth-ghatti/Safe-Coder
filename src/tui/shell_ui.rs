@@ -2486,6 +2486,7 @@ fn draw_model_picker_popup(f: &mut Frame, app: &ShellTuiApp, area: Rect) {
         crate::config::LlmProvider::GitHubCopilot => "GitHub Copilot",
         crate::config::LlmProvider::OpenRouter => "OpenRouter",
         crate::config::LlmProvider::Ollama => "Ollama",
+        crate::config::LlmProvider::OpenAIGeneric => "OpenAI-Generic",
     };
 
     let block = Block::default()

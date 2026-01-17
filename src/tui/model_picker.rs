@@ -199,5 +199,9 @@ fn get_models_for_provider(provider: &LlmProvider) -> Vec<(&'static str, &'stati
             ("DeepSeek Coder", "deepseek-coder", Some("Code specialist")),
             ("Qwen 2.5 Coder", "qwen2.5-coder", Some("Alibaba's coder")),
         ],
+        LlmProvider::OpenAIGeneric => vec![
+            ("Default", "default", Some("Server default model")),
+            ("Custom", "custom", Some("Enter custom model name")),
+        ],
     }
 }

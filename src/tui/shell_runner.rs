@@ -2002,6 +2002,9 @@ Keyboard:
                     crate::config::LlmProvider::Ollama => {
                         "Ollama Models:\n\nRun `ollama list` to see installed models.\nUse /model <name> to switch.".to_string()
                     }
+                    crate::config::LlmProvider::OpenAIGeneric => {
+                        "OpenAI-Generic Models:\n\nThis provider uses a custom OpenAI-compatible API.\nAvailable models depend on your server configuration.\nUse /model <name> to switch.".to_string()
+                    }
                 };
 
                 let block = CommandBlock::system(output, prompt);
@@ -2020,6 +2023,7 @@ Keyboard:
                             "copilot" | "github-copilot" | "github" => Some((crate::config::LlmProvider::GitHubCopilot, "gpt-4o")),
                             "openrouter" => Some((crate::config::LlmProvider::OpenRouter, "anthropic/claude-3.5-sonnet")),
                             "ollama" => Some((crate::config::LlmProvider::Ollama, "llama3")),
+                            "openai-generic" | "generic" => Some((crate::config::LlmProvider::OpenAIGeneric, "default")),
                             _ => None,
                         };
 
@@ -2045,6 +2049,7 @@ Keyboard:
                                 crate::config::LlmProvider::GitHubCopilot => "GitHub Copilot",
                                 crate::config::LlmProvider::OpenRouter => "OpenRouter",
                                 crate::config::LlmProvider::Ollama => "Ollama",
+                                crate::config::LlmProvider::OpenAIGeneric => "OpenAI-Generic",
                             };
 
                             let block = CommandBlock::system(
@@ -2071,6 +2076,7 @@ Keyboard:
                             crate::config::LlmProvider::GitHubCopilot => "github-copilot",
                             crate::config::LlmProvider::OpenRouter => "openrouter",
                             crate::config::LlmProvider::Ollama => "ollama",
+                            crate::config::LlmProvider::OpenAIGeneric => "openai-generic",
                         };
                         let block = CommandBlock::system(
                             format!("Current provider: {}\nCurrent model: {}\n\nUse /provider <name> to switch.\nAvailable: anthropic, openai, copilot, openrouter, ollama", current, self.config.llm.model),
