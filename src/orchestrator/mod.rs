@@ -4,18 +4,20 @@
 //! high-level planner that delegates tasks to specialized CLI agents (Claude Code,
 //! Gemini CLI) running in isolated git workspaces.
 
-// TODO: Fix type mismatches in these modules
-// pub mod live_orchestration;
+pub mod live_orchestration;
 pub mod planner;
-// pub mod self_orchestration;
-// pub mod streaming_worker;
+pub mod self_orchestration;
+pub mod streaming_worker;
 pub mod task;
 pub mod worker;
 pub mod workspace;
 
+pub use live_orchestration::{LiveOrchestrationManager, OrchestratorEvent};
 pub use planner::Planner;
+pub use self_orchestration::SelfOrchestrationManager;
+pub use streaming_worker::{StreamingConfig, StreamingWorker, StreamingWorkerStatus, WorkerStreamEvent};
 pub use task::{Task, TaskPlan, TaskStatus};
-pub use worker::{Worker, WorkerEvent, WorkerEventSender, WorkerKind, WorkerStatus};
+pub use worker::{Worker, WorkerEvent, WorkerEventSender, WorkerKind, WorkerState, WorkerStatus};
 pub use workspace::WorkspaceManager;
 
 use anyhow::Result;

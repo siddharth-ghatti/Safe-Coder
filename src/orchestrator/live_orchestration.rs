@@ -13,8 +13,9 @@ use tokio::time::{Duration, Instant};
 use crate::utils::truncate_str;
 
 use crate::orchestrator::{
-    streaming_worker::{StreamingWorker, WorkerStreamEvent, StreamingConfig, WorkerKind},
-    Task, TaskPlan, WorkerStatus,
+    streaming_worker::{StreamingWorker, StreamingWorkerStatus, WorkerStreamEvent, StreamingConfig},
+    worker::WorkerKind,
+    Task, TaskPlan, WorkerState,
 };
 
 /// Live orchestration manager with real-time streaming
@@ -329,7 +330,7 @@ impl LiveOrchestrationManager {
     }
 
     /// Get status of all workers
-    pub async fn get_worker_statuses(&self) -> Vec<WorkerStatus> {
+    pub async fn get_worker_statuses(&self) -> Vec<StreamingWorkerStatus> {
         let workers = self.workers.read().await;
         let mut statuses = Vec::new();
 
@@ -448,15 +449,15 @@ impl LiveDisplayManager {
             let status = worker_guard.status();
 
             match status.state {
-                crate::orchestrator::streaming_worker::WorkerState::Running => {
+                WorkerState::Running => {
                     active_count += 1;
                     self.print_worker_status(worker_id, &status, "🔄").await;
                 }
-                crate::orchestrator::streaming_worker::WorkerState::Completed => {
+                WorkerState::Completed => {
                     completed_count += 1;
                     self.print_worker_status(worker_id, &status, "✅").await;
                 }
-                crate::orchestrator::streaming_worker::WorkerState::Failed(_) => {
+                WorkerState::Failed(_) => {
                     failed_count += 1;
                     self.print_worker_status(worker_id, &status, "❌").await;
                 }
@@ -477,7 +478,7 @@ impl LiveDisplayManager {
         }
     }
 
-    async fn print_worker_status(&self, worker_id: &str, status: &WorkerStatus, icon: &str) {
+    async fn print_worker_status(&self, worker_id: &str, status: &StreamingWorkerStatus, icon: &str) {
         let elapsed = status.started_at
             .map(|start| format!("{:.1}s", Instant::now().duration_since(start).as_secs_f64()))
             .unwrap_or_else(|| "-".to_string());
