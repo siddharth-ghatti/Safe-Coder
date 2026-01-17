@@ -10,6 +10,7 @@ import type {
   ServerEvent,
   DoomLoopPrompt,
   TodoItem,
+  OrchestrationTask,
 } from "../types";
 import * as api from "../api/client";
 
@@ -50,6 +51,9 @@ interface SessionState {
   // Todo list
   todoList: TodoItem[];
 
+  // Orchestration tasks
+  orchestrationTasks: OrchestrationTask[];
+
   // Actions
   loadSessions: () => Promise<void>;
   createSession: (projectPath: string) => Promise<Session>;
@@ -88,6 +92,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   agentMode: "build",
   doomLoopPrompt: null,
   todoList: [],
+  orchestrationTasks: [],
 
   // Load all sessions
   loadSessions: async () => {
@@ -128,6 +133,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         fileChanges: [],
         streamingMessage: null,
         thinkingMessage: null,
+        orchestrationTasks: [],
         tokenUsage: {
           inputTokens: 0,
           outputTokens: 0,
@@ -617,6 +623,54 @@ export const useSessionStore = create<SessionState>((set, get) => ({
             thinkingMessage: null,
             isProcessing: false,
           };
+        });
+        break;
+
+      case "OrchestrateStarted":
+        // Start tracking a new orchestration task
+        set((state) => ({
+          orchestrationTasks: [
+            ...state.orchestrationTasks,
+            {
+              id: event.id,
+              worker: event.worker,
+              task: event.task,
+              output: "",
+              startTime: Date.now(),
+            },
+          ],
+        }));
+        break;
+
+      case "OrchestrateOutput":
+        // Append output line to the orchestration task
+        set((state) => {
+          const taskIndex = state.orchestrationTasks.findIndex(t => t.id === event.id);
+          if (taskIndex === -1) return state;
+
+          const tasks = [...state.orchestrationTasks];
+          tasks[taskIndex] = {
+            ...tasks[taskIndex],
+            output: tasks[taskIndex].output + event.line + "\n",
+          };
+          return { orchestrationTasks: tasks };
+        });
+        break;
+
+      case "OrchestrateCompleted":
+        // Mark orchestration task as completed
+        set((state) => {
+          const taskIndex = state.orchestrationTasks.findIndex(t => t.id === event.id);
+          if (taskIndex === -1) return state;
+
+          const tasks = [...state.orchestrationTasks];
+          tasks[taskIndex] = {
+            ...tasks[taskIndex],
+            success: event.success,
+            output: tasks[taskIndex].output + (event.output || ""),
+            endTime: Date.now(),
+          };
+          return { orchestrationTasks: tasks };
         });
         break;
 

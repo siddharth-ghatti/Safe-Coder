@@ -63,6 +63,9 @@ export type ServerEvent =
   | { type: "SubagentStarted"; id: string; kind: string; task: string }
   | { type: "SubagentProgress"; id: string; message: string }
   | { type: "SubagentCompleted"; id: string; success: boolean; summary: string }
+  | { type: "OrchestrateStarted"; id: string; worker: string; task: string }
+  | { type: "OrchestrateOutput"; id: string; line: string }
+  | { type: "OrchestrateCompleted"; id: string; success: boolean; output: string }
   | { type: "PlanCreated"; title: string; steps: PlanStep[] }
   | { type: "PlanStepStarted"; plan_id: string; step_id: string }
   | { type: "PlanStepCompleted"; plan_id: string; step_id: string; success: boolean }
@@ -132,4 +135,14 @@ export interface StreamingMessage {
 export interface DoomLoopPrompt {
   id: string;
   message: string;
+}
+
+export interface OrchestrationTask {
+  id: string;
+  worker: string;
+  task: string;
+  output: string;
+  success?: boolean;
+  startTime: number;
+  endTime?: number;
 }

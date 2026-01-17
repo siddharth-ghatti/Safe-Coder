@@ -4,7 +4,6 @@
 //! buffering control and live progress updates.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
@@ -12,30 +11,12 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
+use crate::orchestrator::worker::{WorkerKind, WorkerState};
 use crate::orchestrator::Task;
 
-/// Types of CLI workers available
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum WorkerKind {
-    /// Claude Code CLI (https://docs.anthropic.com/en/docs/claude-code)
-    ClaudeCode,
-    /// Gemini CLI (https://github.com/google/gemini-cli)
-    GeminiCli,
-    /// Safe-Coder itself (this application)
-    SafeCoder,
-    /// GitHub Copilot CLI (gh copilot)
-    GitHubCopilot,
-}
-
-impl Default for WorkerKind {
-    fn default() -> Self {
-        WorkerKind::ClaudeCode
-    }
-}
-
-/// Status of a worker
+/// Status of a streaming worker with additional streaming-specific fields
 #[derive(Debug, Clone)]
-pub struct WorkerStatus {
+pub struct StreamingWorkerStatus {
     /// Task being executed
     pub task_id: String,
     /// Worker type
@@ -52,21 +33,6 @@ pub struct WorkerStatus {
     pub lines_processed: usize,
     /// Execution start time
     pub started_at: Option<Instant>,
-}
-
-/// State of a worker
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkerState {
-    /// Worker is initializing
-    Initializing,
-    /// Worker is running
-    Running,
-    /// Worker completed successfully
-    Completed,
-    /// Worker failed
-    Failed(String),
-    /// Worker was cancelled
-    Cancelled,
 }
 
 /// Real-time streaming events from workers
@@ -352,11 +318,12 @@ impl StreamingWorker {
     async fn run_command_streaming(&mut self, mut cmd: Command) -> Result<String> {
         let mut child = cmd.spawn().context("Failed to spawn CLI process")?;
         let child_id = child.id();
-        self.process_handle = Some(child);
 
-        // Take stdout and stderr for streaming
+        // Take stdout and stderr for streaming before storing child
         let stdout = child.stdout.take().context("Failed to capture stdout")?;
         let stderr = child.stderr.take().context("Failed to capture stderr")?;
+
+        self.process_handle = Some(child);
 
         let mut stdout_reader = BufReader::with_capacity(self.streaming_config.buffer_size, stdout);
         let mut stderr_reader = BufReader::with_capacity(self.streaming_config.buffer_size, stderr);
@@ -506,9 +473,9 @@ impl StreamingWorker {
     }
 
     /// Flush any remaining partial lines when process completes
-    async fn flush_remaining_output(
+    async fn flush_remaining_output<R: tokio::io::AsyncRead + Unpin>(
         &mut self,
-        reader: &mut BufReader<tokio::process::ChildStdout>,
+        reader: &mut BufReader<R>,
         buffer: &mut Vec<u8>,
         is_stderr: bool,
         combined_output: &mut String,
@@ -631,8 +598,8 @@ impl StreamingWorker {
     }
 
     /// Get current status
-    pub fn status(&self) -> WorkerStatus {
-        WorkerStatus {
+    pub fn status(&self) -> StreamingWorkerStatus {
+        StreamingWorkerStatus {
             task_id: self.task.id.clone(),
             kind: self.kind.clone(),
             state: self.state.clone(),
