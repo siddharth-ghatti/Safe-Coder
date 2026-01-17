@@ -517,6 +517,9 @@ pub enum LlmProvider {
     GitHubCopilot,
     #[serde(rename = "openrouter")]
     OpenRouter,
+    /// Generic OpenAI-compatible API (vLLM, LocalAI, LiteLLM, TGI, etc.)
+    #[serde(rename = "openai-generic")]
+    OpenAIGeneric,
 }
 
 impl Config {
@@ -571,6 +574,7 @@ impl Config {
                 LlmProvider::OpenRouter => std::env::var("OPENROUTER_API_KEY").ok(),
                 LlmProvider::GitHubCopilot => std::env::var("GITHUB_COPILOT_TOKEN").ok(),
                 LlmProvider::Ollama => None, // Ollama doesn't need an API key
+                LlmProvider::OpenAIGeneric => std::env::var("OPENAI_GENERIC_API_KEY").ok(),
             };
         }
     }
@@ -749,6 +753,7 @@ impl SubagentModelConfig {
             LlmProvider::OpenRouter => std::env::var("OPENROUTER_API_KEY").ok(),
             LlmProvider::GitHubCopilot => std::env::var("GITHUB_COPILOT_TOKEN").ok(),
             LlmProvider::Ollama => None, // Ollama doesn't need API key
+            LlmProvider::OpenAIGeneric => std::env::var("OPENAI_GENERIC_API_KEY").ok(),
         }
     }
 }

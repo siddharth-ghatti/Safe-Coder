@@ -12,6 +12,7 @@ pub mod copilot;
 pub mod ollama;
 pub mod openai;
 pub mod openai_compat;
+pub mod openai_generic;
 pub mod openrouter;
 pub mod models;
 
@@ -360,6 +361,23 @@ async fn create_provider_client(config: &crate::config::Config) -> Result<Box<dy
                 config.llm.max_tokens,
             )))
         }
+        LlmProvider::OpenAIGeneric => {
+            let base_url = config.llm.base_url.clone().context(
+                "OpenAI-generic requires a base_url to be set in configuration",
+            )?;
+            let api_key = config.get_auth_token().ok(); // API key is optional
+
+            tracing::info!(
+                "🔗 Using generic OpenAI-compatible API at {}",
+                base_url
+            );
+            Ok(Box::new(openai_generic::GenericOpenAiClient::new(
+                base_url,
+                config.llm.model.clone(),
+                config.llm.max_tokens,
+                api_key,
+            )))
+        }
     }
 }
 
@@ -452,6 +470,14 @@ pub async fn create_client_from_subagent_config(
                 subagent_config.model.clone(),
                 subagent_config.max_tokens,
             )))
+        }
+        LlmProvider::OpenAIGeneric => {
+            // For subagents, we need base_url from the subagent config
+            // This requires the subagent config to have a base_url field
+            anyhow::bail!(
+                "OpenAI-generic provider is not yet supported for subagents. \
+                 Please use a different provider for subagent configuration."
+            )
         }
     }
 }

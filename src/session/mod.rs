@@ -2707,6 +2707,9 @@ impl Session {
             LlmProvider::Ollama => {
                 Ok("📋 Ollama Models:\n\nRun `ollama list` to see installed models.\n\nUse /model <name> to switch models.".to_string())
             }
+            LlmProvider::OpenAIGeneric => {
+                Ok("📋 OpenAI-Generic Models:\n\nThis provider uses a custom OpenAI-compatible API endpoint.\nAvailable models depend on your server configuration.\n\nUse /model <name> to switch models.".to_string())
+            }
         }
     }
 
